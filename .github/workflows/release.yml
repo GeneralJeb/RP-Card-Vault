@@ -1,0 +1,35 @@
+# When main gets a version that has no release yet (package.json "version"),
+# this tags it v<version> and publishes a GitHub release whose notes are that
+# version's section of CHANGELOG.md. Merging dev into main is the whole
+# release process; a merge that doesn't change the version releases nothing.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release this version if it is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION is already released."
+            exit 0
+          fi
+          awk -v v="## $VERSION" '$0 == v { f = 1; next } /^## / { f = 0 } f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no '## $VERSION' section." >&2
+            exit 1
+          fi
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "RP Card Vault $VERSION" --notes-file notes.md

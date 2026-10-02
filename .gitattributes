@@ -1,0 +1,14 @@
+# Everything is text; normalise to LF in the repo by default.
+* text=auto eol=lf
+
+# Windows launchers must stay CRLF (test/launchers.test.js checks).
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.ps1 text eol=crlf
+HOW[[:space:]]TO[[:space:]]RUN.txt text eol=crlf
+
+# Binary. lib/ holds third-party files whose SRI hashes the page pins, so git
+# must never touch their bytes.
+lib/** -text -diff linguist-vendored
+*.png binary
+*.ico binary

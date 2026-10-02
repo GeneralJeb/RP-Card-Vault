@@ -1,0 +1,20 @@
+
+# Test-only dependencies
+node_modules/
+
+# Local vault data never belongs in the repo
+_vault backups/
+agent-workspace/
+
+# Your own settings for this copy (port, shortcut label): see HOW TO RUN.txt
+vault.local
+
+# Local notes and tool settings
+dev-notes/
+.claude/
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+*.log

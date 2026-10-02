@@ -1,0 +1,129 @@
+RP Card Vault - how to run it
+=============================
+
+Keep every file of the vault together in one folder.
+
+
+START IT
+--------
+
+  Start RP Card Vault.bat     Double-click this. It stops any vault server
+                              already running on this copy's port and starts a
+                              fresh one, so you always get the serve.js that is
+                              on disk right now. A console window stays open
+                              showing its output.
+
+  RP Card Vault.vbs           Same thing with no console window. This is what
+                              the desktop and Start Menu shortcuts run.
+
+  Open in Browser Tab.vbs     As above, but an ordinary browser tab rather than
+                              a standalone app window.
+
+  Stop RP Card Vault.bat      Shuts the server down. Start calls this for you,
+                              so you only need it to turn the vault off.
+
+  Create Shortcut.bat         Makes Desktop and Start Menu shortcuts, so you
+                              can pin the vault to the taskbar.
+
+Then leave it running and use the browser window it opens. Ctrl+C in the
+console window (or closing it) stops that server.
+
+No Node on this computer (a USB drive, say)? Put a portable Node with the
+vault: download the Windows "zip" build from https://nodejs.org and unpack
+it into a folder named node, so that node\node.exe sits next to these
+launchers. They use it before looking for an installed one.
+
+The vault runs at:
+
+    http://127.0.0.1:8790/RP_Card_Vault.html
+
+
+WHICH serve.js IS ACTUALLY RUNNING?
+-----------------------------------
+
+Open this in a browser:
+
+    http://127.0.0.1:8790/__vault/status
+
+It reports a build number, e.g. "build":8. The AI panel expects a particular
+build and says so plainly if the server answering it is older.
+
+This matters because "RP Card Vault.vbs" runs node in a HIDDEN window. Editing
+serve.js and reloading the page is not enough - the old process keeps serving
+until it is replaced, and nothing in the browser would otherwise tell you.
+
+"Start RP Card Vault.bat" handles it: the new server asks the running one to
+stand down over HTTP, then takes the port. If the running copy is too old to
+know about that, or has wedged, run "Stop RP Card Vault.bat" first.
+
+Editing RP_Card_Vault.html needs no restart, only a refresh: the page is read
+from disk on every request. Only serve.js is held in memory.
+
+
+DO NOT DOUBLE-CLICK serve.js
+----------------------------
+
+Windows associates .js files with Windows Script Host, not with Node. WSH reads
+serve.js as JScript - an old dialect with no `const`, no arrow functions and no
+async - and gives up on the first line of real code:
+
+    Windows Script Host
+    Error:  Syntax error
+    Code:   800A03EA
+    Source: Microsoft JScript compilation error
+
+Nothing is wrong with serve.js. The wrong program opened it. The same applies
+to sw.js and to anything under test\.
+
+The dialog tells you which engine complained. "Microsoft JScript compilation
+error" means this. "Microsoft VBScript compilation error" means an actual
+problem in one of the .vbs launchers.
+
+If you want to run it by hand, use a terminal in this folder:
+
+    node serve.js 8790
+
+
+RUNNING MORE THAN ONE COPY: vault.local
+---------------------------------------
+
+Browser storage is keyed to the address, port included. Each port is therefore
+a separate vault, with:
+
+  - its own database of tags, notes, flags and edits
+  - its own folder permissions, granted by you in that copy only
+
+To run a second copy (a test copy next to your everyday one, say), give it its
+own port. Make a plain text file named vault.local in that copy's folder:
+
+    port=8791
+    label=test
+
+Every launcher in that folder reads it. The label goes on the shortcut names,
+"RP Card Vault (test)", so the second copy's shortcuts don't replace the
+first's. Never point two copies at the same port: the second would pick up the
+first one's saved folder permissions.
+
+
+UPDATING
+--------
+
+Copy the new files over the old ones (or into a new folder) and start it as
+before: at least RP_Card_Vault.html, serve.js and the lib folder. Your cards,
+agent-workspace\ and vault.local are never part of a download. CHANGELOG.md
+says what changed; Settings shows the version you are running.
+
+Your tags, notes and edits are kept by the browser under the vault's
+address, port included, so start it on the same port as before (keep your
+vault.local if you have one). If the vault opens EMPTY after an update, it
+is running on a different port: your data is still there under the old one.
+Settings > Export vault data before updating gives you a backup either way.
+
+
+RUNNING THE TESTS
+-----------------
+
+    npm install
+    npm test
+
+See docs\development.md for more.
