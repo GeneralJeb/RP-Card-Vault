@@ -4,7 +4,7 @@ Thanks for taking an interest. A few things to know first.
 
 ## This is a hobby project
 
-RP Card Vault is built and maintained by one person in their spare time, mostly with Claude doing the coding. There's no schedule, no support team and no promises:
+RP Card Vault is built and maintained by one person (at the time a jobless bozo) in their spare time, mostly with Claude doing the coding. There's no schedule, no support team and no promises:
 
 - **Replies are best effort.** Issues and pull requests are read, but it may take a while, and some won't get a fix.
 - **It's free, and stays free.** No paid features, ads or sponsorships. That's also a condition of the Lumiverse license the vault's Lumiverse support relies on.
