@@ -8,6 +8,19 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.2.1
+
+- **Fixed: hundreds of duplicates with "?" for their folder.** Adding a
+  folder and then, while it was still being read, the folder above it (or
+  using Fix it on the nested-folder warning) let the first scan finish
+  anyway: it saved every card a second time and wrote the replaced folder
+  back. A scan now checks its folder still exists before saving anything,
+  and removing a folder clears its records from the database itself.
+- **Leftovers are cleaned up.** When the vault opens, index entries from a
+  folder that's no longer there are removed, with a notice saying how many.
+  No files are touched, and tags and notes are kept (they belong to the
+  card's content, which the real copy still has).
+
 ## 1.2.0
 
 - **Choose the sort the vault opens with.** Settings → Display: any sort,

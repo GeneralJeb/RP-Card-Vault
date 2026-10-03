@@ -20,6 +20,7 @@ console.warn = () => {};
 const { mod: V } = loadPureRegion([
   "dbPutMany", "dbPut", "dbDel", "dbGet", "dbKeys", "STORE_BODIES", "STORE_EDITS", "vaultEditsChannel", "agentPinnedLine",
   "chromiumMajor", "handleCrashVersion", "browserUpdatePage",
+  "orphanCardIds", "dbDelCardsOfRoot", "dbAll", "STORE_CARDS", "STORE_THUMBS",
   "vaultDataFileName", "vaultDataFilesToPrune", "autoBackupDue", "autoBackupTarget", "dirKey", "startupSort",
 ], { indexedDB, IDBKeyRange });
 
@@ -81,6 +82,25 @@ async function main() {
     t.eq(V.handleCrashVersion(""), 0, "an empty user agent is fine");
     t.eq(V.browserUpdatePage("Edge"), "edge://settings/help", "Edge users are sent to Edge's update page");
     t.eq(V.browserUpdatePage("Chrome"), "chrome://settings/help", "Chrome users to Chrome's");
+  }
+
+  console.log("\nindex records left without a folder");
+  {
+    const roots = [{ id: "r1" }, { id: "imp:old-cards" }];
+    const cards = [{ id: "r1:a.png", rootId: "r1" }, { id: "gone:a.png", rootId: "gone" }, { id: "imp:old-cards:b.png", rootId: "imp:old-cards" }, { id: "gone:c.png", rootId: "gone" }];
+    t.eq(V.orphanCardIds(cards, roots), ["gone:a.png", "gone:c.png"], "records whose folder isn't registered are found; imported folders count as registered");
+    t.eq(V.orphanCardIds(cards, []), cards.map((c) => c.id), "with no folders at all, every record is left over");
+
+    // Removing a folder deletes its records from the database itself, including
+    // ones saved after the screen last showed them.
+    const recs = [{ id: "A:1.png", rootId: "A" }, { id: "A:sub/2.png", rootId: "A" }, { id: "B:1.png", rootId: "B" }];
+    await V.dbPutMany(V.STORE_CARDS, recs);
+    await V.dbPutMany(V.STORE_BODIES, recs.map((r) => ({ __key: r.id, __val: { text: r.id } })));
+    const n = await V.dbDelCardsOfRoot("A");
+    const left = (await V.dbAll(V.STORE_CARDS)).map((r) => r.id).filter((id) => /^[AB]:/.test(id)).sort();
+    t.eq([n, left], [2, ["B:1.png"]], "a folder's records are deleted by folder, and only that folder's");
+    t.eq(await V.dbGet(V.STORE_BODIES, "A:1.png"), undefined, "their cached text goes too");
+    t.ok(!!(await V.dbGet(V.STORE_BODIES, "B:1.png")), "while the other folder's stays");
   }
 
   console.log("\nthe sort the grid opens with");
