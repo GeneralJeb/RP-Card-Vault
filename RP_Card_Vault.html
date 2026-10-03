@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.2.1";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -524,6 +524,47 @@ async function dbAll(store) {
       r.onerror   = () => rej(r.error);
     });
   } catch (e) { return []; }
+}
+
+/**
+ * Index records whose folder is no longer registered. They can be left behind
+ * when a folder is removed while a scan of it is still running, and each one
+ * shows up as a duplicate with "?" for its folder.
+ */
+function orphanCardIds(cards, roots) {
+  const known = new Set((roots || []).map((r) => r.id));
+  return (cards || []).filter((c) => c && !known.has(c.rootId)).map((c) => c.id);
+}
+
+/** Drop index records (card, text, thumbnail) by id. Never touches files. */
+async function dbDelCardRecords(ids) {
+  for (const id of ids) {
+    await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
+  }
+}
+
+/** Every index record of a folder, read from the database rather than from
+    what's on screen, so records saved a moment ago are included too. */
+async function dbDelCardsOfRoot(rootId) {
+  const recs = await dbAllByIndex(STORE_CARDS, "rootId", rootId);
+  await dbDelCardRecords(recs.map((c) => c.id));
+  return recs.length;
+}
+
+/**
+ * Whether a key is in a store, without reading its value. For saved folders
+ * this matters: their records hold folder handles, and reading one back
+ * closes the whole browser on Chromium 153 (see HANDLE_CRASH_VERSIONS).
+ */
+async function dbHas(store, key) {
+  try {
+    const db = await dbOpen();
+    return await new Promise((res, rej) => {
+      const r = db.transaction(store, "readonly").objectStore(store).count(key);
+      r.onsuccess = () => res(r.result > 0);
+      r.onerror   = () => rej(r.error);
+    });
+  } catch (e) { return false; }
 }
 
 /** Every key in a store, or [] if it can't be read. */
@@ -13252,7 +13293,7 @@ function App() {
     if (el) el.setAttribute("data-mounted", "1");
     (async () => {
       setStorage(await probeStorage());
-      const [s, tm, rts, cds0, eds, di, fr, dm, ais, ags, sidNext] = await Promise.all([
+      let [s, tm, rts, cds0, eds, di, fr, dm, ais, ags, sidNext] = await Promise.all([
         loadSettings(), loadTagMeta(), dbAll(STORE_ROOTS), dbAll(STORE_CARDS), dbAll(STORE_EDITS),
         loadDupeIgnore(), loadFolderRoles(), loadDupeMode(), loadAiSettings(), loadAgentSettings(),
         dbGet(STORE_KV, SID_KEY),
@@ -13261,6 +13302,16 @@ function App() {
       setFilters((f) => Object.assign({}, f, { sort: startupSort(s) }));
       setAiSettings(ais); setAgentSettings(ags);
       setRoots(rts.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0)));
+      // Records left behind by a folder that was removed mid-scan: drop them
+      // (index entries only; tags and notes live with the card's content).
+      const orphans = orphanCardIds(cds0, rts);
+      if (orphans.length) {
+        await dbDelCardRecords(orphans);
+        const gone = new Set(orphans);
+        setTimeout(() => showToastRef.current && showToastRef.current("Cleaned up " + fmtNum(orphans.length) +
+          " leftover index entr" + (orphans.length === 1 ? "y" : "ies") + " from a folder that's no longer in the vault. No files were touched; tags and notes are kept.", "cyan"), 800);
+        cds0 = cds0.filter((c) => !gone.has(c.id));
+      }
       // Short ids: cards indexed before they existed are numbered once, in path order.
       let cds = cds0;
       sidNextRef.current = Number(sidNext) || 1;
@@ -13283,6 +13334,7 @@ function App() {
     })();
   }, []);
 
+  const showToastRef = useRef(null);
   const showToast = useCallback((msg, color) => {
     const c = color || "green";
     const isProblem = c === "red" || c === "warm";
@@ -13313,6 +13365,8 @@ function App() {
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
   }, [ready, settings.theme, settings.accentColor]);
+
+  useEffect(() => { showToastRef.current = showToast; }, [showToast]);
 
   const patchSettings = useCallback((p) => {
     setSettings((prev) => { const next = Object.assign({}, prev, p); saveSettings(next); return next; });
@@ -13899,6 +13953,10 @@ function App() {
         setScan({ running: true, done: p.done, total: p.total, label: p.label, rootName: root.name });
       });
       if (res.error) { showToast(res.error, "red"); continue; }
+      // The folder may have been removed (or replaced by the folder above it)
+      // while this scan ran. Then nothing of it is written back: no records,
+      // and no folder record either.
+      if (!(await dbHas(STORE_ROOTS, root.id))) continue;
       // Short ids: kept by path, carried over by the vault's own moves and by renames.
       {
         const prevById = new Map(working.map((c) => [c.id, c]));
@@ -13915,13 +13973,22 @@ function App() {
         await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
       }
       working = working.filter((c) => c.rootId !== root.id).concat(res.records);
-      setCards(working);
+      // Merge into what's on screen now, not into this scan's starting copy:
+      // another scan or a removed folder may have changed it meanwhile.
+      const fresh = res.records;
+      setCards((prev) => prev.filter((c) => c.rootId !== root.id).concat(fresh));
       const updated = Object.assign({}, root, {
         lastScan: Date.now(),
         dirs: res.dirs && res.dirs.length ? res.dirs : (root.dirs || []),
       });
-      await dbPut(STORE_ROOTS, updated);
-      setRoots((prev) => prev.map((r) => (r.id === root.id ? updated : r)));
+      if (await dbHas(STORE_ROOTS, root.id)) {
+        await dbPut(STORE_ROOTS, updated);
+        setRoots((prev) => prev.map((r) => (r.id === root.id ? updated : r)));
+      } else {
+        // Removed during the last few writes: take its records back out.
+        await dbDelCardsOfRoot(root.id);
+        setCards((prev) => prev.filter((c) => c.rootId !== root.id));
+      }
     }
     setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
     if (!quiet) showToast("Scan complete — " + fmtNum(working.length) + " cards indexed", "green");
@@ -13967,9 +14034,7 @@ function App() {
         "Add the outer folder and drop the inner registration?"
       )) return;
       await dbDel(STORE_ROOTS, nest.root.id);
-      for (const c of cards) if (c.rootId === nest.root.id) {
-        dbDel(STORE_CARDS, c.id); dbDel(STORE_BODIES, c.id); dbDel(STORE_THUMBS, c.id);
-      }
+      await dbDelCardsOfRoot(nest.root.id);
       setRoots((prev) => prev.filter((r) => r.id !== nest.root.id));
       setCards((prev) => prev.filter((c) => c.rootId !== nest.root.id));
     }
@@ -14025,9 +14090,7 @@ function App() {
     const role = pair.inner.role || "inbox";
     setFolderRole(dirKey(pair.outer.id, pair.path), role);
     await dbDel(STORE_ROOTS, pair.inner.id);
-    for (const c of cards) if (c.rootId === pair.inner.id) {
-      await dbDel(STORE_CARDS, c.id); await dbDel(STORE_BODIES, c.id); await dbDel(STORE_THUMBS, c.id);
-    }
+    await dbDelCardsOfRoot(pair.inner.id);
     setRoots((prev) => prev.filter((r) => r.id !== pair.inner.id));
     setCards((prev) => prev.filter((c) => c.rootId !== pair.inner.id));
     setNestedWarn((prev) => prev.filter((p) => p.inner.id !== pair.inner.id));
@@ -14043,7 +14106,7 @@ function App() {
     if (!root) return;
     if (!window.confirm("Remove " + root.name + " from the vault index?\n\nNothing on disk is deleted.")) return;
     await dbDel(STORE_ROOTS, id);
-    for (const c of cards) if (c.rootId === id) { dbDel(STORE_CARDS, c.id); dbDel(STORE_BODIES, c.id); dbDel(STORE_THUMBS, c.id); }
+    await dbDelCardsOfRoot(id);
     setRoots((prev) => prev.filter((r) => r.id !== id));
     setCards((prev) => prev.filter((c) => c.rootId !== id));
     showToast("Removed " + root.name + " from the index", "cyan");
