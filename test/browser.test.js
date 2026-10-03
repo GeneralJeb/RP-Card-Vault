@@ -56,8 +56,8 @@ function up(port) {
 
 async function writeFiles(page, dir, files) {
   await page.evaluate(async ({ dir, files }) => {
-    const root = await navigator.storage.getDirectory();
-    const d = await root.getDirectoryHandle(dir, { create: true });
+    let d = await navigator.storage.getDirectory();
+    for (const part of dir.split("/")) d = await d.getDirectoryHandle(part, { create: true });
     for (const [name, b64] of files) {
       const w = await (await d.getFileHandle(name, { create: true })).createWritable();
       await w.write(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
@@ -145,7 +145,7 @@ async function main() {
   // The folder picker hands over an OPFS folder: "Cards" unless told otherwise.
   await page.addInitScript(() => {
     window.showDirectoryPicker = async () =>
-      (await navigator.storage.getDirectory()).getDirectoryHandle(window.__pickFolder || "Cards", { create: true });
+      (window.__pickFolder || "Cards").split("/").reduce(async (h, part) => (await h).getDirectoryHandle(part, { create: true }), navigator.storage.getDirectory());
   });
 
   const toast = (re) => page.getByText(re).first().waitFor();
@@ -347,6 +347,60 @@ async function main() {
       });
       // Keys are made when a flag is added and never change, so renaming it is safe.
       t.ok(saved.some((x) => /^u-[a-z0-9-]+:Only the default picture.$/.test(x)), "the card has the flag, with its note", saved);
+    });
+
+    // Index records whose folder isn't registered (each shows as a "?" duplicate).
+    const orphanCount = () => page.evaluate(async () => {
+      const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+      const all = (st) => new Promise((res) => { const q = db.transaction(st).objectStore(st).getAll(); q.onsuccess = () => res(q.result); });
+      const ids = new Set((await all("roots")).map((r) => r.id));
+      return (await all("cards")).filter((c) => !ids.has(c.rootId)).length;
+    });
+
+    await step("replacing a folder by the folder above it, mid-scan, leaves nothing behind", async () => {
+      const many = [];
+      for (let i = 0; i < 300; i++) many.push(["Extra " + i + ".png", cardPng({ name: "Extra " + i, description: "Filler card " + i + "." }, [i % 255, 80, 120])]);
+      await writeFiles(page, "Parent/Big", many);
+      // Add the inner folder; its 300 cards start being read...
+      await page.evaluate(() => { window.__pickFolder = "Parent/Big"; });
+      await page.getByRole("button", { name: "Folders", exact: true }).click();
+      await page.getByRole("button", { name: "+ Add folder" }).click();
+      await page.getByText(/Added Big/).first().waitFor();
+      // ...and straight away the folder above it, which replaces the inner one.
+      await page.evaluate(() => { window.__pickFolder = "Parent"; });
+      await page.getByRole("button", { name: "+ Add folder" }).click();
+      await page.getByText(/Added Parent/).first().waitFor();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      // Let both scans run to their end.
+      await page.waitForTimeout(6000);
+      t.eq(await orphanCount(), 0, "no records are left without a folder (no \"?\" duplicates)");
+      const saved = await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        return await new Promise((res) => { const q = db.transaction("roots").objectStore("roots").getAll(); q.onsuccess = () => res(q.result.map((r) => r.name)); });
+      });
+      t.ok(saved.indexOf("Big") < 0 && saved.indexOf("Parent") >= 0, "the inner folder stays replaced: its scan didn't write it back", saved);
+      const extras = await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        return await new Promise((res) => { const q = db.transaction("cards").objectStore("cards").getAll(); q.onsuccess = () => res(q.result.filter((c) => /^Extra \d+\.png$/.test(c.file)).length); });
+      });
+      t.eq(extras, 300, "each of the 300 cards is indexed once, under the folder above");
+    });
+
+    if (!reloadCrashes) await step("leftover records from before are cleaned up when the vault opens", async () => {
+      await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        await new Promise((res) => {
+          const tx = db.transaction("cards", "readwrite");
+          for (const n of ["Ada Clockmaker.png", "Bram Lighthouse.png"]) tx.objectStore("cards").put({ id: "gone:" + n, rootId: "gone", rel: n, dir: "", file: n, name: n.replace(".png", ""), ok: true, fp: "x" + n, tags: [] });
+          tx.oncomplete = res;
+        });
+      });
+      t.eq(await orphanCount(), 2, "two records without a folder are planted");
+      await page.reload();
+      await page.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
+      await page.getByText(/Cleaned up 2 leftover index entries/).first().waitFor();
+      t.ok(true, "the vault says it cleaned them up");
+      t.eq(await orphanCount(), 0, "and they're gone from the index");
     });
 
     await step("a theme is applied, and is there from the first moment after a reload", async () => {
