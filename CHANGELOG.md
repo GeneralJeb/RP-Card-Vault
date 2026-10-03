@@ -8,6 +8,15 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.3.0
+
+- **The agent can see duplicates.** A new tool, list_duplicates, gives it
+  the duplicate finder's groups as the Dupes view shows them: identical
+  files, the same card in different files, and version drift (same name and
+  creator, different content). list_cards can filter to any of those, and
+  inspect_card says which copies a card has. Private cards are counted but
+  never named, and groups you marked "not duplicates" stay out.
+
 ## 1.2.1
 
 - **Fixed: hundreds of duplicates with "?" for their folder.** Adding a
