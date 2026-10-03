@@ -307,6 +307,35 @@ async function main() {
       await page.getByRole("button", { name: "Close", exact: true }).click();
     });
 
+    await step("sending always says what happened", async () => {
+      // "File cards away after sending" on, but no folder chosen for it.
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("File cards away after sending them").click();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await tile("Bram Lighthouse").click({ button: "right" });
+      await page.getByText("Send to front end", { exact: true }).click();
+      await toast(/not filed away: no folder is chosen/);
+      t.ok(true, "with filing on but no folder, the send says it didn't file the card away");
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("File cards away after sending them").click();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+
+      // A card that leaves the vault (renamed on disk, then rescanned) leaves the selection too.
+      await tile("Ada Clockmaker").click();
+      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await page.getByText("2 selected").waitFor();
+      await page.evaluate(async () => {
+        const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards");
+        const f = await (await d.getFileHandle("Bram Lighthouse.png")).getFile();
+        const w = await (await d.getFileHandle("Bram Renamed.png", { create: true })).createWritable();
+        await w.write(await f.arrayBuffer()); await w.close();
+        await d.removeEntry("Bram Lighthouse.png");
+      });
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !/\b2 selected\b/.test(document.body.innerText), null, { timeout: 15000 });
+      t.ok(true, "the renamed card drops out of the selection, so Send can't act on it");
+    });
+
     await step("Settings and the AI panel open without errors", async () => {
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByText("Destinations — where", { exact: false }).first().waitFor();

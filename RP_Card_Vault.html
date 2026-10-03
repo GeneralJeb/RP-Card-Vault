@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.3.1";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -12943,6 +12943,7 @@ function DestinationRow({ dest, isDefault, status, folderOptions, onChange, onRe
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 11, color: "var(--accent-green)" }}>✓ Connected{status.byId[dest.id].user ? " as " + status.byId[dest.id].user : ""}</span>
               <SmallBtn color="muted" onClick={() => onDisconnect(dest)}>Disconnect</SmallBtn>
+              <span className="dest-locked-hint" style={{ fontSize: 10, color: "var(--text-muted)" }}>Disconnect to change the address or username.</span>
             </div>
           ) : (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -14997,7 +14998,8 @@ function App() {
    * exactly where it was, so nothing quietly disappears from the inbox.
    */
   const autoFileAfterSend = useCallback(async (okIds) => {
-    if (!settings.autoFileAfterSend || !settings.afterSendKey || !okIds.length) return null;
+    if (!settings.autoFileAfterSend || !okIds.length) return null;
+    if (!settings.afterSendKey) return { note: "not filed away: no folder is chosen for that (Settings → Destinations)" };
     const { rootId, dir } = parseDirKey(settings.afterSendKey);
     const root = roots.find((r) => r.id === rootId);
     if (!root || isImportRoot(root)) {
@@ -15056,7 +15058,7 @@ function App() {
     const filed = await autoFileAfterSend(okIds);
     showToast(
       ok + " sent to " + dest.name +
-      (filed ? " · " + filed.moved + " filed into " + filed.label : "") +
+      (filed ? " · " + (filed.note || filed.moved + " filed into " + filed.label) : "") +
       (failed ? " · " + failed + " failed — " + errs.join(" | ") : ""),
       failed ? "red" : "green"
     );
@@ -15093,7 +15095,7 @@ function App() {
     showToast(
       sent + " sent to " + dest.name +
       (already ? ", " + already + " already there" : "") +
-      (filed ? " · " + filed.moved + " filed into " + filed.label : "") +
+      (filed ? " · " + (filed.note || filed.moved + " filed into " + filed.label) : "") +
       (failed ? ", " + failed + " failed" : "") +
       (sent && !filed ? " · refresh your front end to see them" : ""),
       failed ? "red" : "green"
@@ -15102,6 +15104,15 @@ function App() {
   }, [folderTargetOf, recById, roots, showToast, autoFileAfterSend]);
 
   /** Send to a destination by id, or to your default. */
+  // Cards that left the vault (moved, filed away after a send, renamed and
+  // rescanned) leave the selection too, so S and Send never act on ghosts.
+  useEffect(() => {
+    setSelection((prev) => {
+      if (!prev.size || Array.from(prev).every((id) => recById.has(id))) return prev;
+      return new Set(Array.from(prev).filter((id) => recById.has(id)));
+    });
+  }, [recById]);
+
   const sendToFrontend = useCallback(async (ids, destId) => {
     const list = settings.destinations || [];
     const dest = (destId && list.filter((d) => d.id === destId)[0]) || defaultDestinationOf(settings);
@@ -15110,8 +15121,23 @@ function App() {
       setModal("settings");
       return;
     }
-    return dest.type === "folder" ? sendToFolder(ids, dest) : sendViaApi(ids, dest);
-  }, [settings, sendToFolder, sendViaApi, showToast]);
+    // A selection can outlive its cards (moved, filed away or rescanned since):
+    // say so, rather than send nothing without a word.
+    const asked = ids || [];
+    const known = asked.filter((id) => recById.has(id));
+    if (!known.length) {
+      showToast(asked.length
+        ? "Nothing sent: " + (asked.length === 1 ? "that card isn't" : "those cards aren't") + " in the vault any more (moved, filed away or rescanned). Pick " + (asked.length === 1 ? "it" : "them") + " again and send."
+        : "Pick a card to send first", "warm");
+      return;
+    }
+    try {
+      return await (dest.type === "folder" ? sendToFolder(known, dest) : sendViaApi(known, dest));
+    } catch (e) {
+      setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+      showToast("Couldn't send to " + dest.name + ": " + ((e && e.message) || String(e)), "red");
+    }
+  }, [settings, sendToFolder, sendViaApi, showToast, recById]);
 
   useEffect(() => { sendToFrontendRef.current = sendToFrontend; }, [sendToFrontend]);
 
