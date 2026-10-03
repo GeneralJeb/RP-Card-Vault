@@ -101,6 +101,51 @@ function fakeVault(edits, extra) {
   };
 }
 
+/* The agent sees the duplicate finder's groups: list_duplicates, list_cards'
+   duplicates filter, and inspect_card's Duplicates line. */
+async function dupeTests() {
+  console.log("\nduplicates, for the agent");
+  const rec = (id, sid, name, dir, file, extra) => Object.assign({ id, sid, fp: "fp-" + id, name, creator: "kay", tags: [], vaultTags: [], flags: [], dir, file, tokensCore: 100, search: name.toLowerCase() }, extra || {});
+  const maya1 = rec("r:Maya.png", "c10", "Maya", "Cards", "Maya.png");
+  const maya2 = rec("r:old/Maya.png", "c11", "Maya", "Cards/old", "Maya.png");
+  const ada1 = rec("r:Ada.png", "c12", "Ada", "Cards", "Ada.png");
+  const ada2 = rec("r:Ada copy.png", "c13", "Ada", "Cards", "Ada copy.png");
+  const secret = rec("r:Secret.png", "c14", "Maya", "Private", "Secret.png", { aiPrivate: true });
+  const lone = rec("r:Lone.png", "c15", "Lone", "Cards", "Lone.png");
+  const dupes = {
+    exact: [{ key: "sig-ada", items: [ada1, ada2] }],
+    content: [],
+    versions: [{ key: "lfp-maya", items: [maya1, maya2, secret] }],
+  };
+  const k = ctxFor();
+  k.ctx.vault = Object.assign(fakeVault(), { records: () => [maya1, maya2, ada1, ada2, secret, lone], dupes: () => dupes });
+
+  t.ok(V.AGENT_TOOLS.some((x) => x.name === "list_duplicates") && V.agentToolsForModel({ toolset: "small" }).some((x) => x.function.name === "list_duplicates"),
+    "list_duplicates exists, and small-model mode has it (it only looks)");
+  let r = await run(k, "list_duplicates", {});
+  t.ok(r.ok && /^2 groups \(1 exact, 0 content, 1 version\)/.test(r.content), "it lists every group, with how many of each kind", r.content.split("\n")[0]);
+  t.ok(/version drift: same name and creator, different content/.test(r.content) && /c10 · Maya/.test(r.content) && /Cards\/old\/Maya\.png/.test(r.content),
+    "version-drift groups are there too, with each copy's id and path");
+  t.ok(/a private card/.test(r.content) && !/Secret/.test(r.content), "a private copy is counted, never named");
+  r = await run(k, "list_duplicates", { kind: "version drift" });
+  t.ok(r.ok && /^1 group/.test(r.content) && !/c12/.test(r.content), "one kind at a time");
+
+  r = await run(k, "list_cards", { duplicates: "version" });
+  t.ok(r.ok && /^2 cards match/.test(r.content) && /c10/.test(r.content) && /c11/.test(r.content) && !/c12/.test(r.content), "list_cards can filter to version drift", r.content);
+  r = await run(k, "list_cards", { duplicates: "any" });
+  t.ok(/^4 cards match/.test(r.content) && !/c15/.test(r.content), "or to any duplicate (the private one stays hidden)");
+
+  r = await run(k, "inspect_card", { id: "c10" });
+  t.ok(/Duplicates: version drift: same name and creator, different content with c11 \(Cards\/old\/Maya\.png\), a private card/.test(r.content),
+    "inspect_card says which copies a card has, and how they're related", r.content.split("\n").pop());
+  r = await run(k, "inspect_card", { id: "c15" });
+  t.ok(/Duplicates: none/.test(r.content), "and says so when it has none");
+
+  k.ctx.vault = Object.assign(fakeVault(), { records: () => [lone], dupes: () => ({ exact: [], content: [], versions: [{ key: "x", items: [secret, Object.assign({}, secret, { id: "r:s2" })] }] }) });
+  r = await run(k, "list_duplicates", {});
+  t.ok(/^No duplicate groups/.test(r.content), "a group of only private cards isn't shown at all");
+}
+
 function ctxFor(opts) {
   opts = opts || {};
   const session = V.newAgentSession("s1", 1);
@@ -699,6 +744,7 @@ async function main() {
   await trashTests();
   await smallModelTests();
   await privateTests();
+  await dupeTests();
 
   t.done();
 }
