@@ -349,18 +349,27 @@ async function main() {
       t.ok(saved.some((x) => /^u-[a-z0-9-]+:Only the default picture.$/.test(x)), "the card has the flag, with its note", saved);
     });
 
-    // Index records whose folder isn't registered (each shows as a "?" duplicate).
-    const orphanCount = () => page.evaluate(async () => {
+    // Saved folders are read by key only: their records hold folder handles,
+    // and reading one back closes Chromium/Edge 153 (GitHub's Edge).
+    const rootKeys = () => page.evaluate(async () => {
       const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
-      const all = (st) => new Promise((res) => { const q = db.transaction(st).objectStore(st).getAll(); q.onsuccess = () => res(q.result); });
-      const ids = new Set((await all("roots")).map((r) => r.id));
-      return (await all("cards")).filter((c) => !ids.has(c.rootId)).length;
+      return await new Promise((res) => { const q = db.transaction("roots").objectStore("roots").getAllKeys(); q.onsuccess = () => res(q.result); });
     });
+    const cardRecords = () => page.evaluate(async () => {
+      const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+      return await new Promise((res) => { const q = db.transaction("cards").objectStore("cards").getAll(); q.onsuccess = () => res(q.result.map((c) => ({ rootId: c.rootId, file: c.file }))); });
+    });
+    // Index records whose folder isn't registered (each shows as a "?" duplicate).
+    const orphanCount = async () => {
+      const ids = new Set(await rootKeys());
+      return (await cardRecords()).filter((c) => !ids.has(c.rootId)).length;
+    };
 
     await step("replacing a folder by the folder above it, mid-scan, leaves nothing behind", async () => {
       const many = [];
       for (let i = 0; i < 300; i++) many.push(["Extra " + i + ".png", cardPng({ name: "Extra " + i, description: "Filler card " + i + "." }, [i % 255, 80, 120])]);
       await writeFiles(page, "Parent/Big", many);
+      const before = new Set(await rootKeys());
       // Add the inner folder; its 300 cards start being read...
       await page.evaluate(() => { window.__pickFolder = "Parent/Big"; });
       await page.getByRole("button", { name: "Folders", exact: true }).click();
@@ -374,16 +383,10 @@ async function main() {
       // Let both scans run to their end.
       await page.waitForTimeout(6000);
       t.eq(await orphanCount(), 0, "no records are left without a folder (no \"?\" duplicates)");
-      const saved = await page.evaluate(async () => {
-        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
-        return await new Promise((res) => { const q = db.transaction("roots").objectStore("roots").getAll(); q.onsuccess = () => res(q.result.map((r) => r.name)); });
-      });
-      t.ok(saved.indexOf("Big") < 0 && saved.indexOf("Parent") >= 0, "the inner folder stays replaced: its scan didn't write it back", saved);
-      const extras = await page.evaluate(async () => {
-        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
-        return await new Promise((res) => { const q = db.transaction("cards").objectStore("cards").getAll(); q.onsuccess = () => res(q.result.filter((c) => /^Extra \d+\.png$/.test(c.file)).length); });
-      });
-      t.eq(extras, 300, "each of the 300 cards is indexed once, under the folder above");
+      const added = (await rootKeys()).filter((k) => !before.has(k));
+      t.eq(added.length, 1, "one folder was added in the end, Parent: the inner one's scan didn't write it back", added);
+      const extras = (await cardRecords()).filter((c) => /^Extra \d+\.png$/.test(c.file));
+      t.ok(extras.length === 300 && extras.every((c) => c.rootId === added[0]), "each of the 300 cards is indexed once, under the folder above", extras.length);
     });
 
     if (!reloadCrashes) await step("leftover records from before are cleaned up when the vault opens", async () => {

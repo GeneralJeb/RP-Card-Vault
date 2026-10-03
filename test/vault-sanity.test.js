@@ -72,6 +72,13 @@ console.log("\nthe API key never reaches the vault's database");
   const dbPutsWithKey = (script.match(/dbPut\([^)]*apiKey/g) || []);
   t.ok(dbPutsWithKey.length === 0, "no dbPut call carries an apiKey", dbPutsWithKey.join(", "));
 
+  // Saved folders hold folder handles, and reading one back closes the whole
+  // browser on Chromium 153. Only startup may read them (the 153 notice comes
+  // first there); anything else checks with dbHas, which reads no value.
+  const rootReads = (script.match(/\b(?:dbGet|dbAll|dbAllByIndex)\(STORE_ROOTS\b/g) || []).length;
+  t.ok(rootReads === 1 && /dbAll\(STORE_ROOTS\), dbAll\(STORE_CARDS\)/.test(script),
+    "saved folders are read back only once, at startup", rootReads + " reads");
+
   // Browser storage is readable by anything on the page and never cleared by
   // the vault's own reset paths, so nothing may go there but the theme: a list
   // of colours, written in one place, under its own key.

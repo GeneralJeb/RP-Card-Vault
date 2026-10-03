@@ -551,6 +551,22 @@ async function dbDelCardsOfRoot(rootId) {
   return recs.length;
 }
 
+/**
+ * Whether a key is in a store, without reading its value. For saved folders
+ * this matters: their records hold folder handles, and reading one back
+ * closes the whole browser on Chromium 153 (see HANDLE_CRASH_VERSIONS).
+ */
+async function dbHas(store, key) {
+  try {
+    const db = await dbOpen();
+    return await new Promise((res, rej) => {
+      const r = db.transaction(store, "readonly").objectStore(store).count(key);
+      r.onsuccess = () => res(r.result > 0);
+      r.onerror   = () => rej(r.error);
+    });
+  } catch (e) { return false; }
+}
+
 /** Every key in a store, or [] if it can't be read. */
 async function dbKeys(store) {
   try {
@@ -13940,7 +13956,7 @@ function App() {
       // The folder may have been removed (or replaced by the folder above it)
       // while this scan ran. Then nothing of it is written back: no records,
       // and no folder record either.
-      if (!(await dbGet(STORE_ROOTS, root.id))) continue;
+      if (!(await dbHas(STORE_ROOTS, root.id))) continue;
       // Short ids: kept by path, carried over by the vault's own moves and by renames.
       {
         const prevById = new Map(working.map((c) => [c.id, c]));
@@ -13965,7 +13981,7 @@ function App() {
         lastScan: Date.now(),
         dirs: res.dirs && res.dirs.length ? res.dirs : (root.dirs || []),
       });
-      if (await dbGet(STORE_ROOTS, root.id)) {
+      if (await dbHas(STORE_ROOTS, root.id)) {
         await dbPut(STORE_ROOTS, updated);
         setRoots((prev) => prev.map((r) => (r.id === root.id ? updated : r)));
       } else {
