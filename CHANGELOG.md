@@ -8,6 +8,18 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.3.1
+
+- **Sending never fails silently.** A send whose cards had left the vault
+  (filed away after an earlier send, or renamed and rescanned) did nothing
+  and said nothing. Now the selection drops cards that are gone, a send
+  with nothing to send says so, and an unexpected error is shown instead of
+  swallowed.
+- **"File cards away after sending" with no folder** now says the card
+  wasn't filed away, instead of skipping it quietly.
+- **A connected destination says why it's locked:** "Disconnect to change
+  the address or username."
+
 ## 1.3.0
 
 - **The agent can see duplicates.** A new tool, list_duplicates, gives it
