@@ -348,6 +348,30 @@ async function main() {
       await page.getByRole("button", { name: "Close", exact: true }).click();
     });
 
+    await step("the problem log in Settings collects problems, scrubbed", async () => {
+      await page.evaluate(() => {
+        setTimeout(() => { throw new Error("test failure for Ada Clockmaker at C:\\Users\\Jeb\\x with sk-abcdefgh12345678"); });
+      });
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      const log = page.locator(".problem-log-text");
+      await log.waitFor();
+      await page.waitForFunction(() => /test failure/.test(document.querySelector(".problem-log-text").innerText));
+      let text = await log.innerText();
+      t.ok(/^RP Card Vault problem log/.test(text) && /Vault \d+\.\d+\.\d+ · server \d+\.\d+\.\d+/.test(text), "it starts with the versions");
+      t.ok(/error  Page: test failure for \[card\] at C:\\Users\\\[you\]\\x with \[key\]/.test(text),
+        "a page error is logged with the card name, user name and key taken out");
+      t.ok(!/Ada Clockmaker|Jeb|sk-abc/.test(text), "none of them is left anywhere");
+      await page.getByText("Show card and folder names").click();
+      text = await log.innerText();
+      t.ok(/test failure for Ada Clockmaker/.test(text) && !/Jeb|sk-abc/.test(text), "Show card and folder names shows names, never the rest");
+      await page.getByText("Show card and folder names").click();
+      await page.getByRole("button", { name: "Clear", exact: true }).click();
+      t.ok(/no problems logged/.test(await log.innerText()), "Clear empties it");
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      // The error thrown above was on purpose; anything else still counts.
+      problems.splice(0, problems.length, ...problems.filter((p) => !/test failure for/.test(p)));
+    });
+
     await step("a flag of your own is made in Settings and put on a card", async () => {
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByRole("button", { name: "+ Add a flag" }).click();

@@ -16,7 +16,8 @@ Open an issue with:
 
 - what you did, what you expected, and what happened instead
 - your Windows version, browser and version (Settings → the version under the title), and Node version (`node --version`)
-- anything the page or the server window printed, with **your API key and any card text you'd rather keep private removed**
+- the **problem log**: Settings → Problem log → Copy log. It has the versions and this session's errors, with keys, passwords, emails, your Windows user name and card names already taken out. Read it before posting all the same.
+- anything else the page or the server window printed, with **your API key and any card text you'd rather keep private removed**
 
 **Security problems:** please don't post them in a public issue. See [SECURITY.md](SECURITY.md) for how to report them privately.
 
