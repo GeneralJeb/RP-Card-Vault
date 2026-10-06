@@ -14,7 +14,7 @@ const { loadPureRegion } = require("./pure-region");
 const t = require("./harness");
 
 const { mod: V } = loadPureRegion([
-  "sanitizeAiSettings", "DEFAULT_AI_SETTINGS", "AI_ACTIONS", "AI_PERSONA_DEFAULT", "AI_LIMITS",
+  "sanitizeAiSettings", "DEFAULT_AI_SETTINGS", "AI_ACTIONS", "AI_PERSONA_DEFAULT", "AI_LIMITS", "diffText", "diffSides",
   "aiSettingsProblems", "aiReady", "relayIsStale", "EXPECTED_RELAY_BUILD",
   "renderPromptTemplate", "buildCardContext", "aiBuildRequest", "aiAllocate", "aiFenceText",
   "ndjsonSplitter", "aiEmptyStream", "aiStreamStep", "splitInlineThinking", "interpretAiResult",
@@ -483,6 +483,25 @@ console.log("\nthe overlay helpers the AI reads through");
   t.eq(V.flagDef("nope").key, "nope", "an unknown flag still gets a definition to render");
   t.ok(V.AI_PROPOSAL_KINDS.polish === "fields" && V.AI_PROPOSAL_KINDS.tags === "vaultTags" && V.AI_PROPOSAL_KINDS.critique === "flags",
     "every proposing action has a bucket, and none of them is the card's tags");
+}
+
+console.log("\na diff side by side");
+{
+  const text = (cells) => cells.map((p) => p.text).join("");
+  const before = "Ada is a clockmaker.\n\nShe hates being late.\n\nShe lives in Bath.";
+  const after = "Ada is a famous clockmaker.\n\nShe hates being late.\n\nShe moved to York.";
+  const rows = V.diffSides(V.diffText(before, after).parts);
+  t.eq(rows.length, 3, "one row per paragraph the two texts share a break between");
+  t.eq(rows.map((r) => [text(r.left), text(r.right)]), [
+    ["Ada is a clockmaker.", "Ada is a famous clockmaker."],
+    ["She hates being late.", "She hates being late."],
+    ["She lives in Bath.", "She moved to York."],
+  ], "each side reads as its own whole text: the original on the left, the new on the right");
+  t.ok(rows[0].left.every((p) => p.t !== "add") && rows[0].right.some((p) => p.t === "add" && /famous/.test(p.text)),
+    "the left marks only what's taken out, the right only what's put in");
+  t.eq(V.diffSides(V.diffText("", "All new.").parts).map((r) => [text(r.left), text(r.right)]), [["", "All new."]], "a new text has an empty left side");
+  const long = Array.from({ length: 3000 }, (_, i) => "word" + i).join(" ");
+  t.ok(V.diffSides(V.diffText(long + "\n\nend", long + "\n\nfinish").parts).length >= 1, "a field too long for a word diff still comes out side by side");
 }
 
 t.done();

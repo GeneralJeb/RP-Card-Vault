@@ -8,6 +8,17 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.4.4
+
+- **Show diff is side by side.** The original text is on the left, with what
+  the change takes out marked in red; the new text is on the right, with
+  what it puts in marked in green. Each paragraph sits beside its new
+  version, and one scroll moves both. This is the same everywhere a change
+  is shown: Proposed changes, AI actions and the agent chat (where changes
+  already made read "Before" and "After").
+- **A proposed rewrite shows in full.** Before you open the diff, the whole
+  new text is there in a box that scrolls, not just its first lines.
+
 ## 1.4.3
 
 - **Fixed: a new vault showed only the first 6 cards.** The grid measured
