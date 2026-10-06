@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.4.2";
+const APP_VERSION = "1.4.3";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -8106,8 +8106,16 @@ function Thumb({ id, hasThumb, alt, radius, fit }) {
 /** Window-based virtualization for a fixed-size grid. */
 function useGridVirtual(scrollRef, itemCount, tileW, tileH, gap) {
   const [dims, setDims] = useState({ w: 0, h: 0, top: 0 });
+  // The grid isn't there on the first render of a new vault (the "add a
+  // folder" screen is) or while cards load, so the element is looked for
+  // after every render and measured as soon as it appears. With fixed deps,
+  // it never was: the grid kept a width of 0, one column, a handful of cards.
+  const bound = useRef({ el: null, off: null });
   useEffect(() => {
     const el = scrollRef.current;
+    if (el === bound.current.el) return;
+    if (bound.current.off) bound.current.off();
+    bound.current = { el, off: null };
     if (!el) return;
     let raf = null;
     const measure = () => {
@@ -8123,13 +8131,14 @@ function useGridVirtual(scrollRef, itemCount, tileW, tileH, gap) {
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
     if (ro) ro.observe(el);
     window.addEventListener("resize", measure);
-    return () => {
+    bound.current.off = () => {
       el.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", measure);
       if (ro) ro.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [scrollRef, tileW, tileH]);
+  });
+  useEffect(() => () => { if (bound.current.off) bound.current.off(); }, []);
 
   const cols = Math.max(1, Math.floor((dims.w + gap) / (tileW + gap)));
   const rows = Math.ceil(itemCount / cols);
@@ -16261,7 +16270,7 @@ function App() {
                     ) : null}
                   </div>
                 ) : (
-                  <div style={{ height: vg.totalHeight, position: "relative" }}>
+                  <div className="card-grid" data-cols={vg.cols} style={{ height: vg.totalHeight, position: "relative" }}>
                     <div style={{
                       position: "absolute", top: vg.offsetY, left: 0, right: 0,
                       display: "flex", flexWrap: "wrap", gap: gap, alignContent: "flex-start",

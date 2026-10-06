@@ -191,6 +191,11 @@ async function main() {
       await toast(/Scan complete — 3 cards indexed/);
       for (const n of ["Ada Clockmaker", "Bram Lighthouse", "Cora Gardener"]) t.ok(await tile(n).isVisible(), n + " is in the grid");
       t.eq(await shown(), 3, "3 shown");
+      // The grid wasn't on the page when it first loaded (the "add a folder"
+      // screen was), and must still measure itself. Unmeasured, it counts one
+      // column and draws only the first few cards of a bigger folder.
+      const cols = Number(await page.locator(".card-grid").getAttribute("data-cols"));
+      t.ok(cols > 1, "the grid measured itself once it appeared (" + cols + " columns)");
     });
 
     await step("the vault data is backed up into the folder after the first scan", async () => {
