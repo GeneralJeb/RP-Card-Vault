@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.4.3";
+const APP_VERSION = "1.4.4";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -3417,6 +3417,29 @@ function diffText(a, b) {
     return { same: false, parts: diffTokens(wa, wb), mode: "word" };
   }
   return { same: false, parts: diffTokens(tokenizeParas(a), tokenizeParas(b)), mode: "paragraph" };
+}
+
+/**
+ * A diff as two columns side by side: rows of { left, right }, the original
+ * and the new text, each a list of { t: "same" | "del" | "add", text }. The
+ * left shows what was taken out, the right what was put in. A row ends where
+ * both texts have the same paragraph break, so a paragraph sits beside its
+ * new version and the columns stay level all the way down.
+ */
+function diffSides(parts) {
+  const rows = [];
+  let left = [], right = [];
+  const flush = () => { if (left.length || right.length) rows.push({ left, right }); left = []; right = []; };
+  for (const p of parts || []) {
+    if (p.t === "del") { left.push(p); continue; }
+    if (p.t === "add") { right.push(p); continue; }
+    String(p.text).split(/(\n[ \t]*\n\s*)/).forEach((piece, i) => {
+      if (i % 2 === 1) { flush(); return; }   // a shared paragraph break ends the row
+      if (piece) { left.push({ t: "same", text: piece }); right.push({ t: "same", text: piece }); }
+    });
+  }
+  flush();
+  return rows;
 }
 
 /** Quick similarity score 0..1, used to summarise how close two cards are. */
@@ -8808,7 +8831,7 @@ function AgentSuggestion({ d, onOpenCard, onUndo }) {
         {item.cardId && onOpenCard ? <SmallBtn color="blue" onClick={() => onOpenCard(item.cardId)}>Open card</SmallBtn> : null}
         {t || l || bt || mv ? (d.undone ? <Pill color="muted">undone</Pill> : <SmallBtn color="warm" onClick={onUndo}>Undo</SmallBtn>) : null}
       </div>
-      {diff && withDiff ? <div style={{ marginTop: 6 }}><DiffView before={withDiff.before} after={withDiff.after || ""} /></div> : null}
+      {diff && withDiff ? <div style={{ marginTop: 6 }}><DiffView before={withDiff.before} after={withDiff.after || ""} labels={["Before", "After"]} /></div> : null}
     </div>
   );
 }
@@ -8821,7 +8844,7 @@ function AgentChangeView({ d }) {
     <div>
       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>{verb}</div>
       {d.tool === "fs_write" || d.tool === "fs_edit" || (d.tool === "fs_delete" && !d.dir) ? (
-        <DiffView before={d.before || ""} after={d.after || ""} />
+        <DiffView before={d.before || ""} after={d.after || ""} labels={["Before", "After"]} />
       ) : null}
     </div>
   );
@@ -10359,27 +10382,45 @@ function AiAnswer({ text }) {
   );
 }
 
-/** A word-level diff, rendered. Reuses the duplicate comparer's engine. */
-function DiffView({ before, after }) {
-  const d = useMemo(() => diffText(before, after), [before, after]);
+/**
+ * A diff, side by side: the original text on the left with what's taken out
+ * marked, the new text on the right with what's put in marked, paragraph
+ * beside paragraph. One scroll moves both. Reuses the duplicate comparer's engine.
+ */
+function DiffView({ before, after, labels }) {
+  const rows = useMemo(() => diffSides(diffText(before, after).parts), [before, after]);
+  const names = labels || ["Original", "Proposed"];
+  const cell = (parts, side) => (
+    <div className={"diff-cell diff-" + side} style={{
+      padding: "6px 9px", minWidth: 0, color: "var(--text-secondary)",
+      borderRight: side === "left" ? "1px solid var(--border-subtle)" : "none",
+    }}>
+      {parts.map((part, i) => part.t === "same" ? <span key={i}>{part.text}</span> : (
+        <span key={i} className={part.t === "del" ? "diff-del" : "diff-add"} style={{
+          color: part.t === "del" ? "var(--accent-red)" : "var(--accent-green)",
+          background: acRgba(part.t === "del" ? "red" : "green", 0.16), borderRadius: 2,
+        }}>{part.text}</span>
+      ))}
+    </div>
+  );
+  const head = { padding: "5px 9px", fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)" };
   return (
-    <div style={{
-      fontSize: 11.5, lineHeight: 1.65, fontFamily: "'Outfit', sans-serif",
-      whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 320, overflowY: "auto",
-      padding: 9, borderRadius: "var(--radius-sm)",
-      background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
-    }} className="vault-scroll">
-      {d.parts.map((part, i) => {
-        if (part.t === "same") return <span key={i} style={{ color: "var(--text-muted)" }}>{part.text}</span>;
-        const del = part.t === "del";
-        return (
-          <span key={i} style={{
-            color: del ? "var(--accent-red)" : "var(--accent-green)",
-            background: acRgba(del ? "red" : "green", 0.12),
-            textDecoration: del ? "line-through" : "none",
-          }}>{part.text}</span>
-        );
-      })}
+    <div className="vault-scroll diff-view" style={{
+      fontSize: 11.5, lineHeight: 1.6, fontFamily: "'Outfit', sans-serif",
+      whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 420, overflowY: "auto",
+      borderRadius: "var(--radius-sm)", background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
+    }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", position: "sticky", top: 0, zIndex: 1,
+        background: "var(--bg-tertiary)", borderBottom: "1px solid var(--border-subtle)" }}>
+        <div style={Object.assign({}, head, { borderRight: "1px solid var(--border-subtle)" })}>{names[0]}</div>
+        <div style={head}>{names[1]}</div>
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} className="diff-row" style={{ display: "grid", gridTemplateColumns: "1fr 1fr",
+          borderTop: i ? "1px dashed var(--border-subtle)" : "none" }}>
+          {cell(r.left, "left")}{cell(r.right, "right")}
+        </div>
+      ))}
     </div>
   );
 }
@@ -10490,9 +10531,11 @@ function AiProposals({ body, edit, onPatchEdit, onToast }) {
                 </div>
               ) : null}
               {open ? <DiffView before={before} after={after} /> : (
-                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.55, maxHeight: 44, overflow: "hidden" }}>
-                  {after.slice(0, 220)}{after.length > 220 ? "…" : ""}
-                </div>
+                <div className="vault-scroll ai-proposal-text" style={{
+                  fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6, maxHeight: 220, overflowY: "auto",
+                  whiteSpace: "pre-wrap", wordBreak: "break-word", padding: "6px 9px", borderRadius: "var(--radius-sm)",
+                  background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
+                }}>{after}</div>
               )}
             </div>
           );

@@ -598,6 +598,15 @@ async function testTighten() {
   click(byText("button", /^Show diff$/));
   await tick();
   t.ok(!!byText("button", /^Hide diff$/) && all(".vault-scroll").some((d) => /impatient with sloppiness/.test(d.textContent)), "a diff is shown");
+  {
+    const view = all(".diff-view").pop();
+    const lefts = view ? Array.from(view.querySelectorAll(".diff-left")) : [];
+    const rights = view ? Array.from(view.querySelectorAll(".diff-right")) : [];
+    t.ok(lefts.length > 0 && lefts.length === rights.length && /Original/.test(view.textContent) && /Proposed/.test(view.textContent),
+      "side by side: the original on the left, the proposed text on the right, row for row");
+    t.ok(!view.querySelector(".diff-left .diff-add") && !view.querySelector(".diff-right .diff-del"),
+      "the left only marks what's taken out, the right only what's put in");
+  }
 
   click(byText("button", /^Accept$/));
   await tick(120);
