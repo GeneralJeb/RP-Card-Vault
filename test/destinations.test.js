@@ -134,7 +134,7 @@ async function main() {
   for (const [k, f] of Object.entries({ st, stAcc, lv, gen })) { ports[k] = await freePort(); await new Promise((r) => f.server.listen(ports[k], "127.0.0.1", r)); }
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "vault-dest-ws-"));
   const child = spawn(process.execPath, [path.join(ROOT, "serve.js"), String(port), "--no-open"],
-    { cwd: ROOT, env: Object.assign({}, process.env, { VAULT_WORKSPACE: ws }), stdio: "ignore" });
+    { cwd: ROOT, env: Object.assign({}, process.env, { VAULT_WORKSPACE: ws, VAULT_DEST_TIMEOUT_MS: "1500" }), stdio: "ignore" });
   children.push(child);
   const call = (method, p, body, ctype) => new Promise((resolve) => {
     const h = { Host: "127.0.0.1:" + port, "X-Vault": "1", "Sec-Fetch-Site": "same-origin" };
@@ -206,6 +206,14 @@ async function main() {
     t.eq(r.status, 401, "after Disconnect, sending is refused");
     r = await call("POST", "/__vault/dest/connect", { id: "dead", type: "sillytavern", baseUrl: "http://127.0.0.1:1" });
     t.ok(r.status === 400 && /Couldn't reach http:\/\/127\.0\.0\.1:1/.test(r.body.error), "a front end that isn't running gives a sentence", r.body.error);
+    // One that takes the connection and never answers.
+    const hang = http.createServer(() => { /* never answers */ });
+    await new Promise((res) => hang.listen(0, "127.0.0.1", res));
+    const t0 = Date.now();
+    r = await call("POST", "/__vault/dest/connect", { id: "hang", type: "lumiverse", baseUrl: "http://127.0.0.1:" + hang.address().port, username: "a", password: "b" });
+    t.ok(r.status === 400 && /didn't answer within/.test(r.body.error) && Date.now() - t0 < 10000,
+      "a front end that never answers gives up after the deadline, with a sentence", r.body.error);
+    hang.closeAllConnections(); hang.close();
     r = await call("POST", "/__vault/dest/connect", { id: "x", type: "ftp", baseUrl: "http://a" });
     t.ok(r.status === 400 && /Unknown destination type/.test(r.body.error), "unknown kinds are refused");
   }

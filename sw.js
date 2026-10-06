@@ -13,6 +13,11 @@
 // page (see the fetch handler); v3 caches the libraries from lib/; v4 the
 // fonts from lib/fonts/.
 const VERSION = "vault-v4";
+// A fingerprint of every lib/ file below, which test/release.test.js checks.
+// The libraries are served from the cache first under the same names, so a
+// changed library has to change this file: that makes browsers install it
+// again, and the install fetches every file fresh.
+const LIB_HASH = "ad99581c74081b2b";
 const SHELL = [
   "/RP_Card_Vault.html",
   "/manifest.webmanifest",

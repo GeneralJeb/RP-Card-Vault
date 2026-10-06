@@ -119,15 +119,17 @@ End If
 
 ' ---- open it, preferring a Chromium browser -------------------------------
 Dim candidates, i, exe, found
+' Chrome and Edge first: Brave removes the File System Access API the vault
+' needs to read your folders, so it is only the choice when nothing else is here.
 candidates = Array( _
-  sh.ExpandEnvironmentStrings("%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"), _
-  sh.ExpandEnvironmentStrings("%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"), _
-  sh.ExpandEnvironmentStrings("%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"), _
   sh.ExpandEnvironmentStrings("%ProgramFiles%\Google\Chrome\Application\chrome.exe"), _
   sh.ExpandEnvironmentStrings("%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"), _
   sh.ExpandEnvironmentStrings("%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"), _
   sh.ExpandEnvironmentStrings("%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"), _
-  sh.ExpandEnvironmentStrings("%ProgramFiles%\Microsoft\Edge\Application\msedge.exe") )
+  sh.ExpandEnvironmentStrings("%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"), _
+  sh.ExpandEnvironmentStrings("%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"), _
+  sh.ExpandEnvironmentStrings("%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"), _
+  sh.ExpandEnvironmentStrings("%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe") )
 
 found = ""
 For i = 0 To UBound(candidates)

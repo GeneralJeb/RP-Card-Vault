@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.4.1";
+const APP_VERSION = "1.4.2";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1534,6 +1534,40 @@ function specRank(spec) {
 /**
  * Given the raw bytes of a file, produce { ok, spec, data, raw, err }.
  */
+/**
+ * One zip entry's bytes, refusing more than `limit` as it unpacks. The size
+ * in the zip's header is the file's own claim, so a crafted one can say 1 KB
+ * and unpack to gigabytes; this counts what actually comes out.
+ */
+function unzipEntryLimited(entry, limit) {
+  return new Promise((resolve, reject) => {
+    const parts = [];
+    let total = 0, done = false;
+    const stream = entry.internalStream("uint8array");
+    stream.on("data", (chunk) => {
+      if (done) return;
+      total += chunk.length;
+      if (total > limit) {
+        done = true;
+        try { stream.pause(); } catch (e) { /* already stopped */ }
+        reject(new Error("card.json unpacks to over " + Math.round(limit / 1048576) + " MB"));
+        return;
+      }
+      parts.push(chunk);
+    });
+    stream.on("error", (e) => { if (!done) { done = true; reject(e); } });
+    stream.on("end", () => {
+      if (done) return;
+      done = true;
+      const out = new Uint8Array(total);
+      let at = 0;
+      for (const p of parts) { out.set(p, at); at += p.length; }
+      resolve(out);
+    });
+    stream.resume();
+  });
+}
+
 async function parseCardBytes(bytes, filename) {
   const ext = extOf(filename);
 
@@ -1555,7 +1589,7 @@ async function parseCardBytes(bytes, filename) {
       if (!f) return { ok: false, err: "charx has no card.json" };
       const size = f._data && f._data.uncompressedSize;
       if (size > CARD_UNPACK_MAX) return { ok: false, err: "charx card.json unpacks to over " + Math.round(CARD_UNPACK_MAX / 1048576) + " MB" };
-      const obj = JSON.parse(await f.async("string"));
+      const obj = JSON.parse(new TextDecoder("utf-8").decode(await unzipEntryLimited(f, CARD_UNPACK_MAX)));
       const norm = normalizeCard(obj);
       if (!norm) return { ok: false, err: "charx card.json not a character card" };
       return Object.assign({ ok: true, isCharx: true }, norm);
@@ -2303,6 +2337,78 @@ function detectDupes(records, ignore, isExcluded) {
 
 function dirKey(rootId, dir) { return rootId + "::" + (dir || ""); }
 
+/*
+ * Settings that name a folder ("rootId::dir": private folders, the trash, the
+ * backup and filing folders, folder destinations, folder labels) point at a
+ * registration's random id. When that id goes (a restore into a browser whose
+ * folders were added again, or a folder replaced by the one around it), the
+ * keys are carried over to the folder as it is registered now. `idMap` maps an
+ * old id to { id, prefix }: the root it lives in now and the path in front.
+ */
+function importRootIdMap(exportRoots, currentRoots) {
+  const map = Object.create(null);
+  for (const r of currentRoots || []) map[r.id] = { id: r.id, prefix: "" };
+  const byName = new Map();
+  for (const r of currentRoots || []) {
+    const k = String(r.name || "").toLowerCase();
+    byName.set(k, byName.has(k) ? null : r);   // a name two folders share can't be matched
+  }
+  for (const r of exportRoots || []) {
+    if (!r || !r.id || map[r.id]) continue;
+    const hit = byName.get(String(r.name || "").toLowerCase());
+    if (hit) map[r.id] = { id: hit.id, prefix: "" };
+  }
+  return map;
+}
+
+/** One key carried over, "" for none, or null when its folder isn't registered now. */
+function remapDirKey(key, idMap) {
+  if (!key) return "";
+  const k = parseDirKey(key);
+  const to = idMap[k.rootId];
+  return to ? dirKey(to.id, [to.prefix, k.dir].filter(Boolean).join("/")) : null;
+}
+
+/**
+ * `incoming`'s folder settings carried onto the folders registered now, as a
+ * settings patch. Private folders are added to the current ones, never put in
+ * their place; `lostPrivate` counts those that couldn't be placed.
+ */
+function remapRootSettings(incoming, current, idMap) {
+  const inc = incoming || {}, cur = current || {};
+  const patch = {};
+  const mapped = (Array.isArray(inc.privateFolders) ? inc.privateFolders : []).map((k) => remapDirKey(k, idMap));
+  patch.privateFolders = Array.from(new Set((cur.privateFolders || []).concat(mapped.filter(Boolean))));
+  for (const f of ["trashKey", "afterSendKey"]) {
+    if (inc[f] === undefined) continue;
+    const m = remapDirKey(inc[f], idMap);
+    patch[f] = m === null ? (cur[f] || "") : m;
+  }
+  if (inc.autoBackupKey !== undefined) {
+    const v = inc.autoBackupKey;
+    const m = v === "auto" || v === "off" ? v : remapDirKey(v, idMap);
+    patch.autoBackupKey = m === null ? (cur.autoBackupKey == null ? "auto" : cur.autoBackupKey) : m;
+  }
+  if (Array.isArray(inc.destinations)) {
+    patch.destinations = inc.destinations.map((d) => {
+      if (!d || d.type !== "folder" || !d.folderKey) return d;
+      const m = remapDirKey(d.folderKey, idMap);
+      return Object.assign({}, d, { folderKey: m || "" });
+    });
+  }
+  return { patch, lostPrivate: mapped.filter((x) => x === null).length };
+}
+
+/** An object keyed by "rootId::dir" (folder labels), carried over; keys with no folder now are dropped. */
+function remapDirKeyed(obj, idMap) {
+  const out = {};
+  for (const k of Object.keys(obj || {})) {
+    const m = remapDirKey(k, idMap);
+    if (m) out[m] = obj[k];
+  }
+  return out;
+}
+
 function parseDirKey(k) {
   const i = String(k).indexOf("::");
   return i < 0 ? { rootId: k, dir: "" } : { rootId: k.slice(0, i), dir: k.slice(i + 2) };
@@ -2544,6 +2650,10 @@ async function moveCardTo(rec, srcRoot, destRoot, destDir) {
   // 3. verify the copy really exists and matches, byte signature for byte signature
   const destDirHandle = await getDirByPath(destRoot.handle, destDirs, false);
   const checkFh = await destDirHandle.getFileHandle(written.name, { create: false });
+  // The "copy" may be the original itself: the same folder under another
+  // spelling ("fantasy" and "Fantasy" on Windows), or a folder reached from two
+  // registered ones. Removing the source would then delete the only copy.
+  if (await srcFh.isSameEntry(checkFh)) return { skipped: true, reason: "already in that folder" };
   const checkFile = await checkFh.getFile();
   if (checkFile.size !== srcFile.size) throw new Error("Copy verification failed (size mismatch) — source left untouched");
   const checkSig = await byteSignature(checkFile);
@@ -3143,8 +3253,10 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   let backupPath = "";
   if (opts.backup !== false) {
     const bName = baseName(rec.file) + " " + stampNow() + (rec.ext ? "." + rec.ext : "");
-    const res = await copyIntoRoot(root, [BACKUP_FOLDER_NAME], bName, new Blob([originalBytes]), rec.sig);
-    backupPath = root.name + "/" + BACKUP_FOLDER_NAME + "/" + res.name;
+    // In a copy of the card's own folder path, so two cards with the same file
+    // name in different folders never share (or prune) each other's backups.
+    const res = await copyIntoRoot(root, [BACKUP_FOLDER_NAME].concat(dirs), bName, new Blob([originalBytes]), rec.sig);
+    backupPath = [root.name, BACKUP_FOLDER_NAME].concat(dirs, [res.name]).join("/");
   }
 
   const restore = async () => {
@@ -3216,7 +3328,7 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   let pruned = 0;
   if (backupPath && opts.keep > 0) {
     try {
-      const bdir = await getDirByPath(root.handle, [BACKUP_FOLDER_NAME], false);
+      const bdir = await getDirByPath(root.handle, [BACKUP_FOLDER_NAME].concat(dirs), false);
       const names = [];
       for await (const [n, e] of bdir.entries()) if (e.kind === "file") names.push(n);
       for (const n of backupsToPrune(names, rec.file, opts.keep)) {
@@ -11751,13 +11863,15 @@ function IngestModal({ roots, records, settings, tagMeta, folderRoles, dupeExclu
           wrote.push(dest.name + "/" + (fullDirs.length ? fullDirs.join("/") + "/" : "") + out.name + (out.skipped ? " (already there)" : ""));
         }
         if (moveSource) {
+          // Never over an earlier ingest's copy (numbered instead), and the
+          // source goes only once its copy reads back the same.
           const srcRoot = roots.find((r) => r.id === p.rec.rootId);
           const dirs = p.rec.dir ? p.rec.dir.split("/") : [];
-          const doneDir = await getDirByPath(srcRoot.handle, ["_ingested"].concat(dirs), true);
-          const fh = await doneDir.getFileHandle(p.rec.file, { create: true });
-          const w = await fh.createWritable();
-          await w.write(blob);
-          await w.close();
+          const sig = await byteSignature(blob);
+          const kept = await copyIntoRoot(srcRoot, ["_ingested"].concat(dirs), p.rec.file, blob, sig);
+          const doneDir = await getDirByPath(srcRoot.handle, ["_ingested"].concat(dirs), false);
+          const back = await (await doneDir.getFileHandle(kept.name, { create: false })).getFile();
+          if (back.size !== blob.size || (await byteSignature(back)) !== sig) throw new Error("its copy in _ingested didn't check out, so the source was left where it was");
           const srcDir = await getDirByPath(srcRoot.handle, dirs, false);
           await srcDir.removeEntry(p.rec.file);
           res.moved++;
@@ -14382,18 +14496,27 @@ function App() {
         "Registering both would index those cards twice and report them all as duplicates.\n\n" +
         "Add the outer folder and drop the inner registration?"
       )) return;
+    }
+    const root = { id: uid(), name: handle.name, role, handle, addedAt: Date.now(), lastScan: 0 };
+    if (nest && nest.kind === "contains") {
+      // Its private folders, labels, trash and the like now live under the
+      // outer folder: carry them over before its registration goes.
+      const idMap = importRootIdMap([], roots);
+      idMap[nest.root.id] = { id: root.id, prefix: nest.path };
+      patchSettings(remapRootSettings(settings, settings, idMap).patch);
+      const roles = Object.assign({}, folderRoles, remapDirKeyed(folderRoles, idMap));
+      setFolderRoles(roles); saveFolderRoles(roles);
       await dbDel(STORE_ROOTS, nest.root.id);
       await dbDelCardsOfRoot(nest.root.id);
       setRoots((prev) => prev.filter((r) => r.id !== nest.root.id));
       setCards((prev) => prev.filter((c) => c.rootId !== nest.root.id));
     }
 
-    const root = { id: uid(), name: handle.name, role, handle, addedAt: Date.now(), lastScan: 0 };
     await dbPut(STORE_ROOTS, root);
     setRoots((prev) => prev.concat([root]));
     showToast("Added " + root.name + " as " + ROOT_ROLES[role].label, "cyan");
     setTimeout(() => runScanRef.current(root, false), 50);
-  }, [showToast, roots, cards, setFolderRole]);
+  }, [showToast, roots, cards, setFolderRole, settings, folderRoles, patchSettings]);
 
   const runScanRef = useRef(runScan);
   useEffect(() => { runScanRef.current = runScan; }, [runScan]);
@@ -14482,7 +14605,7 @@ function App() {
       app: APP_NAME, version: APP_VERSION, format: 2, exportedAt: Date.now(),
       settings, tagMeta, edits: eds, folderRoles, dupeMode,
       agentChats: chats, aiAnswers: answers,
-      roots: roots.map((r) => ({ name: r.name, role: r.role })),
+      roots: roots.map((r) => ({ id: r.id, name: r.name, role: r.role })),
       cardCount: cards.length,
     };
   }, [settings, tagMeta, folderRoles, dupeMode, roots, cards]);
@@ -14541,14 +14664,23 @@ function App() {
         const p = JSON.parse(ev.target.result);
         if (!p || !Array.isArray(p.edits)) throw new Error("Not a vault export");
         if (p.tagMeta) saveMeta(Object.assign({}, DEFAULT_TAGMETA, p.tagMeta));
-        if (p.settings) patchSettings(p.settings);
+        // Folder settings point at folder registrations, which have new ids
+        // once folders are added again: carry them over by folder name, and
+        // never let an import take a folder out of Keep private.
+        const idMap = importRootIdMap(p.roots, roots);
+        let lostPrivate = 0;
+        if (p.settings) {
+          const moved = remapRootSettings(p.settings, settings, idMap);
+          lostPrivate = moved.lostPrivate;
+          patchSettings(Object.assign({}, p.settings, moved.patch));
+        }
         await dbPutMany(STORE_EDITS, p.edits);
         const m = new Map(editsMap);
         for (const e of p.edits) if (e && e.fingerprint) m.set(e.fingerprint, e);
         setEditsMap(m);
         // Exports from before format 2 have none of these; that's fine.
         if (p.folderRoles && typeof p.folderRoles === "object") {
-          const roles = Object.assign({}, folderRoles, p.folderRoles);
+          const roles = Object.assign({}, folderRoles, remapDirKeyed(p.folderRoles, idMap));
           setFolderRoles(roles); saveFolderRoles(roles);
         }
         if (p.dupeMode && typeof p.dupeMode === "object") {
@@ -14563,11 +14695,16 @@ function App() {
           (chats.length ? ", " + fmtNum(chats.length) + " agent chats" : "") +
           (answers.length ? ", " + fmtNum(answers.length) + " saved AI answers" : "") +
           (chats.length || answers.length ? ". Reloading to show them…" : ""), "green");
-        if (chats.length || answers.length) setTimeout(() => window.location.reload(), 1500);
+        if (lostPrivate) {
+          showToast(lostPrivate + " folder" + (lostPrivate === 1 ? "" : "s") + " kept private from the AI in that export " +
+            (lostPrivate === 1 ? "isn't" : "aren't") + " linked here. Add " + (lostPrivate === 1 ? "it" : "them") +
+            ", then right-click → Keep private from the AI again.", "warm");
+        }
+        if (chats.length || answers.length) setTimeout(() => window.location.reload(), lostPrivate ? 6000 : 1500);
       } catch (e) { showToast("Import failed: " + e.message, "red"); }
     };
     reader.readAsText(file);
-  }, [editsMap, folderRoles, dupeMode, saveMeta, patchSettings, showToast]);
+  }, [editsMap, folderRoles, dupeMode, saveMeta, patchSettings, showToast, roots, settings]);
 
   /*
    * Everything the vault keeps in this browser goes: the index and card
@@ -15376,7 +15513,7 @@ function App() {
     if (!(await verifyPermission(root.handle, true))) { showToast("Write permission denied for " + root.name, "red"); return; }
     setScan({ running: true, done: 0, total: recs.length, label: "Sending…", rootName: root.name });
     let sent = 0, already = 0, failed = 0;
-    const okIds = [];
+    const okIds = [], errs = [];
     for (let i = 0; i < recs.length; i++) {
       const rec = recs[i];
       setScan({ running: true, done: i, total: recs.length, label: rec.file, rootName: root.name });
@@ -15385,7 +15522,7 @@ function App() {
         const out = await copyIntoRoot(root, dir ? dir.split("/") : [], rec.file, new Blob([bytes]), rec.sig);
         if (out.skipped) already++; else sent++;
         okIds.push(rec.id);
-      } catch (e) { failed++; }
+      } catch (e) { failed++; errs.push(rec.file + ": " + ((e && e.message) || String(e))); }
     }
     setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
     await logOp("sendToFrontend", { count: recs.length, to: root.name + (dir ? "/" + dir : ""), sent, already, failed });
@@ -15394,7 +15531,7 @@ function App() {
       sent + " sent to " + dest.name +
       (already ? ", " + already + " already there" : "") +
       (filed ? " · " + (filed.note || filed.moved + " filed into " + filed.label) : "") +
-      (failed ? ", " + failed + " failed" : "") +
+      (failed ? ", " + failed + " failed — " + errs.slice(0, 2).join(" | ") : "") +
       (sent && !filed ? " · refresh your front end to see them" : ""),
       failed ? "red" : "green"
     );

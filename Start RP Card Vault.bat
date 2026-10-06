@@ -67,6 +67,21 @@ rem Fall back to Python if Node is missing. This serves the page and nothing
 rem else: python -m http.server knows nothing about /__vault/, so the AI relay
 rem and the front-end bridge are both dead in this mode. Everything that runs
 rem in the browser - scanning, tagging, editing - still works.
+rem
+rem python -m http.server would serve EVERY file in its folder (the agent's
+rem workspace, vault.local, .git), so it serves a copy of just the app's own
+rem files, made fresh in a temporary folder each time.
+set STAGE=%TEMP%\rp-card-vault-web-%VAULT_PORT%
+where py >nul 2>nul
+if %errorlevel%==0 goto :stage
+where python >nul 2>nul
+if %errorlevel%==0 goto :stage
+goto :nopython
+
+:stage
+if exist "%STAGE%" rmdir /s /q "%STAGE%"
+robocopy "%~dp0." "%STAGE%" RP_Card_Vault.html manifest.webmanifest sw.js icon-192.png icon-512.png RP_Card_Vault.ico /NJH /NJS /NFL /NDL /NP >nul
+robocopy "%~dp0lib" "%STAGE%\lib" /E /NJH /NJS /NFL /NDL /NP >nul
 where py >nul 2>nul
 if %errorlevel%==0 (
   echo   Node not found - using Python instead.
@@ -74,7 +89,7 @@ if %errorlevel%==0 (
   echo            upload bridge will not work. Install Node.js to get them.
   echo   Open: http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html
   start "" "http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html"
-  py -m http.server %VAULT_PORT% --bind 127.0.0.1
+  py -m http.server %VAULT_PORT% --bind 127.0.0.1 --directory "%STAGE%"
   goto :done
 )
 
@@ -85,10 +100,11 @@ if %errorlevel%==0 (
   echo            upload bridge will not work. Install Node.js to get them.
   echo   Open: http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html
   start "" "http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html"
-  python -m http.server %VAULT_PORT% --bind 127.0.0.1
+  python -m http.server %VAULT_PORT% --bind 127.0.0.1 --directory "%STAGE%"
   goto :done
 )
 
+:nopython
 echo.
 echo   Neither Node.js nor Python was found on this machine.
 echo.
