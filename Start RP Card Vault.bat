@@ -70,39 +70,28 @@ rem in the browser - scanning, tagging, editing - still works.
 rem
 rem python -m http.server would serve EVERY file in its folder (the agent's
 rem workspace, vault.local, .git), so it serves a copy of just the app's own
-rem files, made fresh in a temporary folder each time.
+rem files, kept in a temporary folder.
 set STAGE=%TEMP%\rp-card-vault-web-%VAULT_PORT%
+set PY=
 where py >nul 2>nul
-if %errorlevel%==0 goto :stage
-where python >nul 2>nul
-if %errorlevel%==0 goto :stage
-goto :nopython
+if %errorlevel%==0 set PY=py
+if not defined PY (
+  where python >nul 2>nul
+  if not errorlevel 1 set PY=python
+)
+if not defined PY goto :nopython
 
-:stage
-if exist "%STAGE%" rmdir /s /q "%STAGE%"
+rem /MIR keeps the copy in step with this folder: changed files are copied,
+rem unchanged ones skipped, and anything no longer here removed from it.
 robocopy "%~dp0." "%STAGE%" RP_Card_Vault.html manifest.webmanifest sw.js icon-192.png icon-512.png RP_Card_Vault.ico /NJH /NJS /NFL /NDL /NP >nul
-robocopy "%~dp0lib" "%STAGE%\lib" /E /NJH /NJS /NFL /NDL /NP >nul
-where py >nul 2>nul
-if %errorlevel%==0 (
-  echo   Node not found - using Python instead.
-  echo   WARNING: no /__vault/ relay, so the AI features and the front-end
-  echo            upload bridge will not work. Install Node.js to get them.
-  echo   Open: http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html
-  start "" "http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html"
-  py -m http.server %VAULT_PORT% --bind 127.0.0.1 --directory "%STAGE%"
-  goto :done
-)
-
-where python >nul 2>nul
-if %errorlevel%==0 (
-  echo   Node not found - using Python instead.
-  echo   WARNING: no /__vault/ relay, so the AI features and the front-end
-  echo            upload bridge will not work. Install Node.js to get them.
-  echo   Open: http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html
-  start "" "http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html"
-  python -m http.server %VAULT_PORT% --bind 127.0.0.1 --directory "%STAGE%"
-  goto :done
-)
+robocopy "%~dp0lib" "%STAGE%\lib" /MIR /NJH /NJS /NFL /NDL /NP >nul
+echo   Node not found - using Python instead.
+echo   WARNING: no /__vault/ relay, so the AI features and the front-end
+echo            upload bridge will not work. Install Node.js to get them.
+echo   Open: http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html
+start "" "http://127.0.0.1:%VAULT_PORT%/RP_Card_Vault.html"
+%PY% -m http.server %VAULT_PORT% --bind 127.0.0.1 --directory "%STAGE%"
+goto :done
 
 :nopython
 echo.

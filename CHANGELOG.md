@@ -8,6 +8,23 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.2
+
+A tidy-up of the code changed since 1.3.0. Almost all of it works exactly as
+before; two small differences:
+
+- **Two more folder settings follow your folders** after an import or when a
+  folder replaces the one inside it: the duplicate finder's per-folder
+  choices, and the folders Ingest last used.
+- **Ingest's "Move source to _ingested/" uses the same checked move as the
+  rest of the vault,** so it shows up in the Log like any other move.
+
+Under the hood: one copy of the "move, check, then remove" steps, one guard
+against files that unpack to gigabytes, the agent chat no longer re-reads
+its tool results for every piece of a streamed reply, the grid is told when
+it appears instead of checking after every change, and the Python fallback
+updates its copy of the vault instead of rebuilding it each start.
+
 ## 1.5.1
 
 Fixes for GitHub's code scanning and Dependabot alerts.

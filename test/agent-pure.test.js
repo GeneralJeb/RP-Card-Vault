@@ -16,7 +16,7 @@ const t = require("./harness");
 const { mod: V } = loadPureRegion([
   "AGENT_TOOLS", "AGENT_RULES", "AGENT_LIMITS", "DEFAULT_AGENT_SETTINGS", "sanitizeAgentSettings",
   "setCustomFlags", "sanitizeCustomFlags", "customFlagKey", "statusFlags", "flagDef", "agentActiveTools",
-  "newAgentSession", "agentSessionTitle", "agentToolsForModel", "parseTextToolCalls", "dropModelResults", "agentKnownResults",
+  "newAgentSession", "agentSessionTitle", "agentToolsForModel", "parseTextToolCalls", "dropModelResults", "agentKnownLines",
   "interpretAgentStep", "agentModelMessages", "fitAgentContext", "rateWait", "rateRecord",
   "capToolOutput", "runAgentTool", "runAgentLoop", "aiEmptyStream", "aiStreamStep",
   "AI_PERSONA_DEFAULT", "splitThinkingAnywhere", "parseMarkdown", "cleanAgentTitle", "agentTitleRequest",
@@ -388,7 +388,10 @@ async function main() {
     step = V.interpretAgentStep(acc, true, [inspected]);
     t.ok(step.ok && /^Ramia is a lamia/.test(step.text), "so that reply is an answer, not \"only repeated a tool result\"");
     const chat = { messages: [{ role: "user", text: "x" }, { role: "tool", id: "t1", name: "inspect_card", result: inspected }] };
-    t.eq(V.agentKnownResults(chat), [inspected], "the chat's tool results are what a repeat is compared with");
+    const lines = V.agentKnownLines(chat);
+    t.ok(lines.has("Name: Ramia") && lines.has("Vault-only tags: (none)") && !lines.has("x"), "the chat's tool results, line by line, are what a repeat is compared with");
+    t.ok(V.agentKnownLines(chat) === lines, "and they're worked out once per version of the chat, not for every streamed piece");
+    t.eq(V.dropModelResults(echo, lines), V.dropModelResults(echo, [inspected]), "the cleanup takes them as lines or as the results");
     t.eq(V.dropModelResults("No blocks here."), "No blocks here.", "a reply without one is unchanged");
     acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: "<tool_result>x</tool_result>" }), { t: "done" });
     step = V.interpretAgentStep(acc, true);
