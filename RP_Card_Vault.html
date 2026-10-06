@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.3.2";
+const APP_VERSION = "1.3.3";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -5099,15 +5099,37 @@ function parseTextToolCalls(text) {
  * Only the vault writes <tool_result> blocks. A model that writes one is making
  * up (or repeating) a result. After a tool block, everything from there on rests
  * on a result it hasn't had yet, so the reply is cut there; otherwise just the
- * blocks go, an unclosed one to the end.
+ * blocks go. A repeated block a model leaves unclosed ends at its last closing
+ * tag (the vault's results end in one, such as </card>), so the answer after it
+ * is kept; with none, it runs to the end.
  */
 function dropModelResults(text) {
-  const s = String(text == null ? "" : text);
+  let s = String(text == null ? "" : text);
   const at = s.search(/<tool_result\b/i);
   if (at < 0) return s;
-  const before = s.slice(0, at);
-  if (/<tool\s+name\s*=/i.test(before)) return before.trim();
-  return s.replace(/<tool_result\b[^>]*>[\s\S]*?(<\/tool_result>|$)/gi, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (/<tool\s+name\s*=/i.test(s.slice(0, at))) return s.slice(0, at).trim();
+  for (let i = at; i >= 0; i = s.search(/<tool_result\b/i)) {
+    const rest = s.slice(i);
+    const close = rest.search(/<\/tool_result>/i);
+    let end = rest.length;
+    if (close >= 0) end = close + "</tool_result>".length;
+    else {
+      const tags = rest.match(/<\/[\w-]+>/g);
+      if (tags) end = rest.lastIndexOf(tags[tags.length - 1]) + tags[tags.length - 1].length;
+    }
+    s = s.slice(0, i) + rest.slice(end);
+  }
+  return s.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Why a step came back with nothing to show, as specifically as the reply allows. */
+function emptyReplyReason(finish, hadText, think) {
+  const f = String(finish || "");
+  if (hadText) return "The model only repeated a tool result instead of answering. Regenerate reply usually gets a proper answer.";
+  if (think) return "The model spent its whole reply thinking and never answered. Raise Max tokens out in the ✦ AI panel.";
+  if (/length|max_tokens/i.test(f)) return "The reply hit Max tokens before any answer. Raise Max tokens in the ✦ AI panel.";
+  if (/filter|safety|recitation|prohibited|blocklist|spii|block/i.test(f)) return "The provider blocked the reply (finish reason: " + f + "). Rewording the request or another model may get through.";
+  return "The model sent back an empty reply" + (f ? " (finish reason: " + f + ")" : "") + ". This comes from the provider; Regenerate reply often works.";
 }
 
 function agentCallsAsText(calls) {
@@ -5159,11 +5181,7 @@ function interpretAgentStep(acc, textMode) {
     const p = parseTextToolCalls(text);
     text = p.text; calls = p.calls;
   }
-  if (!text && !calls.length) {
-    return { ok: false, error: think
-      ? "The model spent its whole reply thinking and never answered. Raise Max tokens out in the ✦ AI panel."
-      : "The model sent back an empty reply." };
-  }
+  if (!text && !calls.length) return { ok: false, error: emptyReplyReason(acc.finish, /<tool_result\b/i.test(split.text), think) };
   return { ok: true, text, think, calls, usage: acc.usage, finish: acc.finish, model: acc.model };
 }
 
