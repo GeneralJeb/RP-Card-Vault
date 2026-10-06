@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.4.1";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.4.3";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -174,6 +174,27 @@ async function readUpstream(r) {
   return { text, data };
 }
 
+const DEST_TIMEOUT_MS = Number(process.env.VAULT_DEST_TIMEOUT_MS) || 60000;   // the tests use a short one
+
+/**
+ * One call to a front end, answer read and all, with a deadline: one that
+ * accepts the connection and never answers mustn't leave Connect or Send
+ * hanging. Gives the response (for its status and headers) and its body.
+ */
+async function destFetch(url, opts) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), DEST_TIMEOUT_MS);
+  try {
+    const r = await fetch(url, Object.assign({}, opts, { signal: ac.signal }));
+    return { r, u: await readUpstream(r) };
+  } catch (e) {
+    if (ac.signal.aborted) throw userError(originOf(url) + " didn't answer within " + DEST_TIMEOUT_MS / 1000 + "s. Is it busy, or stuck?");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function upstreamError(prefix, r, u) {
   const msg = (u.data && (u.data.error || u.data.message)) || u.text.slice(0, 200) || ("HTTP " + r.status);
   const e = new Error(prefix + (typeof msg === "string" ? msg : JSON.stringify(msg)));
@@ -190,11 +211,10 @@ function fileFor(name, buf) {
 /* ── Lumiverse ── */
 
 async function lumiverseConnect(d, body) {
-  const r = await fetch(d.baseUrl + "/api/auth/sign-in/username", {
+  const { r, u } = await destFetch(d.baseUrl + "/api/auth/sign-in/username", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username: body.username, password: body.password }),
   });
-  const u = await readUpstream(r);
   if (!r.ok) throw upstreamError("Sign-in failed: ", r, u);
   // BetterAuth's bearer plugin returns the session token in this header;
   // fall back to the JSON body, and finally to the session cookie.
@@ -212,8 +232,7 @@ async function lumiverseSend(d, name, buf) {
   const fd = new FormData();
   fd.append("file", fileFor(name, buf), name);
   const headers = d.token.startsWith("cookie:") ? { Cookie: d.token.slice(7) } : { Authorization: "Bearer " + d.token };
-  const r = await fetch(d.baseUrl + "/api/v1/characters/import", { method: "POST", headers, body: fd });
-  const u = await readUpstream(r);
+  const { r, u } = await destFetch(d.baseUrl + "/api/v1/characters/import", { method: "POST", headers, body: fd });
   if (!r.ok) throw upstreamError("", r, u);
   const ch = u.data && u.data.character;
   return { name: (ch && ch.name) || name };
@@ -222,8 +241,7 @@ async function lumiverseSend(d, name, buf) {
 /* ── SillyTavern ── */
 
 async function sillyTavernCsrf(d) {
-  const r = await fetch(d.baseUrl + "/csrf-token", { headers: d.cookies.length ? { Cookie: d.cookies.join("; ") } : {} });
-  const u = await readUpstream(r);
+  const { r, u } = await destFetch(d.baseUrl + "/csrf-token", { headers: d.cookies.length ? { Cookie: d.cookies.join("; ") } : {} });
   if (!r.ok || !u.data || !u.data.token) {
     throw upstreamError("SillyTavern didn't give a session" + (r.status === 403 ? " (is this computer allowed in its whitelist?)" : "") + ": ", r, u);
   }
@@ -237,12 +255,11 @@ async function sillyTavernConnect(d, body) {
   // With user accounts on, SillyTavern needs a sign-in; without, a handle is
   // simply not needed.
   if (String(body.username || "").trim()) {
-    const r = await fetch(d.baseUrl + "/api/users/login", {
+    const { r, u } = await destFetch(d.baseUrl + "/api/users/login", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": d.csrf, Cookie: d.cookies.join("; ") },
       body: JSON.stringify({ handle: String(body.username).trim(), password: String(body.password || "") }),
     });
-    const u = await readUpstream(r);
     if (!r.ok) throw upstreamError("Sign-in failed: ", r, u);
     d.cookies = mergeCookies(d.cookies, cookiesOf(r));
     d.user = String(body.username).trim();
@@ -258,14 +275,13 @@ async function sillyTavernSend(d, name, buf) {
     const fd = new FormData();
     fd.append("avatar", fileFor(name, buf), name);
     fd.append("file_type", fileType);
-    return fetch(d.baseUrl + "/api/characters/import", {
+    return destFetch(d.baseUrl + "/api/characters/import", {
       method: "POST", headers: { "X-CSRF-Token": d.csrf, Cookie: d.cookies.join("; ") }, body: fd,
     });
   };
-  let r = await send();
+  let { r, u } = await send();
   // A session that expired gets one fresh token and one more try.
-  if (r.status === 403) { await sillyTavernCsrf(d); r = await send(); }
-  const u = await readUpstream(r);
+  if (r.status === 403) { await sillyTavernCsrf(d); ({ r, u } = await send()); }
   if (!r.ok) throw upstreamError("", r, u);
   // SillyTavern answers 200 { error: true } when it can't read the card.
   if (u.data && u.data.error) throw userError("SillyTavern couldn't import " + name + " (see its console for why).");
@@ -285,8 +301,7 @@ async function httpSend(d, name, buf) {
   const fd = new FormData();
   fd.append(d.field, fileFor(name, buf), name);
   const headers = d.header ? { [d.header]: d.token } : {};
-  const r = await fetch(d.baseUrl, { method: "POST", headers, body: fd });
-  const u = await readUpstream(r);
+  const { r, u } = await destFetch(d.baseUrl, { method: "POST", headers, body: fd });
   if (!r.ok) throw upstreamError("", r, u);
   return { name };
 }

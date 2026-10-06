@@ -8,6 +8,47 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.4.3
+
+- **Fixed: a new vault showed only the first 6 cards.** The grid measured
+  its size once, when the page opened, and a new vault has no grid then
+  (it shows "Point the vault at your card folders"). Unmeasured, it drew
+  one column's worth of cards, about 6, until the tile size was changed. It
+  now measures itself as soon as it appears.
+
+## 1.4.2
+
+Fixes from a full review of the vault.
+
+- **Fixed: moving cards could delete them.** Moving cards into the folder
+  they were already in, under another spelling ("fantasy" for "Fantasy",
+  which Windows treats as the same folder), removed them after "checking"
+  the copy, which was the card itself. Such a move now does nothing.
+- **Fixed: private folders could stop being private.** Importing vault
+  data after adding your folders again, or adding a folder around a private
+  one, lost the setting, and the AI could read those cards. Private folders,
+  the trash, the backup and filing folders, folder destinations and folder
+  labels now follow the folder. An import adds to your private folders and
+  never removes one, and says if one it holds isn't linked here.
+- **Fixed: one card's save could delete another's backups.** Backups now go
+  in `_vault backups/` under a copy of the card's own folder path, so two
+  cards with the same file name in different folders keep their own.
+  Backups made before this stay where they are.
+- **Ingest's "Move source to _ingested/"** no longer overwrites an earlier
+  copy there (it numbers the new one), and only removes the source once its
+  copy reads back the same.
+- **A .charx can't make the tab run out of memory.** What its card unpacks
+  to is now counted as it unpacks, not taken from the file's own header.
+- **Sending to a front end can't hang.** Lumiverse, SillyTavern and other
+  import calls give up after 60 seconds with a message.
+- **Sending to a folder says why a card failed,** not just how many.
+- **The desktop shortcut prefers Chrome and Edge over Brave,** which needs a
+  setting changed before it can read folders.
+- **Without Node, the Python fallback serves only the vault's own files,**
+  from a temporary copy, not everything in its folder.
+- **An updated library can't be left behind in the offline copy.** The
+  service worker now changes whenever a library does, so it's fetched again.
+
 ## 1.4.1
 
 - **Fixed: an answer lost after a repeated tool result.** 1.3.3 kept the

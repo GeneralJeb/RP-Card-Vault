@@ -1,6 +1,6 @@
 {
   "name": "rp-card-vault",
-  "version": "1.4.1",
+  "version": "1.4.3",
   "private": true,
   "description": "Local catalogue for roleplay character cards: RP_Card_Vault.html + serve.js. No runtime dependencies; these are for the tests only.",
   "scripts": {
