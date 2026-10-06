@@ -8,6 +8,14 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.2
+
+- **A message shown twice in a row stays up the second time.** Each message
+  used to be taken down a few seconds later by its text, so the same words
+  shown again soon after vanished at once: Back up now, clicked within a
+  few seconds of an automatic backup, said nothing at all. Each message now
+  gets its own full time on screen.
+
 ## 1.5.1
 
 Fixes for GitHub's code scanning and Dependabot alerts.

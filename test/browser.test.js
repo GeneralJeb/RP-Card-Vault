@@ -309,6 +309,13 @@ async function main() {
       const files = Object.keys(await listFiles(page, "Cards")).filter((f) => /^_vault data\//.test(f));
       t.ok(files.length >= 1, "a backup is there", files);
       t.ok(await page.getByText(/^Last backup /).isVisible(), "and Settings says when the last one was made");
+      // The same message again, before the first has gone: the first one's
+      // timer (4.2 s) must not take the second down with it.
+      await page.waitForTimeout(1900);
+      await page.getByRole("button", { name: "Back up now" }).click();
+      await page.waitForTimeout(2500);
+      t.ok(await page.getByText(/Vault data backed up to Cards\/_vault data/).first().isVisible(),
+        "Back up now again a moment later says so too, for its own full time");
       await page.getByRole("button", { name: "Close", exact: true }).click();
     });
 

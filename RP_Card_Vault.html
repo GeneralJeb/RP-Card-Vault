@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.5.2";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -13864,16 +13864,20 @@ function App() {
     const c = color || "green";
     const isProblem = c === "red" || c === "warm";
     if (isProblem) logProblem("Notice", msg, "", c === "red" ? "error" : "warn");
+    const id = uid();
     setToast((prev) => {
       // Stop a routine message that fires moments later (a follow-up rescan,
       // say) from burying a failure. Kept deliberately short: anything the
       // user does afterwards must be free to report its own result, otherwise
       // a stale error hides the outcome of their next action.
       if (prev && prev.color === "red" && !isProblem && Date.now() - prev.at < 3000) return prev;
-      return { msg, color: c, id: uid(), at: Date.now(), sticky: isProblem };
+      return { msg, color: c, id, at: Date.now(), sticky: isProblem };
     });
+    // Take down this message only, never a newer one: the same words shown
+    // again a moment later (Back up now just after an automatic backup, say)
+    // must get their own full time on screen.
     const ttl = isProblem ? 15000 : 4200;
-    setTimeout(() => setToast((t) => (t && t.msg === msg ? null : t)), ttl);
+    setTimeout(() => setToast((t) => (t && t.id === id ? null : t)), ttl);
   }, []);
 
   // Flags of your own: set during render, so everything drawn below sees them.
