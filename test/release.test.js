@@ -122,6 +122,19 @@ t.ok(/push:\s*\n\s*branches: \[main\]/.test(relYml), "releases come only from ma
 t.ok(/refs\/tags\/v\$VERSION/.test(relYml) && /already released/.test(relYml), "an already-released version releases nothing");
 t.ok(/awk -v v="## \$VERSION"/.test(relYml) && /--notes-file notes\.md/.test(relYml), "the notes are that version's CHANGELOG section");
 {
+  // The download zip: everything the vault serves, every launcher, and nothing for developers.
+  const cp = (relYml.match(/cp -r ([\s\S]*?) "\$DIR"\//) || [])[1] || "";
+  const listed = [...cp.replace(/\\\n/g, " ").matchAll(/"([^"]+)"|(\S+)/g)].map((m) => m[1] || m[2]);
+  const served = [...new Set(Object.values(relay.STATIC_FILES || {}).map((f) => f.split("/")[0]))];
+  const launchers = fs.readdirSync(ROOT).filter((f) => /\.(bat|vbs|ps1)$/i.test(f));
+  t.ok(served.length > 5 && served.every((f) => listed.indexOf(f) >= 0), "the release zip has every file the server serves (" + served.join(", ") + ")",
+    served.filter((f) => listed.indexOf(f) < 0));
+  t.ok(launchers.every((f) => listed.indexOf(f) >= 0) && listed.indexOf("HOW TO RUN.txt") >= 0, "and every launcher, with HOW TO RUN.txt",
+    launchers.filter((f) => listed.indexOf(f) < 0));
+  t.ok(!listed.some((f) => /^(test|\.github|package(-lock)?\.json|node_modules|docs)$/.test(f)), "but none of the developer files");
+  t.ok(/zip -qr "\$DIR\.zip" "\$DIR"/.test(relYml) && /--notes-file notes\.md "\$DIR\.zip"/.test(relYml), "and it's attached to the release");
+}
+{
   // The awk the workflow runs, done in JS: the section must exist and not run into the next one.
   const lines = changelog.split("\n");
   const at = lines.indexOf("## " + version);

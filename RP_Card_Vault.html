@@ -47,8 +47,8 @@ try {
   --border-accent: #3d4455;
 
   --text-primary:   #e8e6e1;
-  --text-secondary: #9a978f;
-  --text-muted:     #5e5c56;
+  --text-secondary: #a9a69e;
+  --text-muted:     #87857d;
 
   --accent-warm:      #c7935a;
   --accent-warm-dim:  #9e7345;
@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.4.3";
+const APP_VERSION = "1.5.0";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -662,13 +662,13 @@ const THEME_VARS = ["--bg-primary", "--bg-secondary", "--bg-tertiary", "--bg-ele
   "--accent-blue", "--accent-pink", "--accent-cyan", "--accent-purple", "--on-art-mix"];
 const THEMES = {
   vault: { label: "Vault (dark, warm)", light: false, colors: [
-    "#0d0f13", "#14171e", "#1a1e28", "#1f2430", "#161a23", "#2a2f3d", "#3d4455", "#e8e6e1", "#9a978f", "#5e5c56",
+    "#0d0f13", "#14171e", "#1a1e28", "#1f2430", "#161a23", "#2a2f3d", "#3d4455", "#e8e6e1", "#a9a69e", "#87857d",
     "#c7935a", "#9e7345", "rgba(199,147,90,0.12)", "#b85450", "#6b9e6b", "#5b7ea6", "#a6637a", "#5b9e9e", "#8b6bae", "100%"] },
   midnight: { label: "Midnight (dark, cool)", light: false, colors: [
-    "#0a0e1a", "#10162a", "#162036", "#1b2742", "#121a2e", "#25324f", "#34456b", "#e3e8f4", "#98a4bf", "#5f6a85",
+    "#0a0e1a", "#10162a", "#162036", "#1b2742", "#121a2e", "#25324f", "#34456b", "#e3e8f4", "#a8b3cc", "#7c87a2",
     "#79a6e8", "#5a83bf", "rgba(121,166,232,0.12)", "#d0605c", "#6aaa7f", "#6b8fd6", "#c4719a", "#55b0b8", "#9a7fd8", "100%"] },
   parchment: { label: "Parchment (light)", light: true, colors: [
-    "#f3efe6", "#fbf8f2", "#ece6da", "#ffffff", "#ffffff", "#dcd3c2", "#c2b59c", "#2b2620", "#5c5448", "#8a8070",
+    "#f3efe6", "#fbf8f2", "#ece6da", "#ffffff", "#ffffff", "#dcd3c2", "#c2b59c", "#2b2620", "#4d463b", "#6f6659",
     "#a5652a", "#83501f", "rgba(165,101,42,0.12)", "#b23a34", "#3d7d3d", "#335f8f", "#9b4565", "#2b7b7b", "#6c4799", "55%"] },
   contrast: { label: "High contrast", light: false, colors: [
     "#000000", "#0b0b0b", "#151515", "#1d1d1d", "#0f0f0f", "#6a6a6a", "#9a9a9a", "#ffffff", "#e2e2e2", "#b4b4b4",
@@ -3417,6 +3417,29 @@ function diffText(a, b) {
     return { same: false, parts: diffTokens(wa, wb), mode: "word" };
   }
   return { same: false, parts: diffTokens(tokenizeParas(a), tokenizeParas(b)), mode: "paragraph" };
+}
+
+/**
+ * A diff as two columns side by side: rows of { left, right }, the original
+ * and the new text, each a list of { t: "same" | "del" | "add", text }. The
+ * left shows what was taken out, the right what was put in. A row ends where
+ * both texts have the same paragraph break, so a paragraph sits beside its
+ * new version and the columns stay level all the way down.
+ */
+function diffSides(parts) {
+  const rows = [];
+  let left = [], right = [];
+  const flush = () => { if (left.length || right.length) rows.push({ left, right }); left = []; right = []; };
+  for (const p of parts || []) {
+    if (p.t === "del") { left.push(p); continue; }
+    if (p.t === "add") { right.push(p); continue; }
+    String(p.text).split(/(\n[ \t]*\n\s*)/).forEach((piece, i) => {
+      if (i % 2 === 1) { flush(); return; }   // a shared paragraph break ends the row
+      if (piece) { left.push({ t: "same", text: piece }); right.push({ t: "same", text: piece }); }
+    });
+  }
+  flush();
+  return rows;
 }
 
 /** Quick similarity score 0..1, used to summarise how close two cards are. */
@@ -7691,8 +7714,11 @@ async function saveAgentSettings(s) {
 const ACCENT_VAR = {
   warm: "--accent-warm", red: "--accent-red", green: "--accent-green",
   blue: "--accent-blue", pink: "--accent-pink", cyan: "--accent-cyan",
-  purple: "--accent-purple", muted: "--text-muted",
+  purple: "--accent-purple", muted: "--text-muted", plain: "--text-secondary",
 };
+
+/** "1 card", "2 cards": a count with its word. */
+function countWord(n, one, many) { return fmtNum(n) + " " + (n === 1 ? one : (many || one + "s")); }
 function ac(c) { return "var(" + (ACCENT_VAR[c] || ACCENT_VAR.warm) + ")"; }
 // A see-through accent, mixed from the theme's own colour so it follows the theme.
 function acRgba(c, a) { return "color-mix(in srgb, " + ac(c) + " " + Math.round(Number(a) * 1000) / 10 + "%, transparent)"; }
@@ -7982,7 +8008,7 @@ function Empty({ icon, title, hint, children }) {
   return (
     <div style={{
       display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-      height: "100%", gap: 10, textAlign: "center", padding: 40,
+      flex: "1 1 auto", width: "100%", height: "100%", gap: 10, textAlign: "center", padding: 40,
     }}>
       <div style={{ fontSize: 34, opacity: 0.5 }}>{icon}</div>
       <div style={{ fontFamily: "'Crimson Pro', serif", fontSize: 20, color: "var(--text-secondary)" }}>{title}</div>
@@ -8172,7 +8198,7 @@ function onArt(color) {
   };
 }
 
-function CardTile({ rec, tileW, selected, focused, isDupe, onClick, onDouble, onContext, onDragStart, onDragEnd, draggable, onMouseEnter }) {
+function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, onDouble, onContext, onDragStart, onDragEnd, draggable, onMouseEnter }) {
   const imgH = Math.round(tileW * 1.35);
   const fav = rec.favorite;
   return (
@@ -8189,7 +8215,10 @@ function CardTile({ rec, tileW, selected, focused, isDupe, onClick, onDouble, on
         <div style={{
           position: "absolute", top: 5, left: 5, display: "flex", gap: 3, flexWrap: "wrap", maxWidth: tileW - 10,
         }}>
-          <Pill color={SPEC_COLOR[rec.spec] || "red"} style={onArt(SPEC_COLOR[rec.spec] || "red")}>{rec.spec === "none" ? "?" : rec.spec}</Pill>
+          {/* Only on cards whose format differs from most of the library: a v3 badge on every card says nothing. */}
+          {rec.spec !== commonSpec || rec.spec === "none" ? (
+            <Pill color={SPEC_COLOR[rec.spec] || "red"} style={onArt(SPEC_COLOR[rec.spec] || "red")} title={rec.spec === "none" ? "No card data found" : "Card format " + rec.spec}>{rec.spec === "none" ? "?" : rec.spec}</Pill>
+          ) : null}
           {rec.loreCount ? <Pill color="purple" style={onArt("purple")} title={rec.loreCount + " lorebook entries"}>{"\u{1F4D6}" + rec.loreCount}</Pill> : null}
           {rec.altCount ? <Pill color="cyan" style={onArt("cyan")} title={rec.altCount + " alternate greetings"}>{"↳" + rec.altCount}</Pill> : null}
         </div>
@@ -8808,7 +8837,7 @@ function AgentSuggestion({ d, onOpenCard, onUndo }) {
         {item.cardId && onOpenCard ? <SmallBtn color="blue" onClick={() => onOpenCard(item.cardId)}>Open card</SmallBtn> : null}
         {t || l || bt || mv ? (d.undone ? <Pill color="muted">undone</Pill> : <SmallBtn color="warm" onClick={onUndo}>Undo</SmallBtn>) : null}
       </div>
-      {diff && withDiff ? <div style={{ marginTop: 6 }}><DiffView before={withDiff.before} after={withDiff.after || ""} /></div> : null}
+      {diff && withDiff ? <div style={{ marginTop: 6 }}><DiffView before={withDiff.before} after={withDiff.after || ""} labels={["Before", "After"]} /></div> : null}
     </div>
   );
 }
@@ -8821,7 +8850,7 @@ function AgentChangeView({ d }) {
     <div>
       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>{verb}</div>
       {d.tool === "fs_write" || d.tool === "fs_edit" || (d.tool === "fs_delete" && !d.dir) ? (
-        <DiffView before={d.before || ""} after={d.after || ""} />
+        <DiffView before={d.before || ""} after={d.after || ""} labels={["Before", "After"]} />
       ) : null}
     </div>
   );
@@ -10359,27 +10388,45 @@ function AiAnswer({ text }) {
   );
 }
 
-/** A word-level diff, rendered. Reuses the duplicate comparer's engine. */
-function DiffView({ before, after }) {
-  const d = useMemo(() => diffText(before, after), [before, after]);
+/**
+ * A diff, side by side: the original text on the left with what's taken out
+ * marked, the new text on the right with what's put in marked, paragraph
+ * beside paragraph. One scroll moves both. Reuses the duplicate comparer's engine.
+ */
+function DiffView({ before, after, labels }) {
+  const rows = useMemo(() => diffSides(diffText(before, after).parts), [before, after]);
+  const names = labels || ["Original", "Proposed"];
+  const cell = (parts, side) => (
+    <div className={"diff-cell diff-" + side} style={{
+      padding: "6px 9px", minWidth: 0, color: "var(--text-secondary)",
+      borderRight: side === "left" ? "1px solid var(--border-subtle)" : "none",
+    }}>
+      {parts.map((part, i) => part.t === "same" ? <span key={i}>{part.text}</span> : (
+        <span key={i} className={part.t === "del" ? "diff-del" : "diff-add"} style={{
+          color: part.t === "del" ? "var(--accent-red)" : "var(--accent-green)",
+          background: acRgba(part.t === "del" ? "red" : "green", 0.16), borderRadius: 2,
+        }}>{part.text}</span>
+      ))}
+    </div>
+  );
+  const head = { padding: "5px 9px", fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--text-secondary)" };
   return (
-    <div style={{
-      fontSize: 11.5, lineHeight: 1.65, fontFamily: "'Outfit', sans-serif",
-      whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 320, overflowY: "auto",
-      padding: 9, borderRadius: "var(--radius-sm)",
-      background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
-    }} className="vault-scroll">
-      {d.parts.map((part, i) => {
-        if (part.t === "same") return <span key={i} style={{ color: "var(--text-muted)" }}>{part.text}</span>;
-        const del = part.t === "del";
-        return (
-          <span key={i} style={{
-            color: del ? "var(--accent-red)" : "var(--accent-green)",
-            background: acRgba(del ? "red" : "green", 0.12),
-            textDecoration: del ? "line-through" : "none",
-          }}>{part.text}</span>
-        );
-      })}
+    <div className="vault-scroll diff-view" style={{
+      fontSize: 11.5, lineHeight: 1.6, fontFamily: "'Outfit', sans-serif",
+      whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 420, overflowY: "auto",
+      borderRadius: "var(--radius-sm)", background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
+    }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", position: "sticky", top: 0, zIndex: 1,
+        background: "var(--bg-tertiary)", borderBottom: "1px solid var(--border-subtle)" }}>
+        <div style={Object.assign({}, head, { borderRight: "1px solid var(--border-subtle)" })}>{names[0]}</div>
+        <div style={head}>{names[1]}</div>
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} className="diff-row" style={{ display: "grid", gridTemplateColumns: "1fr 1fr",
+          borderTop: i ? "1px dashed var(--border-subtle)" : "none" }}>
+          {cell(r.left, "left")}{cell(r.right, "right")}
+        </div>
+      ))}
     </div>
   );
 }
@@ -10490,9 +10537,11 @@ function AiProposals({ body, edit, onPatchEdit, onToast }) {
                 </div>
               ) : null}
               {open ? <DiffView before={before} after={after} /> : (
-                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.55, maxHeight: 44, overflow: "hidden" }}>
-                  {after.slice(0, 220)}{after.length > 220 ? "…" : ""}
-                </div>
+                <div className="vault-scroll ai-proposal-text" style={{
+                  fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6, maxHeight: 220, overflowY: "auto",
+                  whiteSpace: "pre-wrap", wordBreak: "break-word", padding: "6px 9px", borderRadius: "var(--radius-sm)",
+                  background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
+                }}>{after}</div>
               )}
             </div>
           );
@@ -10856,7 +10905,7 @@ function InspectorAiTab({ rec, body, edit, ai, relay, tagIndex, onRun, onClearNo
   if (!ai.enabled) {
     return (
       <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.75 }}>
-        The AI harness is switched off. Turn it on in the <strong style={{ color: "var(--accent-blue)" }}>✦ AI</strong> panel
+        The AI features are off. Turn them on in <strong style={{ color: "var(--accent-blue)" }}>✦ AI</strong>
         in the header to summarise, critique, tag or tighten cards from here.
         <div style={{ marginTop: 10 }}><SmallBtn color="blue" onClick={onOpenSettings}>Open the AI panel</SmallBtn></div>
       </div>
@@ -11277,7 +11326,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
       </div>
 
       {/* tabs */}
-      <div style={{ display: "flex", borderBottom: "1px solid var(--border-subtle)", overflowX: "auto", flexShrink: 0 }}>
+      <div role="tablist" style={{ display: "flex", flexWrap: "wrap", borderBottom: "1px solid var(--border-subtle)", flexShrink: 0 }}>
         {TABS.map((t) => {
           const on = tab === t.key;
           const badge = t.key === "lore" ? rec.loreCount
@@ -11286,7 +11335,8 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             : t.key === "ai" ? proposalCount(edit && edit.aiProposal)
             : 0;
           return (
-            <div key={t.key} onClick={() => setTab(t.key)} className="no-sel" style={{
+            <div key={t.key} onClick={() => setTab(t.key)} className="no-sel inspector-tab" role="tab" aria-selected={on} tabIndex={0}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setTab(t.key); } }} style={{
               padding: "8px 11px", fontSize: 11.5, cursor: "pointer", whiteSpace: "nowrap",
               color: on ? "var(--accent-warm)" : "var(--text-muted)",
               borderBottom: "2px solid " + (on ? "var(--accent-warm)" : "transparent"),
@@ -12886,7 +12936,7 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
   const divider = <div style={{ height: 1, background: "var(--border-subtle)", margin: "16px 0" }} />;
 
   return (
-    <Modal title="AI harness" icon={"✦"} width={720} onClose={onClose}
+    <Modal title="AI settings" icon={"✦"} width={720} onClose={onClose}
       subtitle="Any OpenAI-compatible endpoint, relayed by the local server">
       <div style={{
         padding: 10, marginBottom: 14, borderRadius: "var(--radius-sm)",
@@ -12897,11 +12947,14 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
         <SmallBtn color="muted" onClick={onRefreshRelay}>Recheck</SmallBtn>
       </div>
 
-      <Toggle color="green" checked={!!ai.enabled} onChange={(v) => onSave({ enabled: v })} label="Enable the AI harness" />
+      <Toggle color="green" checked={!!ai.enabled} onChange={(v) => onSave({ enabled: v })} label="Turn on the AI features" />
       <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.7, margin: "7px 0 0 42px" }}>
         Off hides every AI action. Card text only leaves this machine if the endpoint below is a remote one.
+        {ai.enabled ? null : " Everything below is kept while it’s off, and used once you turn it on."}
       </div>
 
+      {/* Dimmed while the AI is off, so nothing here looks active; still editable, to set it up first. */}
+      <div className="ai-settings-body" style={{ opacity: ai.enabled ? 1 : 0.55, transition: "opacity 0.15s" }}>
       <div className="ai-privacy-opts" style={{ marginTop: 12 }}>
         <Toggle small color="green" checked={!!ai.localOnly} onChange={(v) => onSavePrivacy && onSavePrivacy({ localOnly: v })}
           label="Local models only" />
@@ -13224,10 +13277,11 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
       ) : (
         <div style={{ marginTop: 16 }}>
           <AiNotice color="green">
-            {ai.enabled ? "Ready. The actions are in each card's ✦ AI tab." : "Ready, but the harness is switched off above."}
+            {ai.enabled ? "Ready. The actions are in each card's ✦ AI tab." : "Ready, but the AI features are off: turn them on at the top."}
           </AiNotice>
         </div>
       )}
+      </div>
     </Modal>
   );
 }
@@ -15884,6 +15938,13 @@ function App() {
     return filtered;
   }, [settings.viewMode, filtered]);
 
+  // The format most cards are in; tiles badge only the ones that differ.
+  const commonSpec = useMemo(() => {
+    const n = {};
+    for (const r of records) n[r.spec] = (n[r.spec] || 0) + 1;
+    return Object.keys(n).sort((a, b) => n[b] - n[a])[0] || "";
+  }, [records]);
+
   const focusRec = focusId ? recById.get(focusId) : null;
   const focusEdit = focusRec ? editsMap.get(focusRec.fp) : null;
   const focusDupeGroup = useMemo(() => {
@@ -15929,8 +15990,8 @@ function App() {
         <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: "'Crimson Pro', serif", fontSize: 24, fontWeight: 700, lineHeight: 1.1 }}>{APP_NAME}</div>
           <div style={{ fontSize: 11.5, fontWeight: 300, color: "var(--text-muted)" }}>
-            {fmtNum(cards.length)} cards · {fmtNum(roots.length)} folders · {fmtNum(tagIndex.list.length)} tags
-            {dupes.exact.length ? " · " + fmtNum(dupes.exact.length) + " duplicate groups" : ""}
+            {countWord(cards.length, "card")} · {countWord(roots.length, "folder")} · {countWord(tagIndex.list.length, "tag")}
+            {dupes.exact.length ? " · " + countWord(dupes.exact.length, "duplicate group") : ""}
           </div>
         </div>
 
@@ -15947,22 +16008,26 @@ function App() {
               if (aiBulkCtrl.current) aiBulkCtrl.current.abort();
             }}>Stop</SmallBtn>
           ) : (
-            <SmallBtn color="cyan" onClick={() => runScan(null, false)} disabled={!roots.length}>Rescan</SmallBtn>
+            <SmallBtn color="plain" onClick={() => runScan(null, false)} disabled={!roots.length}>Rescan</SmallBtn>
           )}
-          <SmallBtn color="warm" onClick={() => setModal("ingest")} disabled={!roots.length || scan.running}>Ingest</SmallBtn>
-          <SmallBtn color="red" onClick={() => setModal("dupes")} disabled={!cards.length}>
-            Dupes{dupes.exact.length ? " " + dupes.exact.length : ""}
+          {/* One quiet style: colour is kept for what needs you (a count of
+              duplicates, the AI not ready) and for Folders while there are none. */}
+          <SmallBtn color="plain" onClick={() => setModal("ingest")} disabled={!roots.length || scan.running}>Ingest</SmallBtn>
+          <SmallBtn color="plain" onClick={() => setModal("dupes")} disabled={!cards.length}
+            title={dupes.exact.length ? countWord(dupes.exact.length, "group") + " of identical files" : "Find duplicates"}>
+            Dupes{dupes.exact.length ? <span style={{ color: "var(--accent-red)", fontWeight: 600 }}>{" " + dupes.exact.length}</span> : null}
           </SmallBtn>
-          <SmallBtn color="purple" onClick={() => setModal("tags")} disabled={!cards.length}>Tags</SmallBtn>
-          <SmallBtn color="green" onClick={() => setModal("roots")}>Folders</SmallBtn>
-          <SmallBtn color="blue" onClick={() => setModal("ai")} active={aiSettings.enabled}
+          <SmallBtn color="plain" onClick={() => setModal("tags")} disabled={!cards.length}>Tags</SmallBtn>
+          <SmallBtn color={roots.length ? "plain" : "green"} active={!roots.length} onClick={() => setModal("roots")}>Folders</SmallBtn>
+          <SmallBtn color={aiSettings.enabled && !aiReady(aiSettings, aiRelay) ? "warm" : aiSettings.enabled ? "blue" : "plain"}
+            onClick={() => setModal("ai")} active={aiSettings.enabled}
             title={aiReady(aiSettings, aiRelay)
-              ? "AI harness · " + (aiSettings.model || "no model")
-              : aiSettings.enabled ? "AI harness is on but not ready — open to see why" : "AI harness (off)"}>
+              ? "AI settings · " + (aiSettings.model || "no model")
+              : aiSettings.enabled ? "The AI features are on but not ready — open to see why" : "AI settings (the AI features are off)"}>
             ✦ AI{aiSettings.enabled && !aiReady(aiSettings, aiRelay) ? " ⚠" : ""}
           </SmallBtn>
-          <SmallBtn color="muted" onClick={() => setModal("log")}>Log</SmallBtn>
-          <SmallBtn color="muted" onClick={() => setModal("settings")}>⚙</SmallBtn>
+          <SmallBtn color="plain" onClick={() => setModal("log")}>Log</SmallBtn>
+          <SmallBtn color="plain" onClick={() => setModal("settings")} title="Settings">⚙</SmallBtn>
         </div>
       </div>
 
@@ -16120,20 +16185,23 @@ function App() {
           )
         ) : roots.length === 0 ? (
           <Empty icon={"\u{1F4C1}"} title="Point the vault at your card folders"
-            hint="Add your downloads folder as Inbox, your front-end character folder as Library, and your backup folder as Archive. The vault reads cards, builds an index, and copies files where you tell it — it never edits or deletes your originals.">
+            hint="Add your downloads folder as Inbox, your front-end character folder as Library, and your backup folder as Archive. The vault reads cards, builds an index, and copies files where you tell it. A card file only changes when you save an edit to it (a backup is kept first), and is only deleted when you ask.">
             <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap", justifyContent: "center" }}>
               <SmallBtn color="warm" style={{ padding: "8px 16px", fontSize: 12 }} onClick={addRoot}>Add a folder</SmallBtn>
               <SmallBtn color="cyan" style={{ padding: "8px 16px", fontSize: 12 }}
                 onClick={() => dirInputRef.current && dirInputRef.current.click()}>Import read-only</SmallBtn>
             </div>
             {/* After an update or a move, an empty vault usually means a different address, not lost data. */}
-            <div className="upgrade-note" style={{ maxWidth: 520, margin: "18px auto 0", fontSize: 11.5, lineHeight: 1.7, color: "var(--text-muted)", textAlign: "left" }}>
-              <strong style={{ color: "var(--text-secondary)" }}>Used the vault before?</strong> Your tags, notes and edits are kept by
-              your browser under the address the vault ran at, and this copy runs at <code>{location.host}</code>. If your old copy used
-              another port, nothing is lost: put a file named <code>vault.local</code> containing <code>port=</code> and the old
-              port number next to the launchers and start it again (the old address is in your old shortcut or browser history), or use Export vault data in
-              the old copy and Import vault data here (both in ⚙ Settings). See HOW TO RUN.txt.
-            </div>
+            <details className="upgrade-note" style={{ maxWidth: 520, margin: "18px auto 0", fontSize: 11.5, lineHeight: 1.7, color: "var(--text-muted)", textAlign: "left" }}>
+              <summary style={{ cursor: "pointer", color: "var(--text-secondary)", fontWeight: 600, textAlign: "center" }}>Used the vault before?</summary>
+              <div style={{ marginTop: 6 }}>
+                Your tags, notes and edits are kept by
+                your browser under the address the vault ran at, and this copy runs at <code>{location.host}</code>. If your old copy used
+                another port, nothing is lost: put a file named <code>vault.local</code> containing <code>port=</code> and the old
+                port number next to the launchers and start it again (the old address is in your old shortcut or browser history), or use Export vault data in
+                the old copy and Import vault data here (both in ⚙ Settings). See HOW TO RUN.txt.
+              </div>
+            </details>
           </Empty>
         ) : (
           <Fragment>
@@ -16280,6 +16348,7 @@ function App() {
                           selected={selection.has(rec.id)}
                           focused={focusId === rec.id}
                           isDupe={dupes.dupeIds.has(rec.id)}
+                          commonSpec={commonSpec}
                           draggable
                           onDragStart={(e) => onCardDragStart(rec, e)}
                           onDragEnd={() => setDragActive(false)}
@@ -16385,11 +16454,13 @@ function App() {
 
       {/* ── toast ── */}
       {toast ? (
-        <div className="fadeIn" onClick={() => setToast(null)} style={{
-          position: "fixed", bottom: 18, left: "50%", transform: "translateX(-50%)",
+        // Bottom right, out of the way of the grid's middle and of the
+        // buttons along the bottom of a window (Close, Save) in the centre.
+        <div className="fadeIn vault-toast" role="status" onClick={() => setToast(null)} style={{
+          position: "fixed", bottom: 18, right: 18,
           padding: "9px 16px", borderRadius: "var(--radius-md)", zIndex: 200,
           background: "var(--bg-elevated)", border: "1px solid " + acRgba(toast.color, 0.45),
-          color: ac(toast.color), fontSize: 12, maxWidth: "80vw", cursor: "pointer",
+          color: ac(toast.color), fontSize: 12, maxWidth: "min(460px, calc(100vw - 36px))", cursor: "pointer",
           boxShadow: "0 10px 30px rgba(0,0,0,0.45)", lineHeight: 1.5,
         }}>
           {toast.msg}

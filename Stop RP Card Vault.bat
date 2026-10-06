@@ -5,17 +5,17 @@ cd /d "%~dp0"
 rem Stops the vault server on this copy's port (8790, or the port set in
 rem vault.local next to this file).
 rem
-rem "Start RP Card Vault.bat" calls this first, with /quiet, so starting always
-rem gives you the serve.js that is on disk right now. You can also run it on its
-rem own to shut the vault down.
+rem Run it to shut the vault down. "Start RP Card Vault.bat" doesn't need it: a
+rem new server asks a running one to stand down over HTTP. This is the fallback
+rem for a server too old to know that, or one that has wedged.
 rem
 rem Why it is needed at all: "RP Card Vault.vbs" starts node in a hidden window,
 rem so closing a console does not stop it, and after you edit serve.js the OLD
 rem code is still the thing answering requests.
 rem
-rem SAFETY: only a process that is LISTENING on this exact port AND is node.exe
-rem is stopped, and it is stopped by PID. Never by image name - that would take
-rem SillyTavern and every other node process with it.
+rem SAFETY: only a node.exe whose LOCAL address is this exact port is stopped,
+rem and it is stopped by PID. Never by image name - that would take SillyTavern
+rem and every other node process with it.
 
 set VAULT_PORT=8790
 if exist "%~dp0vault.local" (
