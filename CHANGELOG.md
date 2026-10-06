@@ -8,6 +8,14 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.4.3
+
+- **Fixed: a new vault showed only the first 6 cards.** The grid measured
+  its size once, when the page opened, and a new vault has no grid then
+  (it shows "Point the vault at your card folders"). Unmeasured, it drew
+  one column's worth of cards, about 6, until the tile size was changed. It
+  now measures itself as soon as it appears.
+
 ## 1.4.2
 
 Fixes from a full review of the vault.
