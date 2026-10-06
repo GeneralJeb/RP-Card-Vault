@@ -8,6 +8,36 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.0
+
+The look and setup review.
+
+- **Easier to read.** The faint grey help text now passes the accessibility
+  guideline for contrast (4.5:1) in the Vault, Midnight and Parchment
+  themes; it was as low as 2.7:1.
+- **A calmer header.** The buttons share one plain style. Colour is kept
+  for what needs you: the number of duplicates, the AI when it's on (amber
+  when it isn't ready), and Folders while you have none.
+- **Notices sit in the bottom-right corner,** clear of the cards in the
+  middle and of the buttons along the bottom of a window.
+- **The card inspector's tabs wrap** onto a second line instead of running
+  off the edge, and work from the keyboard.
+- **The first screen is centred.** The note for people who used the vault
+  before is folded under "Used the vault before?".
+- **The spec badge (v3) only shows on cards in a different format** from
+  most of your library, so it marks what's unusual.
+- **"AI settings"** is the name of the ✦ AI window everywhere (it was "AI
+  harness"). While the AI features are off, its settings are dimmed, and
+  stay editable so you can set them up first.
+- **"1 card", "1 folder"** in the header, not "1 cards".
+- **A download for running it.** Each release now has
+  `RP-Card-Vault-<version>.zip`: the vault, its launchers and the docs a
+  user reads, without the tests and developer files. The README says to get
+  that one and double-click `Start RP Card Vault.bat`.
+- **Docs that match what happens:** the vault deletes a card file only when
+  you ask, and `HOW TO RUN.txt` and `Stop RP Card Vault.bat` describe how
+  starting works now.
+
 ## 1.4.4
 
 - **Show diff is side by side.** The original text is on the left, with what

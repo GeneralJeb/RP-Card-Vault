@@ -21,8 +21,8 @@ A local library for roleplay character cards (the PNG and JSON cards used by Sil
 
 ## Start it
 
-1. Put all the files in one folder.
-2. Double-click **`Start RP Card Vault.bat`**.
+1. From the [Releases](https://github.com/GeneralJeb/RP-Card-Vault/releases) page, download **`RP-Card-Vault-<version>.zip`** (not "Source code", which has the developer files too) and unzip it into a folder of its own.
+2. Double-click **`Start RP Card Vault.bat`**. That's the only file you need to open; the others are explained in `HOW TO RUN.txt`.
 3. The vault opens at `http://127.0.0.1:8790/RP_Card_Vault.html`.
 4. Click **Add a folder** and pick your card folder.
 
@@ -30,7 +30,7 @@ A local library for roleplay character cards (the PNG and JSON cards used by Sil
 
 ## Updating
 
-1. Download the latest release. Its notes, and `CHANGELOG.md`, say what changed.
+1. Download the latest release's `RP-Card-Vault-<version>.zip`. Its notes, and `CHANGELOG.md`, say what changed.
 2. Copy the files over the old ones.
 3. Start it as before.
 
@@ -47,7 +47,7 @@ Other setups will probably work; these are the ones that have been checked.
 
 ## Your data
 
-- **The vault never deletes card files.** Moving a card copies it, checks the copy, and only then removes the original. Saving a card keeps a backup.
+- **The vault only deletes a card file when you ask it to** (Delete permanently, or deleting duplicates), and asks you first. Moving a card copies it, checks the copy, and only then removes the original. Saving a card keeps a backup.
 - **The server only listens on your own machine,** and an AI API key is held only in its memory, never written to disk.
 - **Your tags, notes and edits are backed up automatically** into `_vault data` in one of your folders, every day by default, so clearing the browser doesn't lose them.
 - **Nothing is loaded from the internet.** Libraries and fonts ship with the vault.

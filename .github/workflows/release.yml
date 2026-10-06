@@ -32,4 +32,13 @@ jobs:
             echo "CHANGELOG.md has no '## $VERSION' section." >&2
             exit 1
           fi
-          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "RP Card Vault $VERSION" --notes-file notes.md
+          # The download for people who just want to run it: the app, its
+          # libraries and launchers, and the docs a user reads. No tests,
+          # workflows or package files (GitHub's "Source code" zips have those).
+          DIR="RP-Card-Vault-$VERSION"
+          mkdir "$DIR"
+          cp -r RP_Card_Vault.html serve.js sw.js manifest.webmanifest icon-192.png icon-512.png RP_Card_Vault.ico lib \
+            "Start RP Card Vault.bat" "Stop RP Card Vault.bat" "RP Card Vault.vbs" "Open in Browser Tab.vbs" \
+            "Create Shortcut.bat" "Create Shortcut.ps1" "HOW TO RUN.txt" README.md CHANGELOG.md LICENSE SECURITY.md "$DIR"/
+          zip -qr "$DIR.zip" "$DIR"
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "RP Card Vault $VERSION" --notes-file notes.md "$DIR.zip"

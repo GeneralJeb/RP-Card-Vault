@@ -41,6 +41,10 @@ for (const [k, th] of Object.entries(V.THEMES)) {
     t.ok(contrast(v["--text-primary"], v[bg]) >= 7, k + ": main text on " + bg + " (" + contrast(v["--text-primary"], v[bg]).toFixed(1) + ")");
     t.ok(contrast(v["--text-secondary"], v[bg]) >= 4.5, k + ": secondary text on " + bg + " (" + contrast(v["--text-secondary"], v[bg]).toFixed(1) + ")");
   }
+  // The faint text carries help lines at 10-11px all over the vault, so it too must pass AA.
+  for (const bg of ["--bg-primary", "--bg-secondary", "--bg-tertiary", "--bg-input"]) {
+    t.ok(contrast(v["--text-muted"], v[bg]) >= 4.5, k + ": muted text on " + bg + " (" + contrast(v["--text-muted"], v[bg]).toFixed(1) + ")");
+  }
   for (const a of ["--accent-warm", "--accent-red", "--accent-green", "--accent-blue", "--accent-cyan", "--accent-purple", "--accent-pink"]) {
     t.ok(contrast(v[a], v["--bg-secondary"]) >= 3, k + ": " + a + " stands out from the panels (" + contrast(v[a], v["--bg-secondary"]).toFixed(1) + ")");
   }

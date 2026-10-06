@@ -19,8 +19,10 @@ START IT
   Open in Browser Tab.vbs     As above, but an ordinary browser tab rather than
                               a standalone app window.
 
-  Stop RP Card Vault.bat      Shuts the server down. Start calls this for you,
-                              so you only need it to turn the vault off.
+  Stop RP Card Vault.bat      Shuts the server down. Start doesn't need it (a
+                              new server takes over from a running one), so
+                              use it to turn the vault off, or when an old
+                              server won't stand down.
 
   Create Shortcut.bat         Makes Desktop and Start Menu shortcuts, so you
                               can pin the vault to the taskbar.
@@ -45,7 +47,7 @@ Open this in a browser:
 
     http://127.0.0.1:8790/__vault/status
 
-It reports a build number, e.g. "build":8. The AI panel expects a particular
+It reports a build number, e.g. "build":10. The AI panel expects a particular
 build and says so plainly if the server answering it is older.
 
 This matters because "RP Card Vault.vbs" runs node in a HIDDEN window. Editing

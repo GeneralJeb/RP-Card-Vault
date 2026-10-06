@@ -399,7 +399,7 @@ async function testPanel() {
   console.log("\nthe AI panel");
   click(byText("button", /^✦ AI/));
   await tick();
-  t.ok(seen(/AI harness/) && seen(/never stored/), "opens, and says the key is never stored");
+  t.ok(seen(/AI settings/) && seen(/never stored/), "opens, and says the key is never stored");
   t.ok(seen(new RegExp("Local server build " + PAGE_BUILD + " ready")), "reports the server build");
 
   relay.config.build = PAGE_BUILD - 1;
@@ -473,7 +473,7 @@ async function testPrompts() {
   await tick();
   t.ok(all("textarea").some((el) => el.value.indexOf("Review this card as an editor") === 0), "Reset restores it");
 
-  click(byText("span", /^Enable the AI harness$/).parentElement);
+  click(byText("span", /^Turn on the AI features$/).parentElement);
   await tick();
   t.ok(seen(/Ready\. The actions are in each card/), "enabled and ready");
   click(byText("button", /^Close$/));
@@ -667,13 +667,13 @@ async function testDialogs() {
   await tick();
   click(document.querySelector(".fadeIn"));
   await tick();
-  t.ok(seen(/AI harness/), "a click on the backdrop leaves it open");
+  t.ok(seen(/AI settings/), "a click on the backdrop leaves it open");
   window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await tick();
-  t.ok(seen(/AI harness/), "so does Escape");
+  t.ok(seen(/AI settings/), "so does Escape");
   click(byText("button", /^✕$/));
   await tick();
-  t.ok(!seen(/AI harness/), "the ✕ at the top closes it");
+  t.ok(!seen(/AI settings/), "the ✕ at the top closes it");
   click(byText("button", /^✦ AI/));
   await tick();
   click(byText("button", /^Propose for approval$/));
@@ -682,7 +682,7 @@ async function testDialogs() {
   t.ok(closes.length === 1, "and there's a Close at the bottom");
   click(closes[0]);
   await tick();
-  t.ok(!seen(/AI harness/), "which closes it too");
+  t.ok(!seen(/AI settings/), "which closes it too");
 }
 
 async function testBulkTags() {
