@@ -708,6 +708,13 @@ function cleanTools(list) {
  */
 function saysToolsUnsupported(msg) {
   return /(does not|doesn't|do not|don't|not) support(s|ed)?( the)? (tools|tool[ _-]?(calling|use|calls)|function[ _-]?call(ing|s)?)|\btools? (are|is) not supported|unsupported (parameter|field|argument)s?:? *['"`]?(tools|tool_choice)|--jinja/i
+    .test(String(msg || "")) || saysToolRoleRefused(msg);
+}
+
+/** Endpoints that take `tools` but refuse the tool-result message that follows, e.g.
+ *  "Role 'function' is not supported. Please use a valid role: SYSTEM, USER, …" */
+function saysToolRoleRefused(msg) {
+  return /\brole:? *['"`]?(tool|function)['"`]? *(is |are )?(not supported|unsupported|not allowed|invalid)|invalid role:? *['"`]?(tool|function)\b/i
     .test(String(msg || ""));
 }
 
