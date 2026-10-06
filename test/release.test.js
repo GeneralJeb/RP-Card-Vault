@@ -22,6 +22,7 @@ const t = require("./harness");
 
 const ROOT = path.join(__dirname, "..");
 const read = (f) => fs.readFileSync(path.join(ROOT, f), "utf8");
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const page = read("RP_Card_Vault.html");
 const serveSrc = read("serve.js");
 const sw = read("sw.js");
@@ -36,7 +37,7 @@ for (const [, file, hash, global, cdn, cdnHash] of localTags) {
   t.eq("sha512-" + crypto.createHash("sha512").update(buf).digest("base64"), hash, "lib/" + file + " matches its pinned hash");
   t.eq(cdnHash, hash, file + ": the cdnjs fallback is pinned to the same hash");
   t.eq(path.basename(cdn), file, file + ": the fallback is the same file");
-  t.ok(new RegExp('"/lib/' + file.replace(/\./g, "\\.") + '": "lib/' + file.replace(/\./g, "\\.") + '"').test(serveSrc), "serve.js serves lib/" + file);
+  t.ok(new RegExp('"/lib/' + reEscape(file) + '": "lib/' + reEscape(file) + '"').test(serveSrc), "serve.js serves lib/" + file);
   t.ok(sw.indexOf('"/lib/' + file + '"') >= 0, "the service worker keeps lib/" + file + " for offline use");
   t.ok(["React", "ReactDOM", "Babel", "JSZip"].indexOf(global) >= 0, file + ": the fallback checks window." + global);
 }

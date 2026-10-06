@@ -29,7 +29,7 @@ for (const [k, th] of Object.entries(V.THEMES)) {
 {
   const root = /:root \{([\s\S]*?)\n\}/.exec(page)[1];
   for (const [i, name] of V.THEME_VARS.entries()) {
-    const m = new RegExp(name.replace(/-/g, "\\-") + ":\\s*([^;]+);").exec(root);
+    const m = new RegExp(name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&") + ":\\s*([^;]+);").exec(root);
     t.ok(m && m[1].trim() === V.THEMES.vault.colors[i], "the Vault theme's " + name + " matches the stylesheet's default", m && m[1]);
   }
 }
