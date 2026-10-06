@@ -16,7 +16,7 @@ const t = require("./harness");
 const { mod: V } = loadPureRegion([
   "AGENT_TOOLS", "AGENT_RULES", "AGENT_LIMITS", "DEFAULT_AGENT_SETTINGS", "sanitizeAgentSettings",
   "setCustomFlags", "sanitizeCustomFlags", "customFlagKey", "statusFlags", "flagDef", "agentActiveTools",
-  "newAgentSession", "agentSessionTitle", "agentToolsForModel", "parseTextToolCalls",
+  "newAgentSession", "agentSessionTitle", "agentToolsForModel", "parseTextToolCalls", "dropModelResults",
   "interpretAgentStep", "agentModelMessages", "fitAgentContext", "rateWait", "rateRecord",
   "capToolOutput", "runAgentTool", "runAgentLoop", "aiEmptyStream", "aiStreamStep",
   "AI_PERSONA_DEFAULT", "splitThinkingAnywhere", "parseMarkdown", "cleanAgentTitle", "agentTitleRequest",
@@ -360,6 +360,19 @@ async function main() {
     t.ok(/<tool name="x">/.test(p.text), "an unclosed block is left as text, not run");
     let acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: "<tool name=\"fs_list\">{}</tool>" }), { t: "done" });
     t.eq(V.interpretAgentStep(acc, true).calls.map((c) => c.name), ["fs_list"], "text mode turns blocks into calls");
+
+    // A model that writes <tool_result> itself is inventing or repeating a result.
+    const invented = "Let me look.\n<tool name=\"read_card\">{\"id\":\"c4g2\"}</tool>\n<tool_result name=\"read_card\">\nName: Ramia\n</tool_result>\nRamia is a lamia.";
+    acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: invented }), { t: "done" });
+    let step = V.interpretAgentStep(acc, true);
+    t.eq([step.text, step.calls.map((c) => c.name)], ["Let me look.", ["read_card"]],
+      "a result the model makes up after its call is cut, along with what it wrote from it; the call still runs");
+    t.eq(V.dropModelResults("Here it is:\n<tool_result>\n<card id=\"c4g2\">\nName: Ramia\n</tool_result>\nShe needs edits."), "Here it is:\n\nShe needs edits.",
+      "a result quoted with no call before it is removed, the rest kept");
+    t.eq(V.dropModelResults("Summary first.\n<tool_result>\nName: Ramia\nTags: lamia"), "Summary first.", "an unclosed one goes to the end");
+    t.eq(V.dropModelResults("No blocks here."), "No blocks here.", "a reply without one is unchanged");
+    acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: "<tool_result>x</tool_result>" }), { t: "done" });
+    t.ok(!V.interpretAgentStep(acc, true).ok, "a reply that is only a made-up result counts as empty");
 
     const session = V.newAgentSession("s", 1);
     session.textMode = true;

@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.3.1";
+const APP_VERSION = "1.3.2";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -5076,6 +5076,7 @@ function agentTextProtocol(settings) {
     "<tool name=\"fs_read\">{\"path\":\"agent.md\"}</tool>",
     "with the arguments as JSON. You may write several blocks in one reply. After your blocks, stop:",
     "the results arrive in the next message as <tool_result> blocks. A reply with no block ends your turn.",
+    "Never write a <tool_result> block yourself: only the vault writes those, and one in your reply is thrown away.",
     "",
     "Tools:",
   ];
@@ -5092,6 +5093,21 @@ function parseTextToolCalls(text) {
     return "";
   });
   return { text: rest.replace(/\n{3,}/g, "\n\n").trim(), calls };
+}
+
+/**
+ * Only the vault writes <tool_result> blocks. A model that writes one is making
+ * up (or repeating) a result. After a tool block, everything from there on rests
+ * on a result it hasn't had yet, so the reply is cut there; otherwise just the
+ * blocks go, an unclosed one to the end.
+ */
+function dropModelResults(text) {
+  const s = String(text == null ? "" : text);
+  const at = s.search(/<tool_result\b/i);
+  if (at < 0) return s;
+  const before = s.slice(0, at);
+  if (/<tool\s+name\s*=/i.test(before)) return before.trim();
+  return s.replace(/<tool_result\b[^>]*>[\s\S]*?(<\/tool_result>|$)/gi, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function agentCallsAsText(calls) {
@@ -5137,7 +5153,7 @@ function interpretAgentStep(acc, textMode) {
   if (!acc.done) return { ok: false, error: "The reply stopped before it finished (the connection closed early)." };
   const split = splitThinkingAnywhere(acc.text);
   const think = String(acc.think || "") + split.think;
-  let text = split.text;
+  let text = dropModelResults(split.text);
   let calls = (acc.tools || []).map((c) => ({ id: String(c.id), name: String(c.name), args: String(c.args || "{}") }));
   if (textMode) {
     const p = parseTextToolCalls(text);
@@ -9753,6 +9769,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
         })() : null}
         {running && !pending ? (() => {
           const shown = live ? splitThinkingAnywhere(live.text) : { text: "", think: "" };
+          shown.text = dropModelResults(shown.text);
           const thinking = live ? [live.think, shown.think].filter(Boolean).join("\n\n") : "";
           return (
             <div className="agent-live" style={{ margin: "8px 0" }}>
