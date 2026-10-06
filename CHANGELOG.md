@@ -8,6 +8,29 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.4.0
+
+- **A problem log, to copy into a bug report.** Settings → Problem log
+  lists this session's errors and warnings: failed notices, errors from the
+  local server, agent chat errors (with the model and how it calls tools),
+  failed AI actions and page errors, with the vault, server and browser
+  versions on top. Copy log copies exactly what it shows. API keys, tokens,
+  passwords, email addresses, your Windows user name, addresses on your
+  network, destination user names and private cards are always taken out;
+  other card and folder names are too, unless you tick Show card and folder
+  names. It's kept only while the page is open and never sent anywhere.
+
+## 1.3.3
+
+- **An empty agent reply says why.** "The model sent back an empty reply"
+  now says whether the model only repeated a tool result, ran into Max
+  tokens, was blocked by the provider (with the reason it gave), or really
+  sent nothing.
+- **A repeated tool result no longer swallows the answer after it.** In
+  text-only mode a model that repeated a result without closing the block
+  lost everything it wrote after it; the block now ends where the vault's
+  result did, and the answer is kept.
+
 ## 1.3.2
 
 - **Text-only tool calls: no made-up results in replies.** In that mode a

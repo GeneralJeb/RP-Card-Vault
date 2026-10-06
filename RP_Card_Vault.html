@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.3.2";
+const APP_VERSION = "1.4.0";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -5099,15 +5099,37 @@ function parseTextToolCalls(text) {
  * Only the vault writes <tool_result> blocks. A model that writes one is making
  * up (or repeating) a result. After a tool block, everything from there on rests
  * on a result it hasn't had yet, so the reply is cut there; otherwise just the
- * blocks go, an unclosed one to the end.
+ * blocks go. A repeated block a model leaves unclosed ends at its last closing
+ * tag (the vault's results end in one, such as </card>), so the answer after it
+ * is kept; with none, it runs to the end.
  */
 function dropModelResults(text) {
-  const s = String(text == null ? "" : text);
+  let s = String(text == null ? "" : text);
   const at = s.search(/<tool_result\b/i);
   if (at < 0) return s;
-  const before = s.slice(0, at);
-  if (/<tool\s+name\s*=/i.test(before)) return before.trim();
-  return s.replace(/<tool_result\b[^>]*>[\s\S]*?(<\/tool_result>|$)/gi, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (/<tool\s+name\s*=/i.test(s.slice(0, at))) return s.slice(0, at).trim();
+  for (let i = at; i >= 0; i = s.search(/<tool_result\b/i)) {
+    const rest = s.slice(i);
+    const close = rest.search(/<\/tool_result>/i);
+    let end = rest.length;
+    if (close >= 0) end = close + "</tool_result>".length;
+    else {
+      const tags = rest.match(/<\/[\w-]+>/g);
+      if (tags) end = rest.lastIndexOf(tags[tags.length - 1]) + tags[tags.length - 1].length;
+    }
+    s = s.slice(0, i) + rest.slice(end);
+  }
+  return s.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Why a step came back with nothing to show, as specifically as the reply allows. */
+function emptyReplyReason(finish, hadText, think) {
+  const f = String(finish || "");
+  if (hadText) return "The model only repeated a tool result instead of answering. Regenerate reply usually gets a proper answer.";
+  if (think) return "The model spent its whole reply thinking and never answered. Raise Max tokens out in the ✦ AI panel.";
+  if (/length|max_tokens/i.test(f)) return "The reply hit Max tokens before any answer. Raise Max tokens in the ✦ AI panel.";
+  if (/filter|safety|recitation|prohibited|blocklist|spii|block/i.test(f)) return "The provider blocked the reply (finish reason: " + f + "). Rewording the request or another model may get through.";
+  return "The model sent back an empty reply" + (f ? " (finish reason: " + f + ")" : "") + ". This comes from the provider; Regenerate reply often works.";
 }
 
 function agentCallsAsText(calls) {
@@ -5159,11 +5181,7 @@ function interpretAgentStep(acc, textMode) {
     const p = parseTextToolCalls(text);
     text = p.text; calls = p.calls;
   }
-  if (!text && !calls.length) {
-    return { ok: false, error: think
-      ? "The model spent its whole reply thinking and never answered. Raise Max tokens out in the ✦ AI panel."
-      : "The model sent back an empty reply." };
-  }
+  if (!text && !calls.length) return { ok: false, error: emptyReplyReason(acc.finish, /<tool_result\b/i.test(split.text), think) };
   return { ok: true, text, think, calls, usage: acc.usage, finish: acc.finish, model: acc.model };
 }
 
@@ -7269,7 +7287,117 @@ function parseMarkdown(src) {
   return mdBlocks(String(src == null ? "" : src).replace(/\r\n?/g, "\n").split("\n"));
 }
 
+/* ── the problem log (Settings → Problem log) ────────────────────────────
+   What went wrong this session, to paste into a bug report: failed notices,
+   errors from the local server, agent chat errors, page errors. Kept in
+   memory only, like the sent log, and scrubbed before it's shown or copied. */
+
+const PROBLEM_LOG = [];
+const PROBLEM_LOG_MAX = 200;
+const PROBLEM_LOG_CHARS = 4000;
+const problemLogListeners = new Set();
+
+/** Add one problem. The same one again straight after only counts up. */
+function logProblem(source, text, detail, level) {
+  const t = String(text == null ? "" : text).slice(0, PROBLEM_LOG_CHARS);
+  const d = detail ? String(detail).slice(0, PROBLEM_LOG_CHARS) : "";
+  const last = PROBLEM_LOG[PROBLEM_LOG.length - 1];
+  if (last && last.source === source && last.text === t && last.detail === d) {
+    last.count++;
+    last.at = Date.now();
+  } else {
+    PROBLEM_LOG.push({ at: Date.now(), level: level === "warn" ? "warn" : "error", source: String(source || ""), text: t, detail: d, count: 1 });
+    if (PROBLEM_LOG.length > PROBLEM_LOG_MAX) PROBLEM_LOG.splice(0, PROBLEM_LOG.length - PROBLEM_LOG_MAX);
+  }
+  for (const fn of problemLogListeners) { try { fn(); } catch (e) { /* a closed panel */ } }
+}
+
+function clearProblemLog() {
+  PROBLEM_LOG.length = 0;
+  for (const fn of problemLogListeners) { try { fn(); } catch (e) { /* a closed panel */ } }
+}
+
+/* Always removed from the log: keys and tokens, passwords, cookies, email
+   addresses, the user name in a home-folder path, sign-ins and query strings
+   in addresses, and addresses on your network (127.x, this computer, stays). */
+const LOG_SCRUB_RULES = [
+  [/\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, "[key]"],
+  [/\b(hf|ghp|gho|ghs|github_pat|xox[abpr])_[A-Za-z0-9_]{8,}/g, "[key]"],
+  [/\bAIza[0-9A-Za-z_-]{20,}/g, "[key]"],
+  [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+\/=-]{8,}/gi, "$1 [key]"],
+  [/(["']?\b(?:api[_-]?key|apikey|access[_-]?token|token|password|passwd|secret|authorization|cookie|set-cookie)\b["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&}]+)/gi, "$1[hidden]"],
+  [/(https?:\/\/)[^\/\s@"'<>]+@/gi, "$1"],
+  [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]"],
+  [/(https?:\/\/[^\s?#"'<>]+)\?[^\s#"'<>]*/gi, "$1?[…]"],
+  [/\b([A-Za-z]:[\\\/]+(?:Users|Documents and Settings)[\\\/]+)[^\\\/\s"'<>:]+/gi, "$1[you]"],
+  [/(\/(?:home|Users)\/)[^\/\s"'<>]+/g, "$1[you]"],
+  [/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, (m) =>
+    (/^(127\.|0\.0\.0\.0$)/.test(m) || m.split(".").some((n) => Number(n) > 255)) ? m : "[ip]"],
+];
+
+function logEscapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+/**
+ * A replacer for names: `entries` are { name, as } (a card name and "[card]",
+ * say). Only names that appear in `text` go into the pattern, so thousands of
+ * cards cost little. Whole words only, any case; names under 3 letters are left.
+ */
+function makeLogNameScrub(entries, text) {
+  const hay = String(text || "").toLowerCase();
+  const map = new Map();
+  for (const e of entries || []) {
+    const n = String((e && e.name) || "").trim();
+    if (n.length < 3) continue;
+    const k = n.toLowerCase();
+    if (!map.has(k) && hay.indexOf(k) >= 0) map.set(k, e.as || "[name]");
+  }
+  if (!map.size) return (s) => s;
+  const alts = Array.from(map.keys()).sort((a, b) => b.length - a.length).map(logEscapeRe);
+  const re = new RegExp("(?<![\\p{L}\\p{N}_])(?:" + alts.join("|") + ")(?![\\p{L}\\p{N}_])", "giu");
+  return (s) => s.replace(re, (m) => map.get(m.toLowerCase()) || "[name]");
+}
+
+function scrubLogText(text, nameScrub) {
+  let s = String(text == null ? "" : text);
+  if (nameScrub) s = nameScrub(s);
+  for (const [re, to] of LOG_SCRUB_RULES) s = s.replace(re, to);
+  return s;
+}
+
+/**
+ * The log as text to paste: `header` lines first, then each problem, oldest
+ * first. `names` are the { name, as } entries to hide.
+ */
+function formatProblemLog(entries, header, names) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const time = (ts) => { const d = new Date(ts); return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds()); };
+  const lines = [];
+  if (!entries || !entries.length) lines.push("(no problems logged this session)");
+  for (const e of entries || []) {
+    lines.push(time(e.at) + "  " + (e.level === "warn" ? "warn " : "error") + "  " + e.source + ": " + e.text + (e.count > 1 ? "  (×" + e.count + ")" : ""));
+    if (e.detail) for (const l of String(e.detail).split("\n")) lines.push("          " + l);
+  }
+  // The header is the vault's own words, so names aren't looked for there
+  // (a folder called "Cards" would hide the card count).
+  const body = lines.join("\n");
+  return scrubLogText((header || []).join("\n")) + "\n\n" + scrubLogText(body, makeLogNameScrub(names, body));
+}
+
 /*__PURE_JS_END__*/
+
+// Errors the page itself hits after it has started (before then, the
+// fail-loud guard at the top shows them).
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (e) => {
+    if (e && e.target && e.target !== window) return;   // a missing image or script, not a script error
+    logProblem("Page", (e && e.error && e.error.message) || (e && e.message) || "Script error", e && e.error && e.error.stack);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e && e.reason;
+    if (r && r.name === "AbortError") return;
+    logProblem("Page", (r && r.message) || String(r), r && r.stack);
+  });
+}
 
 /**
  * Every request to the local server goes through here. serve.js refuses
@@ -7311,8 +7439,18 @@ function vaultFetch(path, opts) {
   if (path === "/__vault/ai/chat" && typeof o.body === "string") recordAiSent(o.body);
   // The browser's own words for a server that has gone ("Failed to fetch")
   // don't say what to do. A cancel (AbortError) passes through untouched.
-  return fetch(path, o).catch((e) => {
+  const what = (o.method || "GET").toUpperCase() + " " + path;
+  return fetch(path, o).then((r) => {
+    // Failures go in the problem log (Settings). A 404 is often an expected
+    // answer (a workspace file that isn't there yet), so it doesn't.
+    if (r && !r.ok && r.status !== 404) {
+      const log = (msg) => logProblem("Local server", what + " → HTTP " + r.status + (msg ? ": " + msg : ""));
+      try { r.clone().json().then((d) => log(d && d.error), () => log("")); } catch (e) { log(""); }
+    }
+    return r;
+  }, (e) => {
     if (e && e.name === "AbortError") throw e;
+    logProblem("Local server", what + " → couldn't reach the server");
     const err = new Error("Can't reach the vault's local server. If its window was closed, start the vault again, then try once more.");
     err.offline = true;
     throw err;
@@ -9050,6 +9188,13 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
     const s = sessRef.current;
     s.messages = s.messages.concat([Object.assign({ at: Date.now() }, m)]);
     persist(s);
+    if (m.role === "note" && m.kind === "error") {
+      const L = latest.current;
+      logProblem("Agent chat", m.text, "model: " + ((L.relay && L.relay.model) || "?") +
+        " · tool calls: " + (s.textMode || L.agent.toolMode === "text" ? "as text" : "native"));
+    } else if (m.role === "tool" && m.ok === false) {
+      logProblem("Agent tool", m.name + " failed: " + String(m.result || "").slice(0, 500), "", "warn");
+    }
   };
 
   const vault = useMemo(() => ({
@@ -10480,7 +10625,7 @@ function InspectorAiTab({ rec, body, edit, ai, relay, tagIndex, onRun, onClearNo
         onProgress: (acc) => { if (runRef.current === ctrl) setLive(acc); },
       });
       if (runRef.current !== ctrl) return;
-      if (!res.ok) setFail(res);
+      if (!res.ok) { setFail(res); logProblem("AI action", kind + ": " + res.error); }
       else {
         setRows((prev) => prev.filter((r) => r.id !== res.note.id).concat([res.note]));
         const pr = res.outcome.proposal;
@@ -13049,7 +13194,49 @@ function CustomFlagsEditor({ flags, usage, onChange }) {
   );
 }
 
-function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage }) {
+/** Settings → Problem log: this session's problems, scrubbed, ready to copy into a bug report. */
+function ProblemLog({ info, onToast }) {
+  const [tick, setTick] = useState(0);
+  const [showNames, setShowNames] = useState(false);
+  useEffect(() => {
+    const fn = () => setTick((n) => n + 1);
+    problemLogListeners.add(fn);
+    return () => { problemLogListeners.delete(fn); };
+  }, []);
+  const text = useMemo(() => {
+    const i = info ? info(showNames) : { header: [], names: [] };
+    return formatProblemLog(PROBLEM_LOG, i.header, i.names);
+  }, [tick, showNames, info]);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); onToast("Problem log copied", "green"); }
+    catch (e) { onToast("Couldn't copy: select the log below and press Ctrl+C", "warm"); }
+  };
+  return (
+    <div className="problem-log" style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.7, marginBottom: 8 }}>
+        Errors and warnings from this session, to paste into a bug report. Kept only while this page is open:
+        nothing is saved or sent anywhere. What you see is exactly what gets copied, with API keys, tokens and
+        passwords, email addresses, your Windows user name, addresses on your network, destination user names
+        and private cards' names taken out.
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <SmallBtn color="cyan" onClick={copy}>Copy log</SmallBtn>
+        <SmallBtn color="muted" onClick={clearProblemLog} disabled={!PROBLEM_LOG.length}>Clear</SmallBtn>
+        <label style={{ fontSize: 11, color: "var(--text-secondary)", display: "flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
+          <input type="checkbox" checked={showNames} onChange={(e) => setShowNames(e.target.checked)} />
+          Show card and folder names
+        </label>
+        <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>{PROBLEM_LOG.length ? PROBLEM_LOG.length + " logged" : "nothing logged yet"}</span>
+      </div>
+      <pre className="vault-scroll problem-log-text" tabIndex={0} style={{ maxHeight: 240, overflow: "auto", margin: 0, padding: 9,
+        whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 10.5, lineHeight: 1.55, userSelect: "text",
+        fontFamily: "'JetBrains Mono', monospace", color: "var(--text-secondary)",
+        background: "var(--bg-input)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)" }}>{text}</pre>
+    </div>
+  );
+}
+
+function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage, problemLogInfo }) {
   const importRef = useRef(null);
   return (
     <Modal title="Settings" icon={"⚙"} width={640} onClose={onClose}
@@ -13256,6 +13443,9 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
         </div>
       </div>
 
+      <label style={tinyLabel}>Problem log</label>
+      <ProblemLog info={problemLogInfo} onToast={onToast} />
+
       <div style={{
         padding: 11, borderRadius: "var(--radius-sm)",
         background: acRgba("red", 0.06), border: "1px solid " + acRgba("red", 0.22),
@@ -13425,6 +13615,7 @@ function App() {
   const showToast = useCallback((msg, color) => {
     const c = color || "green";
     const isProblem = c === "red" || c === "warm";
+    if (isProblem) logProblem("Notice", msg, "", c === "red" ? "error" : "warn");
     setToast((prev) => {
       // Stop a routine message that fires moments later (a follow-up rescan,
       // say) from burying a failure. Kept deliberately short: anything the
@@ -14724,6 +14915,34 @@ function App() {
 
   useEffect(() => { refreshAiRelay(); }, [refreshAiRelay]);
 
+  /* What the problem log (Settings) puts at the top, and the names it hides:
+     private cards and destination user names always, the rest unless shown. */
+  const problemLogInfo = useCallback((showNames) => {
+    const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+    const major = chromiumMajor(ua);
+    const os = /Windows/.test(ua) ? "Windows" : /Mac OS/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "unknown OS";
+    let aiHost = "";
+    try { aiHost = aiRelay.baseUrl ? new URL(aiRelay.baseUrl).host : ""; } catch (e) { aiHost = "?"; }
+    const header = [
+      "RP Card Vault problem log, copied " + new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().replace("T", " ").slice(0, 16) + " (local time)",
+      "Vault " + APP_VERSION + " · server " + (aiRelay.version || (aiRelay.available ? "?" : "not reached")) + " · " +
+        BROWSER_LABEL + (major ? " " + major : "") + " · " + os,
+      "Folders: " + roots.length + " · cards: " + cards.length,
+      "AI: " + (aiRelay.configured ? aiHost + " · model " + (aiRelay.model || "?") + (aiRelay.hasKey ? " · key set" : " · no key") : "not set up"),
+    ];
+    const names = [];
+    for (const d of settings.destinations || []) if (d.username) names.push({ name: d.username, as: "[user]" });
+    for (const r of records) {
+      if (!showNames || r.aiPrivate) {
+        const as = r.aiPrivate ? "[private card]" : "[card]";
+        names.push({ name: r.file, as: as + " file" }, { name: r.name, as });
+        for (const seg of String(r.dir || "").split("/")) names.push({ name: seg, as: "[folder]" });
+      }
+    }
+    if (!showNames) for (const rt of roots) names.push({ name: rt.name, as: "[folder]" });
+    return { header, names };
+  }, [aiRelay, roots, cards.length, records, settings.destinations]);
+
   /** Give the relay an address, model and (optionally) key. Throws the relay's reason. */
   const aiPushConfig = useCallback(async (fields) => {
     const r = await vaultFetch("/__vault/ai/config", {
@@ -15948,7 +16167,7 @@ function App() {
           onImportVault={importVault} cardCount={cards.length} trashOptions={moveTargets}
           destStatus={destStatus} onConnectDest={connectDest} onDisconnectDest={disconnectDest}
           onBackupNow={() => backupVaultData(true)} lastAutoBackup={lastAutoBackup}
-          flagUsage={Object.fromEntries(flagCounts.map((f) => [f.key, f.count]))} />
+          flagUsage={Object.fromEntries(flagCounts.map((f) => [f.key, f.count]))} problemLogInfo={problemLogInfo} />
       ) : null}
 
       {/* ── context menu ── */}
