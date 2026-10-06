@@ -8,6 +8,18 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.1
+
+Fixes for GitHub's code scanning and Dependabot alerts.
+
+- **The local server tells the page an error's message and nothing more.**
+  An error with no message used to be turned into text whole, which can
+  include where in the code it happened. Now the page gets a plain sentence
+  and the details go to the server's window.
+- **Test tooling:** regex escaping in two tests is complete, a pattern in the
+  test harness can no longer slow to a crawl on unusual input, and
+  `source-map-js` (used only by the tests) is updated to 1.2.2.
+
 ## 1.5.0
 
 The look and setup review.

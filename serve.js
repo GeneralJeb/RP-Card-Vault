@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.5.0";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.5.1";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -392,6 +392,17 @@ function numIn(v, spec) {
   const n = Number(v);
   if (!isFinite(n)) return spec.def;
   return Math.min(spec.max, Math.max(spec.min, n));
+}
+
+/**
+ * What the page is told about an error: its message, and nothing else. An
+ * error without one (a bug here, say) is reported as such, with its stack
+ * printed in this window rather than sent anywhere.
+ */
+function errorText(e) {
+  if (e && typeof e.message === "string" && e.message) return e.message;
+  console.error("\n  Unexpected error:", e && e.stack ? e.stack : e);
+  return "The local server hit an unexpected error. Its window has the details.";
 }
 
 function userError(message, status) {
@@ -861,7 +872,7 @@ async function aiChat(req, res, body) {
     if (!pageGone) {
       const message = ac.signal.aborted
         ? "The endpoint went quiet for " + Math.round(timeoutMs / 1000) + "s, so the request was dropped."
-        : (e && e.message) || String(e);
+        : errorText(e);
       emit({ t: "error", message: scrubSecret(message) });
     }
   } finally {
@@ -1245,7 +1256,7 @@ async function handleBridge(req, res, url) {
     }
     return sendJson(res, 404, { error: "Unknown route." });
   } catch (e) {
-    const msg = scrubSecret((e && e.message) || String(e));
+    const msg = scrubSecret(errorText(e));
     if (res.headersSent) { try { res.end(); } catch (e2) { /* already gone */ } return; }
     const status = e && [401, 404, 409, 413].indexOf(e.status) >= 0 ? e.status : 400;
     const out = { error: msg };
@@ -1444,7 +1455,7 @@ if (require.main !== module) {
     looksLikeHtml, describeHtmlBody, upstreamMessage, scrubSecret,
     readChoice, sseParser, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
     cleanMessages, cleanTools, saysToolsUnsupported, saysImagesUnsupported, WS_STARTER, cookiesOf, mergeCookies,
-    RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES,
+    RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES, errorText,
   };
   return;
 }

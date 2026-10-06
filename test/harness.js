@@ -54,7 +54,7 @@ function done() {
  * slash preceded by something that can only start a regex (not a division),
  * then captures the body and flags. It's here once so a fix applies everywhere.
  */
-const REGEX_FINDER = /(?:^|[=(,:!&|?{};[+\-*%\s])\/(?![*\/])((?:\\.|\[(?:\\.|[^\]\\])*\]|[^\/\\\n])+)\/([gimsuy]*)/g;
+const REGEX_FINDER = /(?:^|[=(,:!&|?{};[+\-*%\s])\/(?![*\/])((?:\\.|\[(?:\\.|[^\]\\])*\]|[^\/\\\n[])+)\/([gimsuy]*)/g;
 
 function sweepRegexLiterals(source) {
   let count = 0;
