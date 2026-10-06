@@ -8,6 +8,14 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.3.2
+
+- **Text-only tool calls: no made-up results in replies.** In that mode a
+  model could write its own `<tool_result>` block, repeating or inventing
+  what a tool returned, and it showed in the chat. Only the vault writes
+  those: a reply that makes one up after a tool call is cut there (the real
+  result follows), and one quoted on its own is removed.
+
 ## 1.3.1
 
 - **Sending never fails silently.** A send whose cards had left the vault
