@@ -8,6 +8,25 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.4.1
+
+- **Fixed: an answer lost after a repeated tool result.** 1.3.3 kept the
+  answer only when the repeated result ended in a closing tag, but most
+  tools (inspect_card, list_cards and others) return plain lines, so the
+  answer was still cut and the reply failed. A repeated result now ends
+  where its data does: lines of the real result, "Key: value" lines, lists
+  and card lines go; the first ordinary sentence is the answer, and stays.
+- **The problem log hides more:**
+  - names of cards and folders that have left the vault since, private ones
+    included
+  - every cookie in a cookie header
+  - Groq and xAI keys
+  - your Windows user name, even with a card or folder called "Users"
+- **The problem log is quieter:** failures the vault handles on its own
+  (a model without tool calling, a file changed since it was read) aren't
+  logged, and a notice repeating a server error is one line, not two.
+- **"Copied" in the log's header** is now the time you pressed Copy log.
+
 ## 1.4.0
 
 - **A problem log, to copy into a bug report.** Settings → Problem log

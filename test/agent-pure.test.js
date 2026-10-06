@@ -16,7 +16,7 @@ const t = require("./harness");
 const { mod: V } = loadPureRegion([
   "AGENT_TOOLS", "AGENT_RULES", "AGENT_LIMITS", "DEFAULT_AGENT_SETTINGS", "sanitizeAgentSettings",
   "setCustomFlags", "sanitizeCustomFlags", "customFlagKey", "statusFlags", "flagDef", "agentActiveTools",
-  "newAgentSession", "agentSessionTitle", "agentToolsForModel", "parseTextToolCalls", "dropModelResults",
+  "newAgentSession", "agentSessionTitle", "agentToolsForModel", "parseTextToolCalls", "dropModelResults", "agentKnownResults",
   "interpretAgentStep", "agentModelMessages", "fitAgentContext", "rateWait", "rateRecord",
   "capToolOutput", "runAgentTool", "runAgentLoop", "aiEmptyStream", "aiStreamStep",
   "AI_PERSONA_DEFAULT", "splitThinkingAnywhere", "parseMarkdown", "cleanAgentTitle", "agentTitleRequest",
@@ -373,6 +373,22 @@ async function main() {
     t.eq(V.dropModelResults("<tool_result name=\"read_card\">\n<card id=\"c4g2\">\nName: Ramia\n</card>\n\nRamia is a lamia who runs a bakery."),
       "Ramia is a lamia who runs a bakery.", "an unclosed repeat ends at its last closing tag, so the answer after it is kept");
     t.eq(V.dropModelResults("<tool_result>a</tool_result>\nOne.\n<tool_result>b</tool_result>\nTwo."), "One.\n\nTwo.", "every repeated block goes");
+
+    // inspect_card's result is plain lines with no closing tag: the case from the screenshot.
+    const inspected = "Name: Ramia\nId: c4g2\nCreator: bangboopt2\nSpec: chara_card_v3 · about 1,326 tokens of permanent context\nFlags: Needs edit (needs user removal)\nVault-only tags: (none)";
+    const echo = "<tool_result name=\"inspect_card\">\n" + inspected + "\n\nRamia is a lamia who runs a bakery; the needsEdit flag is waiting on you.";
+    t.eq(V.dropModelResults(echo, [inspected]), "Ramia is a lamia who runs a bakery; the needsEdit flag is waiting on you.",
+      "an unclosed repeat of a plain-text result ends where the real result's lines do, and the answer is kept");
+    t.eq(V.dropModelResults(echo), "Ramia is a lamia who runs a bakery; the needsEdit flag is waiting on you.",
+      "and without the real result, \"Key: value\" lines are still taken as data");
+    t.eq(V.dropModelResults("<tool_result>\nc4g2 · Ramia · by x\n- c9 · Bram\n\nTwo cards match."), "Two cards match.", "card lines and list items are data too");
+    t.eq(V.dropModelResults("<tool_result>\nName: Ramia\n\nRamia is a lamia.\n<tool_result>x</tool_result>\nDone."), "Ramia is a lamia.\n\nDone.",
+      "an unclosed block doesn't borrow the next block's closing tag, so the prose between stays");
+    acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: echo }), { t: "done" });
+    step = V.interpretAgentStep(acc, true, [inspected]);
+    t.ok(step.ok && /^Ramia is a lamia/.test(step.text), "so that reply is an answer, not \"only repeated a tool result\"");
+    const chat = { messages: [{ role: "user", text: "x" }, { role: "tool", id: "t1", name: "inspect_card", result: inspected }] };
+    t.eq(V.agentKnownResults(chat), [inspected], "the chat's tool results are what a repeat is compared with");
     t.eq(V.dropModelResults("No blocks here."), "No blocks here.", "a reply without one is unchanged");
     acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: "<tool_result>x</tool_result>" }), { t: "done" });
     step = V.interpretAgentStep(acc, true);
