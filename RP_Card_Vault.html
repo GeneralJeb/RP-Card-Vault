@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.4.1";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -5099,27 +5099,49 @@ function parseTextToolCalls(text) {
  * Only the vault writes <tool_result> blocks. A model that writes one is making
  * up (or repeating) a result. After a tool block, everything from there on rests
  * on a result it hasn't had yet, so the reply is cut there; otherwise just the
- * blocks go. A repeated block a model leaves unclosed ends at its last closing
- * tag (the vault's results end in one, such as </card>), so the answer after it
- * is kept; with none, it runs to the end.
+ * blocks go, each ending at its own </tool_result>. A block the model leaves
+ * unclosed ends where its data does: lines from a real tool result (`known`,
+ * the chat's results so far), tag lines, "Key: value" lines, list items and
+ * card lines go; the first line of ordinary prose is the answer, and stays.
  */
-function dropModelResults(text) {
+function dropModelResults(text, known) {
   let s = String(text == null ? "" : text);
   const at = s.search(/<tool_result\b/i);
   if (at < 0) return s;
   if (/<tool\s+name\s*=/i.test(s.slice(0, at))) return s.slice(0, at).trim();
+  const knownLines = new Set();
+  for (const k of known || []) for (const l of String(k).split("\n")) { const x = l.trim(); if (x) knownLines.add(x); }
+  const isData = (line) => {
+    const x = line.trim();
+    return !x || knownLines.has(x) || /^<\/?[\w-]+(\s[^>]*)?>$/.test(x) || /^[A-Z][\w '()\/-]{0,30}:(\s|$)/.test(x) ||
+      /^(-|\*|\d+\.)\s/.test(x) || / · /.test(x);
+  };
   for (let i = at; i >= 0; i = s.search(/<tool_result\b/i)) {
     const rest = s.slice(i);
-    const close = rest.search(/<\/tool_result>/i);
-    let end = rest.length;
+    const next = rest.slice(1).search(/<tool_result\b/i);
+    const limit = next >= 0 ? next + 1 : rest.length;
+    const close = rest.slice(0, limit).search(/<\/tool_result>/i);
+    let end = limit;
     if (close >= 0) end = close + "</tool_result>".length;
     else {
-      const tags = rest.match(/<\/[\w-]+>/g);
-      if (tags) end = rest.lastIndexOf(tags[tags.length - 1]) + tags[tags.length - 1].length;
+      const open = rest.indexOf(">");
+      if (open >= 0 && open < limit) {
+        end = open + 1;
+        for (const line of rest.slice(end, limit).split("\n")) {
+          if (!isData(line)) break;
+          end += line.length + 1;
+        }
+        end = Math.min(end, limit);
+      }
     }
     s = s.slice(0, i) + rest.slice(end);
   }
   return s.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** The chat's latest tool results, which a model may repeat in its reply. */
+function agentKnownResults(session) {
+  return ((session && session.messages) || []).filter((m) => m.role === "tool").slice(-30).map((m) => String(m.result || ""));
 }
 
 /** Why a step came back with nothing to show, as specifically as the reply allows. */
@@ -5170,12 +5192,12 @@ function splitThinkingAnywhere(text) {
  * made. Like the actions, a reply that is only thinking, empty, or that ended
  * without a done event is a failure, never passed off as an answer.
  */
-function interpretAgentStep(acc, textMode) {
+function interpretAgentStep(acc, textMode, known) {
   if (acc.error) return { ok: false, error: acc.error };
   if (!acc.done) return { ok: false, error: "The reply stopped before it finished (the connection closed early)." };
   const split = splitThinkingAnywhere(acc.text);
   const think = String(acc.think || "") + split.think;
-  let text = dropModelResults(split.text);
+  let text = dropModelResults(split.text, known);
   let calls = (acc.tools || []).map((c) => ({ id: String(c.id), name: String(c.name), args: String(c.args || "{}") }));
   if (textMode) {
     const p = parseTextToolCalls(text);
@@ -7302,6 +7324,13 @@ function logProblem(source, text, detail, level) {
   const t = String(text == null ? "" : text).slice(0, PROBLEM_LOG_CHARS);
   const d = detail ? String(detail).slice(0, PROBLEM_LOG_CHARS) : "";
   const last = PROBLEM_LOG[PROBLEM_LOG.length - 1];
+  // A notice that only repeats the server failure just logged (with the
+  // destination's name in front, say) would be the same problem twice.
+  // They arrive in either order; the server's line, with its route and status, is kept.
+  const coreOf = (x) => (x.indexOf(": ") > 0 ? x.slice(x.indexOf(": ") + 2) : x);
+  const sameAs = (notice, server) => Date.now() - last.at < 3000 && coreOf(notice).length >= 12 && server.indexOf(coreOf(notice)) >= 0;
+  if (last && source === "Notice" && last.source === "Local server" && sameAs(t, last.text)) return;
+  if (last && source === "Local server" && last.source === "Notice" && sameAs(last.text, t)) PROBLEM_LOG.pop();
   if (last && last.source === source && last.text === t && last.detail === d) {
     last.count++;
     last.at = Date.now();
@@ -7323,9 +7352,11 @@ function clearProblemLog() {
 const LOG_SCRUB_RULES = [
   [/\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, "[key]"],
   [/\b(hf|ghp|gho|ghs|github_pat|xox[abpr])_[A-Za-z0-9_]{8,}/g, "[key]"],
+  [/\b(gsk|xai|nvapi|pplx|csk)[-_][A-Za-z0-9_-]{20,}/g, "[key]"],
   [/\bAIza[0-9A-Za-z_-]{20,}/g, "[key]"],
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+\/=-]{8,}/gi, "$1 [key]"],
-  [/(["']?\b(?:api[_-]?key|apikey|access[_-]?token|token|password|passwd|secret|authorization|cookie|set-cookie)\b["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&}]+)/gi, "$1[hidden]"],
+  [/(["']?\b(?:set-)?cookie\b["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\n]*)/gi, "$1[hidden]"],
+  [/(["']?\b(?:api[_-]?key|apikey|access[_-]?token|token|password|passwd|secret|authorization)\b["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&}]+)/gi, "$1[hidden]"],
   [/(https?:\/\/)[^\/\s@"'<>]+@/gi, "$1"],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]"],
   [/(https?:\/\/[^\s?#"'<>]+)\?[^\s#"'<>]*/gi, "$1?[…]"],
@@ -7335,8 +7366,6 @@ const LOG_SCRUB_RULES = [
     (/^(127\.|0\.0\.0\.0$)/.test(m) || m.split(".").some((n) => Number(n) > 255)) ? m : "[ip]"],
 ];
 
-function logEscapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-
 /**
  * A replacer for names: `entries` are { name, as } (a card name and "[card]",
  * say). Only names that appear in `text` go into the pattern, so thousands of
@@ -7345,23 +7374,58 @@ function logEscapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function makeLogNameScrub(entries, text) {
   const hay = String(text || "").toLowerCase();
   const map = new Map();
+  const tried = new Set();
   for (const e of entries || []) {
     const n = String((e && e.name) || "").trim();
     if (n.length < 3) continue;
     const k = n.toLowerCase();
-    if (!map.has(k) && hay.indexOf(k) >= 0) map.set(k, e.as || "[name]");
+    if (tried.has(k)) continue;
+    tried.add(k);
+    if (hay.indexOf(k) >= 0) map.set(k, e.as || "[name]");
   }
   if (!map.size) return (s) => s;
-  const alts = Array.from(map.keys()).sort((a, b) => b.length - a.length).map(logEscapeRe);
-  const re = new RegExp("(?<![\\p{L}\\p{N}_])(?:" + alts.join("|") + ")(?![\\p{L}\\p{N}_])", "giu");
+  const alts = Array.from(map.keys()).sort((a, b) => b.length - a.length).map(reEscape);
+  // Not inside a placeholder already put in ("[key]" stays, for a card called Key).
+  const re = new RegExp("(?<![\\p{L}\\p{N}_\\[])(?:" + alts.join("|") + ")(?![\\p{L}\\p{N}_\\]])", "giu");
   return (s) => s.replace(re, (m) => map.get(m.toLowerCase()) || "[name]");
 }
 
-function scrubLogText(text, nameScrub) {
+/** The fixed rules first, then names: a card called "Users" mustn't stop the user-name rule from matching. */
+function scrubLogText(text, names) {
   let s = String(text == null ? "" : text);
-  if (nameScrub) s = nameScrub(s);
   for (const [re, to] of LOG_SCRUB_RULES) s = s.replace(re, to);
-  return s;
+  return names ? makeLogNameScrub(names, s)(s) : s;
+}
+
+/* Every card, file, folder and destination user name seen this session, so a
+   problem about a card that has since been renamed, moved out or forgotten is
+   still hidden. Once private, a name stays private. */
+const LOG_NAME_BOOK = new Map();   // lower-case name → { name, as, private }
+
+function rememberLogNames(records, roots, destinations) {
+  const put = (name, as, priv) => {
+    const n = String(name || "").trim();
+    if (n.length < 3) return;
+    const k = n.toLowerCase();
+    const old = LOG_NAME_BOOK.get(k);
+    if (!old || (priv && !old.private)) LOG_NAME_BOOK.set(k, { name: n, as, private: !!priv });
+  };
+  for (const d of destinations || []) put(d.username, "[user]", true);
+  for (const r of records || []) {
+    const priv = !!r.aiPrivate;
+    const as = priv ? "[private card]" : "[card]";
+    put(r.file, as + " file", priv);
+    put(r.name, as, priv);
+    for (const seg of String(r.dir || "").split("/")) put(seg, "[folder]", priv);
+  }
+  for (const rt of roots || []) put(rt.name, "[folder]", false);
+}
+
+/** The names to hide: all of them, or with names shown, the private ones and user names. */
+function logNameEntries(showNames) {
+  const out = [];
+  for (const v of LOG_NAME_BOOK.values()) if (!showNames || v.private) out.push(v);
+  return out;
 }
 
 /**
@@ -7379,8 +7443,7 @@ function formatProblemLog(entries, header, names) {
   }
   // The header is the vault's own words, so names aren't looked for there
   // (a folder called "Cards" would hide the card count).
-  const body = lines.join("\n");
-  return scrubLogText((header || []).join("\n")) + "\n\n" + scrubLogText(body, makeLogNameScrub(names, body));
+  return scrubLogText((header || []).join("\n")) + "\n\n" + scrubLogText(lines.join("\n"), names);
 }
 
 /*__PURE_JS_END__*/
@@ -7433,6 +7496,8 @@ function recordAiSent(bodyText) {
   for (const fn of aiSentListeners) { try { fn(); } catch (e) { /* a closed panel */ } }
 }
 
+const SERVER_HANDLED_CODES = ["tools_unsupported", "images_unsupported"];
+
 function vaultFetch(path, opts) {
   const o = Object.assign({ cache: "no-store" }, opts || {});
   o.headers = Object.assign({ "X-Vault": "1" }, o.headers || {});
@@ -7441,11 +7506,16 @@ function vaultFetch(path, opts) {
   // don't say what to do. A cancel (AbortError) passes through untouched.
   const what = (o.method || "GET").toUpperCase() + " " + path;
   return fetch(path, o).then((r) => {
-    // Failures go in the problem log (Settings). A 404 is often an expected
-    // answer (a workspace file that isn't there yet), so it doesn't.
-    if (r && !r.ok && r.status !== 404) {
-      const log = (msg) => logProblem("Local server", what + " → HTTP " + r.status + (msg ? ": " + msg : ""));
-      try { r.clone().json().then((d) => log(d && d.error), () => log("")); } catch (e) { log(""); }
+    // Failures go in the problem log (Settings), but not the answers the page
+    // expects and handles itself: a 404 (a workspace file that isn't there
+    // yet), a 409 (a file changed since it was read; the agent reads it again),
+    // or a model without tools or photos (the chat falls back on its own).
+    if (r && !r.ok && r.status !== 404 && r.status !== 409) {
+      const log = (d) => {
+        if (d && SERVER_HANDLED_CODES.indexOf(d.code) >= 0) return;
+        logProblem("Local server", what + " → HTTP " + r.status + (d && d.error ? ": " + d.error : ""));
+      };
+      try { r.clone().json().then(log, () => log(null)); } catch (e) { log(null); }
     }
     return r;
   }, (e) => {
@@ -9318,7 +9388,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
       const used = (acc.usage && acc.usage.total_tokens) ||
         (estimateTokens(JSON.stringify(msgs)) + estimateTokens(acc.text + acc.think));
       rateLog.current = rateRecord(rateLog.current, Date.now(), "tokens", used);
-      return interpretAgentStep(acc, textMode);
+      return interpretAgentStep(acc, textMode, agentKnownResults(s));
     }
     return { ok: false, error: "The model wouldn't take the request with or without tools." };
   };
@@ -9914,7 +9984,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
         })() : null}
         {running && !pending ? (() => {
           const shown = live ? splitThinkingAnywhere(live.text) : { text: "", think: "" };
-          shown.text = dropModelResults(shown.text);
+          shown.text = dropModelResults(shown.text, agentKnownResults(sessRef.current));
           const thinking = live ? [live.think, shown.think].filter(Boolean).join("\n\n") : "";
           return (
             <div className="agent-live" style={{ margin: "8px 0" }}>
@@ -13203,12 +13273,13 @@ function ProblemLog({ info, onToast }) {
     problemLogListeners.add(fn);
     return () => { problemLogListeners.delete(fn); };
   }, []);
-  const text = useMemo(() => {
+  const build = () => {
     const i = info ? info(showNames) : { header: [], names: [] };
     return formatProblemLog(PROBLEM_LOG, i.header, i.names);
-  }, [tick, showNames, info]);
+  };
+  const text = useMemo(build, [tick, showNames, info]);
   const copy = async () => {
-    try { await navigator.clipboard.writeText(text); onToast("Problem log copied", "green"); }
+    try { await navigator.clipboard.writeText(build()); onToast("Problem log copied", "green"); }
     catch (e) { onToast("Couldn't copy: select the log below and press Ctrl+C", "warm"); }
   };
   return (
@@ -14914,6 +14985,7 @@ function App() {
   }, [applyAiRelay]);
 
   useEffect(() => { refreshAiRelay(); }, [refreshAiRelay]);
+  useEffect(() => { rememberLogNames(records, roots, settings.destinations); }, [records, roots, settings.destinations]);
 
   /* What the problem log (Settings) puts at the top, and the names it hides:
      private cards and destination user names always, the rest unless shown. */
@@ -14930,18 +15002,8 @@ function App() {
       "Folders: " + roots.length + " · cards: " + cards.length,
       "AI: " + (aiRelay.configured ? aiHost + " · model " + (aiRelay.model || "?") + (aiRelay.hasKey ? " · key set" : " · no key") : "not set up"),
     ];
-    const names = [];
-    for (const d of settings.destinations || []) if (d.username) names.push({ name: d.username, as: "[user]" });
-    for (const r of records) {
-      if (!showNames || r.aiPrivate) {
-        const as = r.aiPrivate ? "[private card]" : "[card]";
-        names.push({ name: r.file, as: as + " file" }, { name: r.name, as });
-        for (const seg of String(r.dir || "").split("/")) names.push({ name: seg, as: "[folder]" });
-      }
-    }
-    if (!showNames) for (const rt of roots) names.push({ name: rt.name, as: "[folder]" });
-    return { header, names };
-  }, [aiRelay, roots, cards.length, records, settings.destinations]);
+    return { header, names: logNameEntries(showNames) };
+  }, [aiRelay, roots.length, cards.length]);
 
   /** Give the relay an address, model and (optionally) key. Throws the relay's reason. */
   const aiPushConfig = useCallback(async (fields) => {

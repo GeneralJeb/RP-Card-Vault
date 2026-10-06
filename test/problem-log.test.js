@@ -10,7 +10,7 @@ const { loadPureRegion } = require("./pure-region");
 const t = require("./harness");
 
 const { mod: V } = loadPureRegion(["PROBLEM_LOG", "PROBLEM_LOG_MAX", "logProblem", "clearProblemLog",
-  "scrubLogText", "makeLogNameScrub", "formatProblemLog"]);
+  "scrubLogText", "makeLogNameScrub", "formatProblemLog", "rememberLogNames", "logNameEntries", "LOG_NAME_BOOK"]);
 
 console.log("\nkeeping");
 {
@@ -27,6 +27,17 @@ console.log("\nkeeping");
   t.ok(V.PROBLEM_LOG[V.PROBLEM_LOG.length - 1].text.length <= 4000, "a huge message is clipped");
   V.clearProblemLog();
   t.eq(V.PROBLEM_LOG.length, 0, "Clear empties it");
+
+  V.logProblem("Local server", "POST /__vault/dest/connect → HTTP 400: Couldn't reach http://127.0.0.1:9. Is it running?");
+  V.logProblem("Notice", "Lumiverse: Couldn't reach http://127.0.0.1:9. Is it running?");
+  t.eq(V.PROBLEM_LOG.map((e) => e.source), ["Local server"], "a notice repeating the server failure just logged isn't logged again");
+  V.clearProblemLog();
+  V.logProblem("Notice", "Lumiverse: Couldn't reach http://127.0.0.1:9. Is it running?");
+  V.logProblem("Local server", "POST /__vault/dest/connect → HTTP 400: Couldn't reach http://127.0.0.1:9. Is it running?");
+  t.eq(V.PROBLEM_LOG.map((e) => e.source), ["Local server"], "in either order: the server's line, with its route, is the one kept");
+  V.logProblem("Notice", "Pick a card to send first");
+  t.eq(V.PROBLEM_LOG.length, 2, "an unrelated notice is still logged");
+  V.clearProblemLog();
 }
 
 console.log("\nscrubbing");
@@ -51,6 +62,11 @@ console.log("\nscrubbing");
     ["http://127.0.0.1:7860 and 0.0.0.0", "http://127.0.0.1:7860 and 0.0.0.0", "this computer's addresses stay"],
     ["Edge 154.0.6000.12", "Edge 154.0.6000.12", "a version number isn't taken for an address"],
     ["max_tokens: 4096 · Tokens: 1,326", "max_tokens: 4096 · Tokens: 1,326", "token counts aren't taken for tokens"],
+    ["cookie: a=1; session=abc123; csrf=xyz\nnext line", "cookie: [hidden]\nnext line", "every pair of a Cookie header, to the end of its line"],
+    ['{"set-cookie":"sid=1; Path=/"}', '{"set-cookie":[hidden]}', "and a cookie in JSON"],
+    ["Invalid API key gsk_ABCDEF1234567890abcdef", "Invalid API key [key]", "a Groq key"],
+    ["bad key xai-ABCDEF1234567890abcdefgh", "bad key [key]", "an xAI key"],
+    ["model x-ai/grok-4 and xai-short", "model x-ai/grok-4 and xai-short", "a model name isn't taken for a key"],
   ];
   for (const [input, want, label] of cases) t.eq(s(input), want, label);
 }
@@ -69,6 +85,35 @@ console.log("\nnames");
   const t0 = Date.now();
   V.makeLogNameScrub(many, "x".repeat(20000) + " Card number 19999 ")("Card number 19999");
   t.ok(Date.now() - t0 < 1500, "twenty thousand names are quick (" + (Date.now() - t0) + " ms)");
+
+  const users = [{ name: "Users", as: "[folder]" }];
+  t.eq(V.scrubLogText("Couldn't read C:\\Users\\Jeb\\Cards\\x.png", users), "Couldn't read C:\\[folder]\\[you]\\Cards\\x.png",
+    "a folder called Users can't stop the user name being taken out: the fixed rules go first");
+  t.eq(V.scrubLogText("Invalid sk-abcdefgh12345678 for Key", [{ name: "Key", as: "[card]" }]), "Invalid [key] for [card]",
+    "a name isn't looked for inside a placeholder already put in");
+  const dupes = [];
+  for (let i = 0; i < 30000; i++) dupes.push({ name: "Fantasy", as: "[folder]" });
+  const t1 = Date.now();
+  V.makeLogNameScrub(dupes, "y".repeat(500000));
+  t.ok(Date.now() - t1 < 300, "a name repeated thousands of times is searched for once (" + (Date.now() - t1) + " ms)");
+}
+
+console.log("\nnames seen this session");
+{
+  V.LOG_NAME_BOOK.clear();
+  const rec = (name, file, dir, aiPrivate) => ({ name, file, dir, aiPrivate });
+  V.rememberLogNames([rec("Ramia", "Ramia.png", "Monster Girls", false), rec("Hidden One", "Hidden One.png", "Secret", true)],
+    [{ name: "My Cards" }], [{ username: "Jeb" }]);
+  V.rememberLogNames([rec("Bram", "Bram.png", "", false)], [], []);   // Ramia and the private card have left the vault
+  const all = V.logNameEntries(false).map((e) => e.name + "=" + e.as).sort();
+  t.eq(all, ["Bram.png=[card] file", "Bram=[card]", "Hidden One.png=[private card] file", "Hidden One=[private card]", "Jeb=[user]",
+    "Monster Girls=[folder]", "My Cards=[folder]", "Ramia.png=[card] file", "Ramia=[card]", "Secret=[folder]"].sort(),
+    "cards that have since left the vault are still hidden");
+  t.eq(V.logNameEntries(true).map((e) => e.name).sort(), ["Hidden One", "Hidden One.png", "Jeb", "Secret"],
+    "with names shown, private cards (and their folders) and user names still aren't");
+  V.rememberLogNames([rec("Hidden One", "Hidden One.png", "", false)], [], []);
+  t.ok(V.logNameEntries(true).some((e) => e.name === "Hidden One"), "once private, a name stays private");
+  V.LOG_NAME_BOOK.clear();
 }
 
 console.log("\nthe copied text");
