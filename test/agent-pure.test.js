@@ -369,10 +369,19 @@ async function main() {
       "a result the model makes up after its call is cut, along with what it wrote from it; the call still runs");
     t.eq(V.dropModelResults("Here it is:\n<tool_result>\n<card id=\"c4g2\">\nName: Ramia\n</tool_result>\nShe needs edits."), "Here it is:\n\nShe needs edits.",
       "a result quoted with no call before it is removed, the rest kept");
-    t.eq(V.dropModelResults("Summary first.\n<tool_result>\nName: Ramia\nTags: lamia"), "Summary first.", "an unclosed one goes to the end");
+    t.eq(V.dropModelResults("Summary first.\n<tool_result>\nName: Ramia\nTags: lamia"), "Summary first.", "an unclosed one with no closing tag goes to the end");
+    t.eq(V.dropModelResults("<tool_result name=\"read_card\">\n<card id=\"c4g2\">\nName: Ramia\n</card>\n\nRamia is a lamia who runs a bakery."),
+      "Ramia is a lamia who runs a bakery.", "an unclosed repeat ends at its last closing tag, so the answer after it is kept");
+    t.eq(V.dropModelResults("<tool_result>a</tool_result>\nOne.\n<tool_result>b</tool_result>\nTwo."), "One.\n\nTwo.", "every repeated block goes");
     t.eq(V.dropModelResults("No blocks here."), "No blocks here.", "a reply without one is unchanged");
     acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: "<tool_result>x</tool_result>" }), { t: "done" });
-    t.ok(!V.interpretAgentStep(acc, true).ok, "a reply that is only a made-up result counts as empty");
+    step = V.interpretAgentStep(acc, true);
+    t.ok(!step.ok && /only repeated a tool result/.test(step.error), "a reply that is only a made-up result fails, and says so");
+    const empty = (finish, think) => V.interpretAgentStep(V.aiStreamStep(think ? V.aiStreamStep(V.aiEmptyStream(), { t: "think", v: "hmm" }) : V.aiEmptyStream(), { t: "done", finish }), true).error;
+    t.ok(/Max tokens/.test(empty("length")), "an empty reply cut off by Max tokens says so");
+    t.ok(/blocked the reply \(finish reason: content_filter\)/.test(empty("content_filter")), "one the provider blocked says so, with its reason");
+    t.ok(/whole reply thinking/.test(empty("stop", true)), "one that only thought says so");
+    t.ok(/empty reply \(finish reason: stop\)/.test(empty("stop")), "and a plain empty one gives the finish reason");
 
     const session = V.newAgentSession("s", 1);
     session.textMode = true;

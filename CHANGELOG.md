@@ -8,6 +8,17 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.3.3
+
+- **An empty agent reply says why.** "The model sent back an empty reply"
+  now says whether the model only repeated a tool result, ran into Max
+  tokens, was blocked by the provider (with the reason it gave), or really
+  sent nothing.
+- **A repeated tool result no longer swallows the answer after it.** In
+  text-only mode a model that repeated a result without closing the block
+  lost everything it wrote after it; the block now ends where the vault's
+  result did, and the answer is kept.
+
 ## 1.3.2
 
 - **Text-only tool calls: no made-up results in replies.** In that mode a
