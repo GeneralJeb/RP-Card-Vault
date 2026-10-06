@@ -329,13 +329,8 @@ async function main() {
       await tile("Ada Clockmaker").click();
       await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
       await page.getByText("2 selected").waitFor();
-      await page.evaluate(async () => {
-        const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards");
-        const f = await (await d.getFileHandle("Bram Lighthouse.png")).getFile();
-        const w = await (await d.getFileHandle("Bram Renamed.png", { create: true })).createWritable();
-        await w.write(await f.arrayBuffer()); await w.close();
-        await d.removeEntry("Bram Lighthouse.png");
-      });
+      await writeFiles(page, "Cards", [["Bram Renamed.png", Buffer.from(await readFile(page, "Cards", "Bram Lighthouse.png"))]]);
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Bram Lighthouse.png"));
       await page.getByRole("button", { name: "Rescan", exact: true }).click();
       await page.waitForFunction(() => !/\b2 selected\b/.test(document.body.innerText), null, { timeout: 15000 });
       t.ok(true, "the renamed card drops out of the selection, so Send can't act on it");

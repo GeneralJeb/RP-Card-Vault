@@ -22,7 +22,7 @@ const t = require("./harness");
 
 const ROOT = path.join(__dirname, "..");
 const read = (f) => fs.readFileSync(path.join(ROOT, f), "utf8");
-const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const { reEscape } = require("./pure-region").loadPureRegion(["reEscape"]).mod;
 const page = read("RP_Card_Vault.html");
 const serveSrc = read("serve.js");
 const sw = read("sw.js");
@@ -134,6 +134,13 @@ t.ok(/awk -v v="## \$VERSION"/.test(relYml) && /--notes-file notes\.md/.test(rel
     launchers.filter((f) => listed.indexOf(f) < 0));
   t.ok(!listed.some((f) => /^(test|\.github|package(-lock)?\.json|node_modules|docs)$/.test(f)), "but none of the developer files");
   t.ok(/zip -qr "\$DIR\.zip" "\$DIR"/.test(relYml) && /--notes-file notes\.md "\$DIR\.zip"/.test(relYml), "and it's attached to the release");
+
+  // Without Node, the launcher serves a copy of the app's files: the same list.
+  const bat = read("Start RP Card Vault.bat");
+  const staged = ((bat.match(/robocopy "%~dp0\." "%STAGE%" ([^\r\n]*?) \/NJH/) || [])[1] || "").split(/\s+/)
+    .concat(/robocopy "%~dp0lib" "%STAGE%\\lib"/.test(bat) ? ["lib"] : []);
+  t.ok(served.every((f) => staged.indexOf(f) >= 0), "the Python fallback's copy has every file the server serves",
+    served.filter((f) => staged.indexOf(f) < 0));
 }
 {
   // The awk the workflow runs, done in JS: the section must exist and not run into the next one.
