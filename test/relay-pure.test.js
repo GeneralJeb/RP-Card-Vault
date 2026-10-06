@@ -101,10 +101,13 @@ console.log("\ntool calls");
   t.eq(S.readChoice({ choices: [{ delta: { content: "hi" } }] }).tools, [], "plain text has no calls");
 
   for (const m of ["registry.ollama.ai/library/tiny does not support tools", "This model doesn't support tool calling",
-    "tools is not supported", "tools param requires --jinja flag", "Unsupported parameter: 'tools'"]) {
+    "tools is not supported", "tools param requires --jinja flag", "Unsupported parameter: 'tools'",
+    "Role 'function' is not supported. Please use a valid role: SYSTEM, SYSTEM_1, USER, ASSISTANT, DEVELOPER, CONTEXT, USER_CONTEXT, MODEL, USER.",
+    "role 'tool' is not supported", "Invalid role: tool"]) {
     t.ok(S.saysToolsUnsupported(m), "\"" + m + "\" means no tool support");
   }
-  for (const m of ["tool_call_id call_9 not found in history", "Invalid tool: arguments must be JSON", "model not found"]) {
+  for (const m of ["tool_call_id call_9 not found in history", "Invalid tool: arguments must be JSON", "model not found",
+    "Role 'system' is not supported"]) {
     t.ok(!S.saysToolsUnsupported(m), "\"" + m + "\" doesn't");
   }
 
