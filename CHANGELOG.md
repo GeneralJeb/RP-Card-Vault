@@ -19,6 +19,10 @@ If you skipped several releases, read every section down to the one you had.
   wasn't filed away, instead of skipping it quietly.
 - **A connected destination says why it's locked:** "Disconnect to change
   the address or username."
+- **Agent chat on endpoints that refuse tool results.** Some providers take
+  tool calls but then reject the reply carrying the result ("Role 'function'
+  is not supported"). The chat now switches to writing its tool calls as
+  text, as it already did for models with no tool support at all.
 
 ## 1.3.0
 

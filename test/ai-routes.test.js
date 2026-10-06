@@ -58,6 +58,7 @@ function upstream() {
     }
     if (mode === "bad") return json(400, { error: { message: "model not found: " + body.model } });
     if (mode === "notools" && body.tools) return json(400, { error: { message: "registry.ollama.ai/library/tiny:1b does not support tools" } });
+    if (mode === "norole" && body.messages.some((m) => m.role === "tool")) return json(400, { error: { message: "Role 'function' is not supported. Please use a valid role: SYSTEM, SYSTEM_1, USER, ASSISTANT, DEVELOPER, CONTEXT, USER_CONTEXT, MODEL, USER." } });
     const hasImage = (body.messages || []).some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"));
     if (mode === "noimages" && hasImage) return json(400, { error: { message: "This model does not support image input." } });
     if (mode === "toolsjson") {
@@ -322,6 +323,9 @@ async function main() {
     mode = "notools";
     r = await chat({ tools: TOOLS });
     t.eq([r.status, json(r).code], [400, "tools_unsupported"], "a model without tool calling is reported as such, so the page can fall back to text");
+    mode = "norole";
+    r = await send("POST", "/__vault/ai/chat", { messages: history, tools: TOOLS }, PAGE());
+    t.eq([r.status, json(r).code], [400, "tools_unsupported"], "so is an endpoint that takes tools but refuses the tool result (\"Role 'function' is not supported\")");
     mode = "bad";
     r = await chat({ tools: TOOLS });
     t.ok(json(r).code === undefined, "while an ordinary error isn't mistaken for that");
