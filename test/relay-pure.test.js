@@ -126,4 +126,17 @@ console.log("\ntool calls");
   t.eq(S.RELAY_BUILD >= 8, true, "photos need build 8");
 }
 
+console.log("\nwhat the page is told about an error");
+{
+  t.eq(S.errorText(new Error("That request is too big.")), "That request is too big.", "an error's message, as it is");
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    const odd = { toString() { return "Error: secret at C:\\Users\\Jeb\\serve.js:12:3"; }, stack: "at C:\\Users\\Jeb\\serve.js:12:3" };
+    t.ok(!/Users|serve\.js/.test(S.errorText(odd)) && /unexpected error/.test(S.errorText(odd)),
+      "one without a message gives a plain sentence, never the error turned into text (which can carry its stack)");
+    t.ok(/unexpected error/.test(S.errorText(undefined)) && /unexpected error/.test(S.errorText("a string")), "and so does a thrown non-error");
+  } finally { console.error = quiet; }
+}
+
 t.done();
