@@ -14,7 +14,59 @@ const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
+  "moveCardTo", "unzipEntryLimited", "importRootIdMap", "remapRootSettings", "remapDirKeyed",
 ]);
+
+/* A folder tree held in memory, with names matched regardless of case, as on Windows. */
+function memFs(rootName) {
+  const node = (name, kind) => ({ name, kind, kids: new Map(), bytes: kind === "file" ? new Uint8Array(0) : null });
+  const k = (n) => n.toLowerCase();
+  const missing = () => Object.assign(new Error("not found"), { name: "NotFoundError" });
+  const fileHandle = (n) => ({
+    kind: "file", name: n.name, _n: n,
+    async isSameEntry(o) { return !!o && o._n === n; },
+    async getFile() { return new File([n.bytes], n.name, { lastModified: 1 }); },
+    async createWritable() {
+      const parts = [];
+      return { async write(b) { parts.push(Buffer.from(await new Blob([b]).arrayBuffer())); }, async close() { n.bytes = new Uint8Array(Buffer.concat(parts)); } };
+    },
+  });
+  const dirHandle = (n) => ({
+    kind: "directory", name: n.name, _n: n,
+    async queryPermission() { return "granted"; },
+    async requestPermission() { return "granted"; },
+    async isSameEntry(o) { return !!o && o._n === n; },
+    async getDirectoryHandle(name, o) {
+      let c = n.kids.get(k(name));
+      if (!c) { if (!(o && o.create)) throw missing(); c = node(name, "directory"); n.kids.set(k(name), c); }
+      return dirHandle(c);
+    },
+    async getFileHandle(name, o) {
+      let c = n.kids.get(k(name));
+      if (!c) { if (!(o && o.create)) throw missing(); c = node(name, "file"); n.kids.set(k(name), c); }
+      return fileHandle(c);
+    },
+    async removeEntry(name) { if (!n.kids.delete(k(name))) throw missing(); },
+    async *entries() { for (const c of n.kids.values()) yield [c.name, c.kind === "file" ? fileHandle(c) : dirHandle(c)]; },
+  });
+  const top = node(rootName, "directory");
+  const walk = (path, create) => {
+    let n = top;
+    const parts = path.split("/");
+    for (const p of parts.slice(0, -1)) {
+      let c = n.kids.get(k(p));
+      if (!c) { if (!create) return null; c = node(p, "directory"); n.kids.set(k(p), c); }
+      n = c;
+    }
+    return { dir: n, name: parts[parts.length - 1] };
+  };
+  return {
+    handle: dirHandle(top),
+    put(path, bytes) { const w = walk(path, true); const f = node(w.name, "file"); f.bytes = bytes; w.dir.kids.set(k(w.name), f); },
+    get(path) { const w = walk(path, false); const f = w && w.dir.kids.get(k(w.name)); return f && f.kind === "file" ? f.bytes : null; },
+    list(path) { const w = walk(path + "/x", false); return w ? Array.from(w.dir.kids.values()).map((c) => c.name) : []; },
+  };
+}
 
 const enc = (o) => new TextEncoder().encode(JSON.stringify(o));
 
@@ -128,6 +180,74 @@ async function main() {
     t.ok(res && onDisk.data.description === "A clockmaker who hates being late.", "Save to card writes the edit into the file");
     t.ok(d0.id === 7 && d0.extensions.probability === 80 && d0.case_sensitive === true && V.rawCharacterBook(onDisk.raw).extensions.st_world === "keep me",
       "and the lorebook on disk still has every field it had before");
+  }
+
+  console.log("\nmoving and backing up cards, on a folder tree that ignores case");
+  {
+    const png = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+    const card = (name) => V.writeCardIntoPng(png, V.newCardPayload({ name }), V.buildV2Payload(V.newCardPayload({ name })));
+    const fsys = memFs("Cards");
+    const root = { id: "r", name: "Cards", role: "library", handle: fsys.handle };
+    fsys.put("Fantasy/Ada.png", card("Ada"));
+    const ada = { id: "r:Fantasy/Ada.png", rootId: "r", rel: "Fantasy/Ada.png", dir: "Fantasy", file: "Ada.png", ext: "png", name: "Ada" };
+
+    const same = await V.moveCardTo(ada, root, root, "fantasy");
+    t.ok(same.skipped && !!fsys.get("Fantasy/Ada.png"),
+      "a move into the same folder spelled another way (\"fantasy\") is skipped, and the card is still there");
+    const moved = await V.moveCardTo(ada, root, root, "Other");
+    t.ok(!moved.skipped && !fsys.get("Fantasy/Ada.png") && !!fsys.get("Other/Ada.png"), "a real move still moves it");
+
+    // Two different cards with the same file name in different folders.
+    fsys.put("A/Bram.png", card("Bram the Smith"));
+    fsys.put("B/Bram.png", card("Bram the Sailor"));
+    const rec = (dir) => ({ id: "r:" + dir + "/Bram.png", rootId: "r", rel: dir + "/Bram.png", dir, file: "Bram.png", ext: "png", sig: "s" });
+    const save = async (dir, text) => {
+      const parsed = await V.parseCardBytes(fsys.get(dir + "/Bram.png"), "Bram.png");
+      return V.saveCardToFile(rec(dir), parsed.data, { fields: { description: text } }, [root], { keep: 1 });
+    };
+    const a1 = await save("A", "Smith, first edit");
+    await save("B", "Sailor, first edit");
+    await save("B", "Sailor, second edit");
+    t.ok(/_vault backups\/A\/Bram /.test(a1.backupPath), "a card's backup goes in a copy of its own folder path (" + a1.backupPath + ")");
+    t.eq([fsys.list("_vault backups/A").length, fsys.list("_vault backups/B").length], [1, 1],
+      "saving one card never removes the backups of another with the same file name");
+  }
+
+  console.log("\na .charx can't unpack past the limit, whatever its header says");
+  {
+    global.JSZip = require("../lib/jszip.min.js");
+    const zip = new JSZip();
+    zip.file("card.json", JSON.stringify({ spec: "chara_card_v3", data: { name: "Big", description: "x".repeat(5000) } }));
+    const loaded = await JSZip.loadAsync(await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" }));
+    const entry = loaded.file("card.json");
+    let refused = "";
+    try { await V.unzipEntryLimited(entry, 1000); } catch (e) { refused = e.message; }
+    t.ok(/over/.test(refused), "unpacking stops at the limit, counting what actually comes out (" + refused + ")");
+    t.ok((await V.unzipEntryLimited(entry, 100000)).length > 5000, "and under it, the whole file comes back");
+    const ok = await V.parseCardBytes(await zip.generateAsync({ type: "uint8array" }), "big.charx");
+    t.ok(ok.ok && ok.data.name === "Big", "a normal .charx still reads");
+  }
+
+  console.log("\nfolder settings follow the folders");
+  {
+    const now = [{ id: "new1", name: "Cards" }, { id: "new2", name: "Inbox" }];
+    const exported = [{ id: "old1", name: "Cards" }, { id: "old2", name: "Gone" }];
+    const map = V.importRootIdMap(exported, now);
+    t.eq([map.old1 && map.old1.id, map.old2, map.new2 && map.new2.id], ["new1", undefined, "new2"],
+      "an export's folders are matched to the ones added here by name");
+    const incoming = { privateFolders: ["old1::Secret", "old2::"], trashKey: "old1::_vault trash", autoBackupKey: "off",
+      afterSendKey: "old2::Sent", destinations: [{ id: "d", type: "folder", folderKey: "old1::ST" }, { id: "l", type: "lumiverse" }] };
+    const current = { privateFolders: ["new2::Mine"], afterSendKey: "new2::Done" };
+    const { patch, lostPrivate } = V.remapRootSettings(incoming, current, map);
+    t.eq(patch.privateFolders.slice().sort(), ["new1::Secret", "new2::Mine"], "private folders are carried over and added to the ones here, never put in their place");
+    t.eq(lostPrivate, 1, "and one that can't be placed is counted, so the vault can say so");
+    t.eq([patch.trashKey, patch.autoBackupKey, patch.afterSendKey, patch.destinations[0].folderKey],
+      ["new1::_vault trash", "off", "new2::Done", "new1::ST"], "the trash, backups, filing folder and folder destinations follow too; one with no folder keeps the current setting");
+    // A registered folder replaced by the one around it: its keys move under the new one.
+    const inner = { r1: { id: "outer", prefix: "Library" } };
+    t.eq(V.remapRootSettings({ privateFolders: ["r1::Secret"] }, { privateFolders: ["r1::Secret"] }, inner).patch.privateFolders,
+      ["r1::Secret", "outer::Library/Secret"], "a private folder inside a replaced registration stays private under the outer folder");
+    t.eq(V.remapDirKeyed({ "r1::A": "inbox", "zz::B": "archive" }, inner), { "outer::Library/A": "inbox" }, "folder labels move with it");
   }
 
   console.log("\nlorebook edits in the vault");

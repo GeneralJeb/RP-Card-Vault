@@ -105,6 +105,18 @@ t.ok(/pull_request:\s*\n\s*branches: \[dev, main\]/.test(testYml), "on every pul
 t.ok(/- run: npm ci\s*\n\s*- run: npm test/.test(testYml), "installing from the lockfile, then npm test");
 t.eq(Number((testYml.match(/node-version: (\d+)/) || [])[1]), relay.NODE_MIN, "on the oldest Node the vault supports");
 t.ok(/contents: read/.test(testYml), "with read-only access");
+console.log("\nthe offline copy can't keep an old library");
+{
+  // sw.js serves lib/ cache-first under unchanging names. Its LIB_HASH must
+  // follow the files, so a changed library changes sw.js and is fetched again.
+  const files = [...sw.matchAll(/"\/(lib\/[^"]+)"/g)].map((m) => m[1]).sort();
+  const h = crypto.createHash("sha256");
+  for (const f of files) { h.update(f + "\n"); h.update(fs.readFileSync(path.join(ROOT, f))); }
+  const want = h.digest("hex").slice(0, 16);
+  const got = (sw.match(/const LIB_HASH = "([0-9a-f]+)"/) || [])[1];
+  t.eq(got, want, "sw.js's LIB_HASH matches the " + files.length + " lib/ files it caches (update it to " + want + " when a library changes)");
+}
+
 const relYml = read(".github/workflows/release.yml");
 t.ok(/push:\s*\n\s*branches: \[main\]/.test(relYml), "releases come only from main");
 t.ok(/refs\/tags\/v\$VERSION/.test(relYml) && /already released/.test(relYml), "an already-released version releases nothing");
