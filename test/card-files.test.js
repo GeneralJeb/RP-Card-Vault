@@ -69,6 +69,8 @@ function memFs(rootName) {
 }
 
 const enc = (o) => new TextEncoder().encode(JSON.stringify(o));
+// The smallest valid PNG: one pixel. Cards are written into copies of it.
+const PNG_1PX = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
 
 // A card as a SillyTavern user would have it: lorebook entries with ids,
 // per-entry extensions, regex and case flags, and book-level extensions.
@@ -144,7 +146,7 @@ async function main() {
 
   console.log("\na PNG card, written and read back");
   {
-    const png = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+    const png = PNG_1PX;
     const first = V.writeCardIntoPng(png, ORIGINAL, V.buildV2Payload(ORIGINAL));
     const parsed = await V.parseCardBytes(first, "ada.png");
     t.ok(parsed.ok && parsed.data.lorebook.entries.length === 2, "a PNG card with a lorebook parses");
@@ -158,24 +160,12 @@ async function main() {
     t.eq(V.lorebookDigest(back.data.lorebook), V.lorebookDigest(parsed.data.lorebook), "and the same entries");
 
     // Save to card, end to end, into a folder held in memory.
-    const files = { "ada.png": first };
-    const fileHandle = (name) => ({
-      async getFile() { const b = files[name]; return { size: b.length, lastModified: 1, arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.length) }; },
-      async createWritable() {
-        const parts = [];
-        return { async write(blob) { parts.push(new Uint8Array(await blob.arrayBuffer())); },
-          async close() { files[name] = Buffer.concat(parts.map((p) => Buffer.from(p))); } };
-      },
-    });
-    const dir = {
-      async queryPermission() { return "granted"; },
-      async getDirectoryHandle() { throw new Error("no subfolders here"); },
-      async getFileHandle(name) { if (!files[name]) throw new Error("missing"); return fileHandle(name); },
-    };
+    const fsys = memFs("Scratch");
+    fsys.put("ada.png", first);
     const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png", sig: "s" };
     const edit = { fields: { description: "A clockmaker who hates being late." } };
-    const res = await V.saveCardToFile(rec, parsed.data, edit, [{ id: "r", name: "Scratch", handle: dir }], { backup: false });
-    const onDisk = await V.parseCardBytes(new Uint8Array(files["ada.png"]), "ada.png");
+    const res = await V.saveCardToFile(rec, parsed.data, edit, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
+    const onDisk = await V.parseCardBytes(fsys.get("ada.png"), "ada.png");
     const d0 = V.rawCharacterBook(onDisk.raw).entries[0];
     t.ok(res && onDisk.data.description === "A clockmaker who hates being late.", "Save to card writes the edit into the file");
     t.ok(d0.id === 7 && d0.extensions.probability === 80 && d0.case_sensitive === true && V.rawCharacterBook(onDisk.raw).extensions.st_world === "keep me",
@@ -184,8 +174,8 @@ async function main() {
 
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");
   {
-    const png = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
-    const card = (name) => V.writeCardIntoPng(png, V.newCardPayload({ name }), V.buildV2Payload(V.newCardPayload({ name })));
+    const png = PNG_1PX;
+    const card = (name) => { const v3 = V.newCardPayload({ name }); return V.writeCardIntoPng(png, v3, V.buildV2Payload(v3)); };
     const fsys = memFs("Cards");
     const root = { id: "r", name: "Cards", role: "library", handle: fsys.handle };
     fsys.put("Fantasy/Ada.png", card("Ada"));
@@ -306,7 +296,7 @@ async function main() {
   console.log("\nhostile card files");
   {
     const zlib = require("zlib");
-    const png = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+    const png = PNG_1PX;
     const withChunk = (type, data) => {
       const iend = png.length - 12;
       return new Uint8Array(Buffer.concat([Buffer.from(png.subarray(0, iend)), Buffer.from(V.makeChunk(type, data)), Buffer.from(png.subarray(iend))]));

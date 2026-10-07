@@ -15,6 +15,21 @@ If you skipped several releases, read every section down to the one you had.
   shown again soon after vanished at once: Back up now, clicked within a
   few seconds of an automatic backup, said nothing at all. Each message now
   gets its own full time on screen.
+  
+A tidy-up of the code changed since 1.3.0. Almost all of it works exactly as
+before; two small differences:
+
+- **Two more folder settings follow your folders** after an import or when a
+  folder replaces the one inside it: the duplicate finder's per-folder
+  choices, and the folders Ingest last used.
+- **Ingest's "Move source to _ingested/" uses the same checked move as the
+  rest of the vault,** so it shows up in the Log like any other move.
+
+Under the hood: one copy of the "move, check, then remove" steps, one guard
+against files that unpack to gigabytes, the agent chat no longer re-reads
+its tool results for every piece of a streamed reply, the grid is told when
+it appears instead of checking after every change, and the Python fallback
+updates its copy of the vault instead of rebuilding it each start.
 
 ## 1.5.1
 

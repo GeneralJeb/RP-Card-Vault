@@ -1139,27 +1139,41 @@ const CARD_UNPACK_MAX = 64 * 1024 * 1024;
 /* The PNG text chunks that hold card data; no other chunk is ever unpacked. */
 const CARD_PNG_KEYS = ["ccv3", "chara", "character"];
 
+/**
+ * Unpacked bytes gathered as they come, refusing more than `limit`: the guard
+ * against a small file that unpacks to gigabytes. add() throws once past it;
+ * bytes() joins what came.
+ */
+function limitedBytes(limit, what) {
+  const parts = [];
+  let total = 0;
+  return {
+    add(chunk) {
+      total += chunk.length;
+      if (total > limit) throw new Error(what + " unpacks to over " + Math.round(limit / 1048576) + " MB");
+      parts.push(chunk);
+    },
+    bytes() {
+      const out = new Uint8Array(total);
+      let at = 0;
+      for (const p of parts) { out.set(p, at); at += p.length; }
+      return out;
+    },
+  };
+}
+
 async function inflateRaw(bytes, max) {
   // zTXt uses zlib (deflate with header). DecompressionStream("deflate") handles it.
   if (typeof DecompressionStream === "undefined") throw new Error("no DecompressionStream");
-  const limit = max || CARD_UNPACK_MAX;
+  const out = limitedBytes(max || CARD_UNPACK_MAX, "compressed chunk");
   const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate")).getReader();
-  const parts = [];
-  let total = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    total += value.length;
-    if (total > limit) {
-      try { await reader.cancel(); } catch (e) { /* already closed */ }
-      throw new Error("compressed chunk unpacks to over " + Math.round(limit / 1048576) + " MB");
-    }
-    parts.push(value);
+    try { out.add(value); }
+    catch (e) { try { await reader.cancel(); } catch (e2) { /* already closed */ } throw e; }
   }
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const p of parts) { out.set(p, at); at += p.length; }
-  return out;
+  return out.bytes();
 }
 
 /**
@@ -1532,42 +1546,30 @@ function specRank(spec) {
 }
 
 /**
- * Given the raw bytes of a file, produce { ok, spec, data, raw, err }.
- */
-/**
  * One zip entry's bytes, refusing more than `limit` as it unpacks. The size
  * in the zip's header is the file's own claim, so a crafted one can say 1 KB
  * and unpack to gigabytes; this counts what actually comes out.
  */
 function unzipEntryLimited(entry, limit) {
   return new Promise((resolve, reject) => {
-    const parts = [];
-    let total = 0, done = false;
+    const out = limitedBytes(limit, "card.json");
+    let done = false;
+    const stop = (e) => { if (!done) { done = true; reject(e); } };
     const stream = entry.internalStream("uint8array");
     stream.on("data", (chunk) => {
       if (done) return;
-      total += chunk.length;
-      if (total > limit) {
-        done = true;
-        try { stream.pause(); } catch (e) { /* already stopped */ }
-        reject(new Error("card.json unpacks to over " + Math.round(limit / 1048576) + " MB"));
-        return;
-      }
-      parts.push(chunk);
+      try { out.add(chunk); }
+      catch (e) { try { stream.pause(); } catch (e2) { /* already stopped */ } stop(e); }
     });
-    stream.on("error", (e) => { if (!done) { done = true; reject(e); } });
-    stream.on("end", () => {
-      if (done) return;
-      done = true;
-      const out = new Uint8Array(total);
-      let at = 0;
-      for (const p of parts) { out.set(p, at); at += p.length; }
-      resolve(out);
-    });
+    stream.on("error", stop);
+    stream.on("end", () => { if (!done) { done = true; resolve(out.bytes()); } });
     stream.resume();
   });
 }
 
+/**
+ * Given the raw bytes of a file, produce { ok, spec, data, raw, err }.
+ */
 async function parseCardBytes(bytes, filename) {
   const ext = extOf(filename);
 
@@ -2347,9 +2349,9 @@ function dirKey(rootId, dir) { return rootId + "::" + (dir || ""); }
  */
 function importRootIdMap(exportRoots, currentRoots) {
   const map = Object.create(null);
-  for (const r of currentRoots || []) map[r.id] = { id: r.id, prefix: "" };
   const byName = new Map();
   for (const r of currentRoots || []) {
+    map[r.id] = { id: r.id, prefix: "" };
     const k = String(r.name || "").toLowerCase();
     byName.set(k, byName.has(k) ? null : r);   // a name two folders share can't be matched
   }
@@ -2388,6 +2390,9 @@ function remapRootSettings(incoming, current, idMap) {
     const v = inc.autoBackupKey;
     const m = v === "auto" || v === "off" ? v : remapDirKey(v, idMap);
     patch.autoBackupKey = m === null ? (cur.autoBackupKey == null ? "auto" : cur.autoBackupKey) : m;
+  }
+  for (const f of ["ingestSourceKeys", "ingestDestKeys"]) {
+    if (Array.isArray(inc[f])) patch[f] = inc[f].map((k) => remapDirKey(k, idMap)).filter(Boolean);
   }
   if (Array.isArray(inc.destinations)) {
     patch.destinations = inc.destinations.map((d) => {
@@ -2635,10 +2640,18 @@ async function moveCardTo(rec, srcRoot, destRoot, destDir) {
   if (!(await verifyPermission(srcRoot.handle, true))) throw new Error("Write permission denied for " + srcRoot.name);
 
   const destDirs = destDir ? destDir.split("/") : [];
-
-  // 1. read the original
   const srcDirs = rec.dir ? rec.dir.split("/") : [];
   const srcDirHandle = await getDirByPath(srcRoot.handle, srcDirs, false);
+
+  // The destination may be the source folder itself under another spelling
+  // ("fantasy" and "Fantasy" on Windows), or a folder reached from two
+  // registered ones. Then there's nothing to move, and removing the
+  // "original" would delete the only copy. Checked before anything is read.
+  let destExisting = null;
+  try { destExisting = await getDirByPath(destRoot.handle, destDirs, false); } catch (e) { /* the copy below makes it */ }
+  if (destExisting && await srcDirHandle.isSameEntry(destExisting)) return { skipped: true, reason: "already in that folder" };
+
+  // 1. read the original
   const srcFh = await srcDirHandle.getFileHandle(rec.file, { create: false });
   const srcFile = await srcFh.getFile();
   const bytes = new Uint8Array(await srcFile.arrayBuffer());
@@ -2648,13 +2661,7 @@ async function moveCardTo(rec, srcRoot, destRoot, destDir) {
   const written = await copyIntoRoot(destRoot, destDirs, rec.file, new Blob([bytes]), srcSig);
 
   // 3. verify the copy really exists and matches, byte signature for byte signature
-  const destDirHandle = await getDirByPath(destRoot.handle, destDirs, false);
-  const checkFh = await destDirHandle.getFileHandle(written.name, { create: false });
-  // The "copy" may be the original itself: the same folder under another
-  // spelling ("fantasy" and "Fantasy" on Windows), or a folder reached from two
-  // registered ones. Removing the source would then delete the only copy.
-  if (await srcFh.isSameEntry(checkFh)) return { skipped: true, reason: "already in that folder" };
-  const checkFile = await checkFh.getFile();
+  const checkFile = await written.fh.getFile();
   if (checkFile.size !== srcFile.size) throw new Error("Copy verification failed (size mismatch) — source left untouched");
   const checkSig = await byteSignature(checkFile);
   if (checkSig !== srcSig) throw new Error("Copy verification failed (content mismatch) — source left untouched");
@@ -2763,7 +2770,7 @@ async function copyIntoRoot(destRoot, subfolder, filename, blob, sig) {
       const ef = await existing.getFile();
       if (ef.size === blob.size) {
         const esig = await byteSignature(ef);
-        if (esig === sig) return { skipped: true, name: finalName, reason: "identical file already there" };
+        if (esig === sig) return { skipped: true, name: finalName, reason: "identical file already there", fh: existing };
       }
     } catch (e) { /* fall through to rename */ }
     const b = baseName(filename), x = extOf(filename);
@@ -2773,7 +2780,7 @@ async function copyIntoRoot(destRoot, subfolder, filename, blob, sig) {
   const w = await fh.createWritable();
   await w.write(blob);
   await w.close();
-  return { skipped: false, name: finalName, path: subfolder.concat([finalName]).join("/") };
+  return { skipped: false, name: finalName, path: subfolder.concat([finalName]).join("/"), fh };
 }
 
 /* ── menu placement ──────────────────────────────────────────────────
@@ -5239,50 +5246,69 @@ function parseTextToolCalls(text) {
  * the chat's results so far), tag lines, "Key: value" lines, list items and
  * card lines go; the first line of ordinary prose is the answer, and stays.
  */
+const TOOL_RESULT_RE = /<tool_result\b/i;
+
+/** The set of non-empty, trimmed lines in some texts. */
+function linesOf(texts) {
+  const out = new Set();
+  for (const t of texts || []) for (const l of String(t).split("\n")) { const x = l.trim(); if (x) out.add(x); }
+  return out;
+}
+
 function dropModelResults(text, known) {
   let s = String(text == null ? "" : text);
-  const at = s.search(/<tool_result\b/i);
+  const at = s.search(TOOL_RESULT_RE);
   if (at < 0) return s;
   if (/<tool\s+name\s*=/i.test(s.slice(0, at))) return s.slice(0, at).trim();
-  const knownLines = new Set();
-  for (const k of known || []) for (const l of String(k).split("\n")) { const x = l.trim(); if (x) knownLines.add(x); }
+  const knownLines = known instanceof Set ? known : linesOf(known);
   const isData = (line) => {
     const x = line.trim();
     return !x || knownLines.has(x) || /^<\/?[\w-]+(\s[^>]*)?>$/.test(x) || /^[A-Z][\w '()\/-]{0,30}:(\s|$)/.test(x) ||
       /^(-|\*|\d+\.)\s/.test(x) || / · /.test(x);
   };
-  for (let i = at; i >= 0; i = s.search(/<tool_result\b/i)) {
+  for (let i = at; i >= 0; i = s.search(TOOL_RESULT_RE)) {
     const rest = s.slice(i);
-    const next = rest.slice(1).search(/<tool_result\b/i);
-    const limit = next >= 0 ? next + 1 : rest.length;
-    const close = rest.slice(0, limit).search(/<\/tool_result>/i);
-    let end = limit;
-    if (close >= 0) end = close + "</tool_result>".length;
-    else {
-      const open = rest.indexOf(">");
-      if (open >= 0 && open < limit) {
-        end = open + 1;
-        for (const line of rest.slice(end, limit).split("\n")) {
-          if (!isData(line)) break;
-          end += line.length + 1;
-        }
-        end = Math.min(end, limit);
-      }
-    }
-    s = s.slice(0, i) + rest.slice(end);
+    const next = rest.slice(1).search(TOOL_RESULT_RE);
+    s = s.slice(0, i) + rest.slice(toolResultBlockEnd(rest, next >= 0 ? next + 1 : rest.length, isData));
   }
   return s.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** The chat's latest tool results, which a model may repeat in its reply. */
-function agentKnownResults(session) {
-  return ((session && session.messages) || []).filter((m) => m.role === "tool").slice(-30).map((m) => String(m.result || ""));
+/** Where a model-written block at the start of `rest` ends, at most `limit`: at its closing tag, or where its data does. */
+function toolResultBlockEnd(rest, limit, isData) {
+  const close = rest.slice(0, limit).search(/<\/tool_result>/i);
+  if (close >= 0) return close + "</tool_result>".length;
+  const open = rest.indexOf(">");
+  if (open < 0 || open >= limit) return limit;
+  let end = open + 1;
+  for (const line of rest.slice(end, limit).split("\n")) {
+    if (!isData(line)) break;
+    end += line.length + 1;
+  }
+  return Math.min(end, limit);
+}
+
+/*
+ * The lines of the chat's latest tool results, which a model may repeat in
+ * its reply. Kept per version of the chat's message list (it's replaced, not
+ * changed, when a message is added), so a streamed reply doesn't rebuild it
+ * for every piece that arrives.
+ */
+const AGENT_KNOWN_LINES = new WeakMap();
+function agentKnownLines(session) {
+  const msgs = (session && session.messages) || [];
+  let set = AGENT_KNOWN_LINES.get(msgs);
+  if (!set) {
+    set = linesOf(msgs.filter((m) => m.role === "tool").slice(-30).map((m) => m.result || ""));
+    AGENT_KNOWN_LINES.set(msgs, set);
+  }
+  return set;
 }
 
 /** Why a step came back with nothing to show, as specifically as the reply allows. */
-function emptyReplyReason(finish, hadText, think) {
+function emptyReplyReason(finish, hadToolResult, think) {
   const f = String(finish || "");
-  if (hadText) return "The model only repeated a tool result instead of answering. Regenerate reply usually gets a proper answer.";
+  if (hadToolResult) return "The model only repeated a tool result instead of answering. Regenerate reply usually gets a proper answer.";
   if (think) return "The model spent its whole reply thinking and never answered. Raise Max tokens out in the ✦ AI panel.";
   if (/length|max_tokens/i.test(f)) return "The reply hit Max tokens before any answer. Raise Max tokens in the ✦ AI panel.";
   if (/filter|safety|recitation|prohibited|blocklist|spii|block/i.test(f)) return "The provider blocked the reply (finish reason: " + f + "). Rewording the request or another model may get through.";
@@ -5338,7 +5364,7 @@ function interpretAgentStep(acc, textMode, known) {
     const p = parseTextToolCalls(text);
     text = p.text; calls = p.calls;
   }
-  if (!text && !calls.length) return { ok: false, error: emptyReplyReason(acc.finish, /<tool_result\b/i.test(split.text), think) };
+  if (!text && !calls.length) return { ok: false, error: emptyReplyReason(acc.finish, TOOL_RESULT_RE.test(split.text), think) };
   return { ok: true, text, think, calls, usage: acc.usage, finish: acc.finish, model: acc.model };
 }
 
@@ -7473,12 +7499,17 @@ function logProblem(source, text, detail, level) {
     PROBLEM_LOG.push({ at: Date.now(), level: level === "warn" ? "warn" : "error", source: String(source || ""), text: t, detail: d, count: 1 });
     if (PROBLEM_LOG.length > PROBLEM_LOG_MAX) PROBLEM_LOG.splice(0, PROBLEM_LOG.length - PROBLEM_LOG_MAX);
   }
-  for (const fn of problemLogListeners) { try { fn(); } catch (e) { /* a closed panel */ } }
+  notifyAll(problemLogListeners);
 }
 
 function clearProblemLog() {
   PROBLEM_LOG.length = 0;
-  for (const fn of problemLogListeners) { try { fn(); } catch (e) { /* a closed panel */ } }
+  notifyAll(problemLogListeners);
+}
+
+/** Tell every open panel listening on a log that it changed. */
+function notifyAll(listeners) {
+  for (const fn of listeners) { try { fn(); } catch (e) { /* a closed panel */ } }
 }
 
 /* Always removed from the log: keys and tokens, passwords, cookies, email
@@ -7628,7 +7659,7 @@ function recordAiSent(bodyText) {
     })),
   });
   AI_SENT_LOG.length = Math.min(AI_SENT_LOG.length, AI_SENT_MAX);
-  for (const fn of aiSentListeners) { try { fn(); } catch (e) { /* a closed panel */ } }
+  notifyAll(aiSentListeners);
 }
 
 const SERVER_HANDLED_CODES = ["tools_unsupported", "images_unsupported"];
@@ -7716,6 +7747,14 @@ const ACCENT_VAR = {
   blue: "--accent-blue", pink: "--accent-pink", cyan: "--accent-cyan",
   purple: "--accent-purple", muted: "--text-muted", plain: "--text-secondary",
 };
+
+/** The scanning bar with nothing running. */
+const SCAN_IDLE = { running: false, done: 0, total: 0, label: "", rootName: "" };
+
+/** What a send's notice says about filing the cards away afterwards ("" when it didn't come up). */
+function filedText(filed) {
+  return filed ? " · " + (filed.note || filed.moved + " filed into " + filed.label) : "";
+}
 
 /** "1 card", "2 cards": a count with its word. */
 function countWord(n, one, many) { return fmtNum(n) + " " + (n === 1 ? one : (many || one + "s")); }
@@ -8130,18 +8169,13 @@ function Thumb({ id, hasThumb, alt, radius, fit }) {
 }
 
 /** Window-based virtualization for a fixed-size grid. */
-function useGridVirtual(scrollRef, itemCount, tileW, tileH, gap) {
+function useGridVirtual(el, itemCount, tileW, tileH, gap) {
   const [dims, setDims] = useState({ w: 0, h: 0, top: 0 });
-  // The grid isn't there on the first render of a new vault (the "add a
-  // folder" screen is) or while cards load, so the element is looked for
-  // after every render and measured as soon as it appears. With fixed deps,
-  // it never was: the grid kept a width of 0, one column, a handful of cards.
-  const bound = useRef({ el: null, off: null });
+  // `el` comes from a callback ref, so this runs when the grid appears. It
+  // isn't there on the first render of a new vault (the "add a folder" screen
+  // is) or while cards load; measured only on first render, it kept a width
+  // of 0: one column, a handful of cards.
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el === bound.current.el) return;
-    if (bound.current.off) bound.current.off();
-    bound.current = { el, off: null };
     if (!el) return;
     let raf = null;
     const measure = () => {
@@ -8157,14 +8191,13 @@ function useGridVirtual(scrollRef, itemCount, tileW, tileH, gap) {
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
     if (ro) ro.observe(el);
     window.addEventListener("resize", measure);
-    bound.current.off = () => {
+    return () => {
       el.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", measure);
       if (ro) ro.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  });
-  useEffect(() => () => { if (bound.current.off) bound.current.off(); }, []);
+  }, [el]);
 
   const cols = Math.max(1, Math.floor((dims.w + gap) / (tileW + gap)));
   const rows = Math.ceil(itemCount / cols);
@@ -9538,7 +9571,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
       const used = (acc.usage && acc.usage.total_tokens) ||
         (estimateTokens(JSON.stringify(msgs)) + estimateTokens(acc.text + acc.think));
       rateLog.current = rateRecord(rateLog.current, Date.now(), "tokens", used);
-      return interpretAgentStep(acc, textMode, agentKnownResults(s));
+      return interpretAgentStep(acc, textMode, agentKnownLines(s));
     }
     return { ok: false, error: "The model wouldn't take the request with or without tools." };
   };
@@ -10134,7 +10167,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
         })() : null}
         {running && !pending ? (() => {
           const shown = live ? splitThinkingAnywhere(live.text) : { text: "", think: "" };
-          shown.text = dropModelResults(shown.text, agentKnownResults(sessRef.current));
+          shown.text = dropModelResults(shown.text, agentKnownLines(sessRef.current));
           const thinking = live ? [live.think, shown.think].filter(Boolean).join("\n\n") : "";
           return (
             <div className="agent-live" style={{ margin: "8px 0" }}>
@@ -11922,18 +11955,12 @@ function IngestModal({ roots, records, settings, tagMeta, folderRoles, dupeExclu
           wrote.push(dest.name + "/" + (fullDirs.length ? fullDirs.join("/") + "/" : "") + out.name + (out.skipped ? " (already there)" : ""));
         }
         if (moveSource) {
-          // Never over an earlier ingest's copy (numbered instead), and the
-          // source goes only once its copy reads back the same.
+          // Into _ingested/ by the same verified move as everywhere else:
+          // numbered beside an earlier ingest's copy, and the source goes only
+          // once its copy reads back the same.
           const srcRoot = roots.find((r) => r.id === p.rec.rootId);
-          const dirs = p.rec.dir ? p.rec.dir.split("/") : [];
-          const sig = await byteSignature(blob);
-          const kept = await copyIntoRoot(srcRoot, ["_ingested"].concat(dirs), p.rec.file, blob, sig);
-          const doneDir = await getDirByPath(srcRoot.handle, ["_ingested"].concat(dirs), false);
-          const back = await (await doneDir.getFileHandle(kept.name, { create: false })).getFile();
-          if (back.size !== blob.size || (await byteSignature(back)) !== sig) throw new Error("its copy in _ingested didn't check out, so the source was left where it was");
-          const srcDir = await getDirByPath(srcRoot.handle, dirs, false);
-          await srcDir.removeEntry(p.rec.file);
-          res.moved++;
+          const moved = await moveCardTo(p.rec, srcRoot, srcRoot, ["_ingested"].concat(p.rec.dir ? p.rec.dir.split("/") : []).join("/"));
+          if (!moved.skipped) res.moved++;
         }
         res.details.push({ name: p.rec.name, file: p.rec.file, ok: true, wrote });
       } catch (e) {
@@ -13803,7 +13830,7 @@ function App() {
   const [scan, setScan] = useState({ running: false, done: 0, total: 0, label: "", rootName: "" });
   const [deepIds, setDeepIds] = useState(null);
   const [deepBusy, setDeepBusy] = useState(false);
-  const gridRef = useRef(null);
+  const [gridEl, setGridEl] = useState(null);   // a callback ref: the grid hook measures it once it appears
   const stopRef = useRef({ stop: false });
   const lastClickIdx = useRef(-1);
   const sidNextRef = useRef(1);    // the next short card id's number
@@ -14389,7 +14416,7 @@ function App() {
     setScan({ running: true, done: 0, total: 1, label: rec.file, rootName: root.name });
     try {
       const res = await writeCardEdits(rec, edit, backup, Number(settings.backupKeep));
-      setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+      setScan(SCAN_IDLE);
       showToast(
         "Saved into " + rec.file + (res.backupPath ? " · backup in " + BACKUP_FOLDER_NAME + "/" : ""),
         "green"
@@ -14397,7 +14424,7 @@ function App() {
       runScanRef.current(rec.rootId, false, { quiet: true });
       return true;
     } catch (e) {
-      setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+      setScan(SCAN_IDLE);
       showToast("Save failed: " + e.message, "red");
       return false;
     }
@@ -14441,7 +14468,7 @@ function App() {
         if (errs.length < 3) errs.push(rec.file + ": " + e.message);
       }
     }
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     await logOp("bulkSaveToCard", { saved, failed, skipped });
     showToast("Saved " + saved + " card file" + (saved === 1 ? "" : "s") +
       (skipped ? ", " + skipped + " skipped" : "") + (failed ? ", " + failed + " failed — " + errs.join(" | ") : ""),
@@ -14520,7 +14547,7 @@ function App() {
         setCards((prev) => prev.filter((c) => c.rootId !== root.id));
       }
     }
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     if (!quiet) showToast("Scan complete — " + fmtNum(working.length) + " cards indexed", "green");
     // A scan means folder access is granted: a good moment for a due backup.
     setTimeout(() => { if (backupRef.current) backupRef.current(false); }, 1500);
@@ -14557,15 +14584,13 @@ function App() {
       );
       return;
     }
+    const root = { id: uid(), name: handle.name, role, handle, addedAt: Date.now(), lastScan: 0 };
     if (nest && nest.kind === "contains") {
       if (!window.confirm(
         "\"" + handle.name + "\" contains the registered folder \"" + nest.root.name + "\" (at " + nest.path + ").\n\n" +
         "Registering both would index those cards twice and report them all as duplicates.\n\n" +
         "Add the outer folder and drop the inner registration?"
       )) return;
-    }
-    const root = { id: uid(), name: handle.name, role, handle, addedAt: Date.now(), lastScan: 0 };
-    if (nest && nest.kind === "contains") {
       // Its private folders, labels, trash and the like now live under the
       // outer folder: carry them over before its registration goes.
       const idMap = importRootIdMap([], roots);
@@ -14573,6 +14598,8 @@ function App() {
       patchSettings(remapRootSettings(settings, settings, idMap).patch);
       const roles = Object.assign({}, folderRoles, remapDirKeyed(folderRoles, idMap));
       setFolderRoles(roles); saveFolderRoles(roles);
+      const dm = Object.assign({}, dupeMode, remapDirKeyed(dupeMode, idMap));
+      setDupeMode(dm); saveDupeMode(dm);
       await dbDel(STORE_ROOTS, nest.root.id);
       await dbDelCardsOfRoot(nest.root.id);
       setRoots((prev) => prev.filter((r) => r.id !== nest.root.id));
@@ -14583,7 +14610,7 @@ function App() {
     setRoots((prev) => prev.concat([root]));
     showToast("Added " + root.name + " as " + ROOT_ROLES[role].label, "cyan");
     setTimeout(() => runScanRef.current(root, false), 50);
-  }, [showToast, roots, cards, setFolderRole, settings, folderRoles, patchSettings]);
+  }, [showToast, roots, cards, setFolderRole, settings, folderRoles, dupeMode, patchSettings]);
 
   const runScanRef = useRef(runScan);
   useEffect(() => { runScanRef.current = runScan; }, [runScan]);
@@ -14751,7 +14778,7 @@ function App() {
           setFolderRoles(roles); saveFolderRoles(roles);
         }
         if (p.dupeMode && typeof p.dupeMode === "object") {
-          const dm = Object.assign({}, dupeMode, p.dupeMode);
+          const dm = Object.assign({}, dupeMode, remapDirKeyed(p.dupeMode, idMap));
           setDupeMode(dm); saveDupeMode(dm);
         }
         const chats = Array.isArray(p.agentChats) ? p.agentChats.filter((c) => c && c.id) : [];
@@ -14763,7 +14790,7 @@ function App() {
           (answers.length ? ", " + fmtNum(answers.length) + " saved AI answers" : "") +
           (chats.length || answers.length ? ". Reloading to show them…" : ""), "green");
         if (lostPrivate) {
-          showToast(lostPrivate + " folder" + (lostPrivate === 1 ? "" : "s") + " kept private from the AI in that export " +
+          showToast(countWord(lostPrivate, "folder") + " kept private from the AI in that export " +
             (lostPrivate === 1 ? "isn't" : "aren't") + " linked here. Add " + (lostPrivate === 1 ? "it" : "them") +
             ", then right-click → Keep private from the AI again.", "warm");
         }
@@ -14832,7 +14859,7 @@ function App() {
       } catch (e) { fail++; }
     }
     await logOp("bulkCopy", { count: ids.length, to: dest.name, copied: ok, skipped: skip, failed: fail });
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     showToast(ok + " copied to " + dest.name + (skip ? ", " + skip + " already there" : "") + (fail ? ", " + fail + " failed" : ""), fail ? "warm" : "green");
     runScanRef.current(dest.id, false, { quiet: true });
   }, [roots, selection, recById, showToast]);
@@ -14905,7 +14932,7 @@ function App() {
         touched.add(srcRoot.id);
       } catch (e) { failed++; if (errs.length < 3) errs.push(rec.file + ": " + e.message); }
     }
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     if (!opts.silent) {
       const verb = (opts.verb === "trashed") ? " sent to " : " moved to ";
       showToast(
@@ -15009,7 +15036,7 @@ function App() {
         gone.push(rec.id);
       } catch (e) { failed.push(rec.file + ": " + e.message); }
     }
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     if (gone.length) await purgeFromIndex(gone);
     showToast(
       gone.length + " file" + (gone.length === 1 ? "" : "s") + " deleted" +
@@ -15189,7 +15216,11 @@ function App() {
   }, [applyAiRelay]);
 
   useEffect(() => { refreshAiRelay(); }, [refreshAiRelay]);
-  useEffect(() => { rememberLogNames(records, roots, settings.destinations); }, [records, roots, settings.destinations]);
+  // Names are remembered as cards come and go (a scan, a move); edits and
+  // private folders are picked up when the log is shown (problemLogInfo).
+  const recordsRef = useRef(records);
+  recordsRef.current = records;
+  useEffect(() => { rememberLogNames(recordsRef.current, roots, settings.destinations); }, [cards, roots, settings.destinations]);
 
   /* What the problem log (Settings) puts at the top, and the names it hides:
      private cards and destination user names always, the rest unless shown. */
@@ -15200,14 +15231,15 @@ function App() {
     let aiHost = "";
     try { aiHost = aiRelay.baseUrl ? new URL(aiRelay.baseUrl).host : ""; } catch (e) { aiHost = "?"; }
     const header = [
-      "RP Card Vault problem log, copied " + new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().replace("T", " ").slice(0, 16) + " (local time)",
+      "RP Card Vault problem log, copied " + fmtDate(Date.now()) + " (local time)",
       "Vault " + APP_VERSION + " · server " + (aiRelay.version || (aiRelay.available ? "?" : "not reached")) + " · " +
         BROWSER_LABEL + (major ? " " + major : "") + " · " + os,
       "Folders: " + roots.length + " · cards: " + cards.length,
       "AI: " + (aiRelay.configured ? aiHost + " · model " + (aiRelay.model || "?") + (aiRelay.hasKey ? " · key set" : " · no key") : "not set up"),
     ];
+    rememberLogNames(recordsRef.current, roots, settings.destinations);
     return { header, names: logNameEntries(showNames) };
-  }, [aiRelay, roots.length, cards.length]);
+  }, [aiRelay, roots, cards.length, settings.destinations]);
 
   /** Give the relay an address, model and (optionally) key. Throws the relay's reason. */
   const aiPushConfig = useCallback(async (fields) => {
@@ -15475,7 +15507,7 @@ function App() {
         if (prop.bucket === "vaultTags" && aiSettings.writeMode === "auto-tags-only") stats.applied++; else stats.proposed++;
       }
     }
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     await logOp(isTags ? "aiBulkTags" : "aiBulkRun", Object.assign({ count: recs.length, model, action: action.label }, stats));
     const summary = aiBulkSummary(stats);
     showToast("✦ " + action.label + ": " + summary + (errs.length ? " — " + errs.join(" | ") : ""),
@@ -15555,12 +15587,12 @@ function App() {
         if (/not connected|sign|unauthori|couldn't reach/i.test(e.message)) break;
       }
     }
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     await logOp("apiImport", { count: recs.length, to: dest.name, ok, failed });
     const filed = await autoFileAfterSend(okIds);
     showToast(
       ok + " sent to " + dest.name +
-      (filed ? " · " + (filed.note || filed.moved + " filed into " + filed.label) : "") +
+      filedText(filed) +
       (failed ? " · " + failed + " failed — " + errs.join(" | ") : ""),
       failed ? "red" : "green"
     );
@@ -15591,13 +15623,13 @@ function App() {
         okIds.push(rec.id);
       } catch (e) { failed++; errs.push(rec.file + ": " + ((e && e.message) || String(e))); }
     }
-    setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+    setScan(SCAN_IDLE);
     await logOp("sendToFrontend", { count: recs.length, to: root.name + (dir ? "/" + dir : ""), sent, already, failed });
     const filed = await autoFileAfterSend(okIds);
     showToast(
       sent + " sent to " + dest.name +
       (already ? ", " + already + " already there" : "") +
-      (filed ? " · " + (filed.note || filed.moved + " filed into " + filed.label) : "") +
+      filedText(filed) +
       (failed ? ", " + failed + " failed — " + errs.slice(0, 2).join(" | ") : "") +
       (sent && !filed ? " · refresh your front end to see them" : ""),
       failed ? "red" : "green"
@@ -15605,7 +15637,6 @@ function App() {
     runScanRef.current(root.id, false, { quiet: true });
   }, [folderTargetOf, recById, roots, showToast, autoFileAfterSend]);
 
-  /** Send to a destination by id, or to your default. */
   // Cards that left the vault (moved, filed away after a send, renamed and
   // rescanned) leave the selection too, so S and Send never act on ghosts.
   useEffect(() => {
@@ -15615,6 +15646,7 @@ function App() {
     });
   }, [recById]);
 
+  /** Send to a destination by id, or to your default. */
   const sendToFrontend = useCallback(async (ids, destId) => {
     const list = settings.destinations || [];
     const dest = (destId && list.filter((d) => d.id === destId)[0]) || defaultDestinationOf(settings);
@@ -15636,7 +15668,7 @@ function App() {
     try {
       return await (dest.type === "folder" ? sendToFolder(known, dest) : sendViaApi(known, dest));
     } catch (e) {
-      setScan({ running: false, done: 0, total: 0, label: "", rootName: "" });
+      setScan(SCAN_IDLE);
       showToast("Couldn't send to " + dest.name + ": " + ((e && e.message) || String(e)), "red");
     }
   }, [settings, sendToFolder, sendViaApi, showToast, recById]);
@@ -15935,19 +15967,21 @@ function App() {
   const tileW = settings.tileSize;
   const tileH = Math.round(tileW * 1.35) + 44;
   const gap = 10;
-  const vg = useGridVirtual(gridRef, filtered.length, tileW, tileH, gap);
+  const vg = useGridVirtual(gridEl, filtered.length, tileW, tileH, gap);
   const rowH = settings.viewMode === "list" ? 56 : vg.rowH;
   const listVis = useMemo(() => {
     if (settings.viewMode !== "list") return null;
     return filtered;
   }, [settings.viewMode, filtered]);
 
-  // The format most cards are in; tiles badge only the ones that differ.
+  // The format most cards are in; tiles badge only the ones that differ. It
+  // comes from the card files, so edits don't change it.
   const commonSpec = useMemo(() => {
     const n = {};
-    for (const r of records) n[r.spec] = (n[r.spec] || 0) + 1;
+    for (const c of cards) n[c.spec] = (n[c.spec] || 0) + 1;
     return Object.keys(n).sort((a, b) => n[b] - n[a])[0] || "";
-  }, [records]);
+  }, [cards]);
+  const aiNotReady = aiSettings.enabled && !aiReady(aiSettings, aiRelay);
 
   const focusRec = focusId ? recById.get(focusId) : null;
   const focusEdit = focusRec ? editsMap.get(focusRec.fp) : null;
@@ -16023,12 +16057,11 @@ function App() {
           </SmallBtn>
           <SmallBtn color="plain" onClick={() => setModal("tags")} disabled={!cards.length}>Tags</SmallBtn>
           <SmallBtn color={roots.length ? "plain" : "green"} active={!roots.length} onClick={() => setModal("roots")}>Folders</SmallBtn>
-          <SmallBtn color={aiSettings.enabled && !aiReady(aiSettings, aiRelay) ? "warm" : aiSettings.enabled ? "blue" : "plain"}
+          <SmallBtn color={aiNotReady ? "warm" : aiSettings.enabled ? "blue" : "plain"}
             onClick={() => setModal("ai")} active={aiSettings.enabled}
-            title={aiReady(aiSettings, aiRelay)
-              ? "AI settings · " + (aiSettings.model || "no model")
-              : aiSettings.enabled ? "The AI features are on but not ready — open to see why" : "AI settings (the AI features are off)"}>
-            ✦ AI{aiSettings.enabled && !aiReady(aiSettings, aiRelay) ? " ⚠" : ""}
+            title={aiNotReady ? "The AI features are on but not ready — open to see why"
+              : aiSettings.enabled ? "AI settings · " + (aiSettings.model || "no model") : "AI settings (the AI features are off)"}>
+            ✦ AI{aiNotReady ? " ⚠" : ""}
           </SmallBtn>
           <SmallBtn color="plain" onClick={() => setModal("log")}>Log</SmallBtn>
           <SmallBtn color="plain" onClick={() => setModal("settings")} title="Settings">⚙</SmallBtn>
@@ -16316,7 +16349,7 @@ function App() {
               </div>
 
               {/* grid / list */}
-              <div ref={gridRef} className="vault-scroll" style={{ flex: 1, padding: 12, position: "relative" }}>
+              <div ref={setGridEl} className="vault-scroll" style={{ flex: 1, padding: 12, position: "relative" }}>
                 {filtered.length === 0 ? (
                   <Empty icon="∅" title="Nothing matches"
                     hint={cards.length ? "Loosen the filters, or clear them from the bottom of the sidebar." : "Run a scan to index your folders."} />
