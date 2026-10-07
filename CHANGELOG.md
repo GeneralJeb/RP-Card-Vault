@@ -10,6 +10,12 @@ If you skipped several releases, read every section down to the one you had.
 
 ## 1.5.2
 
+- **A message shown twice in a row stays up the second time.** Each message
+  used to be taken down a few seconds later by its text, so the same words
+  shown again soon after vanished at once: Back up now, clicked within a
+  few seconds of an automatic backup, said nothing at all. Each message now
+  gets its own full time on screen.
+  
 A tidy-up of the code changed since 1.3.0. Almost all of it works exactly as
 before; two small differences:
 
