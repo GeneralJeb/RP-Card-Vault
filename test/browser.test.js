@@ -235,6 +235,8 @@ async function main() {
       await page.waitForTimeout(1500);
       t.ok(/\b3 cards\b/.test(await page.locator("header, body").first().innerText()), "the backup isn't counted as a card (still 3 cards)");
       t.eq(await page.getByText("_vault backups", { exact: true }).count(), 0, "and the backup folder isn't in the folder tree");
+      // The save clears the vault's edit, so the field has to show the file's new text.
+      t.eq(await desc.inputValue(), "A clockmaker who repairs time itself.", "the Fields tab shows the saved text without picking another card");
     });
 
     await step("a tag is added", async () => {
