@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.2";
+const APP_VERSION = "1.5.3";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -11223,12 +11223,16 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
 
+  // Reloaded when the file's content changes too (Save to card, an edit made
+  // outside the vault), or the Fields tab keeps showing the text from before
+  // the save until another card is picked. Only a different card blanks it.
+  const bodyOf = useRef(null);
   useEffect(() => {
     let dead = false;
-    setLoading(true); setBody(null);
+    if (bodyOf.current !== rec.id) { bodyOf.current = rec.id; setLoading(true); setBody(null); }
     dbGet(STORE_BODIES, rec.id).then((b) => { if (!dead) { setBody(b || null); setLoading(false); } });
     return () => { dead = true; };
-  }, [rec.id]);
+  }, [rec.id, rec.fp]);
 
   useEffect(() => { setTab("overview"); }, [rec.id]);
 
@@ -11241,7 +11245,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
     readOriginalBytes(rec, roots).then((o) => rawBookFromBytes(o.bytes, rec.file))
       .then((b) => { if (!dead) setRawBook(b); }).catch(() => {});
     return () => { dead = true; };
-  }, [tab, rec.id]);
+  }, [tab, rec.id, rec.fp]);
 
   const root = roots.find((r) => r.id === rec.rootId);
   const rootMeta = root ? (ROOT_ROLES[root.role] || ROOT_ROLES.reference) : ROOT_ROLES.reference;
