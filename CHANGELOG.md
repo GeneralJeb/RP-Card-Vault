@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.3
+
+- **The Fields tab shows a saved change straight away.** After Save to card (for example right after accepting an AI suggestion), the Fields and Raw tabs kept showing the text from before the save until you picked another card and came back. They now reload as soon as the saved file is read back.
+
 ## 1.5.2
 
 - **A message shown twice in a row stays up the second time.** Each message
