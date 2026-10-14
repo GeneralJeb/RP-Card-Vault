@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.4
+
+- **Big cards keep their group-only greetings and nickname.** A card large enough that only its older (v2) copy of the data fitted in the first part of the file the scan reads was listed as v2 and lost its group-only greetings, nickname and source in the vault; the next Save to card then wrote them back empty. The scan now reads the whole file when that happens. This could hit any card that stores its v2 copy before its v3 copy, as Save to card does, at roughly 200 to 400 KB of text.
+- **A lorebook with an empty slot no longer stops the card loading.** A card whose lorebook list had a `null` in it showed as unreadable ("Cannot read properties of null"). The empty slot is now skipped and the rest of the card reads as normal.
+- **A .charx reads its own card.json.** When a .charx had no card.json at the top, the vault took the first file whose name merely ended in card.json, such as `discard.json`.
+
 ## 1.5.3
 
 - **The Fields tab shows a saved change straight away.** After Save to card (for example right after accepting an AI suggestion), the Fields and Raw tabs kept showing the text from before the save until you picked another card and came back. They now reload as soon as the saved file is read back.

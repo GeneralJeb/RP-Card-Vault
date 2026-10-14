@@ -14,7 +14,7 @@ const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
-  "moveCardTo", "unzipEntryLimited", "importRootIdMap", "remapRootSettings", "remapDirKeyed",
+  "moveCardTo", "unzipEntryLimited", "processCardFile", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -327,6 +327,44 @@ async function main() {
     // Names a card can't safely have on disk.
     t.eq(["CON", "nul", "Com1", "LPT9", "Ada.", "Ada  ", "a/b:c", "  "].map(V.safeFileName),
       ["_CON", "_nul", "_Com1", "_LPT9", "Ada", "Ada", "a_b_c", "card"], "file names never become Windows devices or lose a trailing dot");
+  }
+
+  console.log("\nodd card files that should still read");
+  {
+    // A lorebook with an empty slot (null) in its entries: the card reads, the slot is skipped.
+    const holey = { spec: "chara_card_v2", data: { name: "Holey", description: "x",
+      character_book: { entries: [null, { keys: ["k"], content: "kept" }, null] } } };
+    let r = await V.parseCardBytes(enc(holey), "holey.json");
+    t.ok(r.ok && r.data.lorebook.entries.length === 1 && r.data.lorebook.entries[0].content === "kept",
+      "a lorebook with null entries still reads, skipping them", r.err);
+    t.eq(r.ok && r.data.lorebook.entries[0].idx, 1, "and each entry keeps its place in the file's list, so a save writes over the right one");
+    r = await V.parseCardBytes(V.writeCardIntoPng(PNG_1PX, holey, holey), "holey.png");
+    t.ok(r.ok && r.data.name === "Holey", "the same in a PNG", r.err);
+
+    // A .charx whose card.json isn't at the top: another file merely ending in card.json isn't it.
+    global.JSZip = require("../lib/jszip.min.js");
+    const zip = new JSZip();
+    zip.file("assets/discard.json", JSON.stringify({ name: "Wrong", description: "not the card" }));
+    zip.file("x/card.json", JSON.stringify({ spec: "chara_card_v2", data: { name: "Right", description: "the card" } }));
+    r = await V.parseCardBytes(await zip.generateAsync({ type: "uint8array" }), "nested.charx");
+    t.eq(r.ok && r.data.name, "Right", "a .charx reads its card.json, not a file like discard.json");
+  }
+
+  console.log("\na big card is read in full when only part of it fits the first read");
+  {
+    // Save to card writes chara (v2) then ccv3 (v3). A card big enough that chara fits
+    // in the scan's first read but ccv3 doesn't must still be read as v3, or the
+    // v3-only fields vanish from the vault and the next save writes them empty.
+    const v3 = V.newCardPayload({ name: "Big", description: "x".repeat(260000), first_mes: "hi" });
+    v3.data.group_only_greetings = ["Hello, all of you."];
+    v3.data.nickname = "Biggs";
+    const png = V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3));
+    t.ok(png.length > V.SCAN_HEAD_BYTES, "the test card is bigger than the first read (" + png.length + " bytes)");
+    const file = new File([png], "Big.png", { lastModified: 1 });
+    const out = await V.processCardFile({ id: "r1" }, { rel: "Big.png", dir: "", file: "Big.png", ext: "png" }, file);
+    t.eq(out.rec.spec, "v3", "the scan finds the v3 data");
+    t.eq([out.body.__val.group_only_greetings, out.body.__val.nickname], [["Hello, all of you."], "Biggs"],
+      "and keeps the group-only greetings and nickname");
   }
 
   console.log("\nbackups made by Save to card are never indexed");
