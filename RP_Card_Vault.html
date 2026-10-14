@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.3";
+const APP_VERSION = "1.5.4";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1451,7 +1451,10 @@ function normalizeLorebook(book) {
   const rawEntries = Array.isArray(book.entries)
     ? book.entries
     : (book.entries && typeof book.entries === "object" ? Object.values(book.entries) : []);
-  const entries = rawEntries.map((e, i) => ({
+  // A null slot in the list is skipped; idx stays each entry's place in the
+  // file's list, which mergeLorebookForSave matches entries back by.
+  const entries = [];
+  rawEntries.forEach((e, i) => { if (e && typeof e === "object") entries.push({
     idx: i,
     keys: asArr(e.keys || e.key),
     secondaryKeys: asArr(e.secondary_keys || e.keysecondary),
@@ -1463,7 +1466,7 @@ function normalizeLorebook(book) {
     insertionOrder: e.insertion_order ?? e.order ?? 0,
     position: asStr(e.position),
     tokens: estimateTokens(asStr(e.content)),
-  }));
+  }); });
   return {
     name: asStr(book.name),
     description: asStr(book.description),
@@ -1587,7 +1590,7 @@ async function parseCardBytes(bytes, filename) {
     if (typeof JSZip === "undefined") return { ok: false, err: "JSZip unavailable" };
     try {
       const zip = await JSZip.loadAsync(bytes);
-      const f = zip.file("card.json") || zip.file(/card\.json$/i)[0];
+      const f = zip.file("card.json") || zip.file(/(^|\/)card\.json$/i)[0];
       if (!f) return { ok: false, err: "charx has no card.json" };
       const size = f._data && f._data.uncompressedSize;
       if (size > CARD_UNPACK_MAX) return { ok: false, err: "charx card.json unpacks to over " + Math.round(CARD_UNPACK_MAX / 1048576) + " MB" };
@@ -1633,7 +1636,7 @@ async function parseCardBytes(bytes, filename) {
   }
 
   if (!best) return { ok: false, err: "Embedded card data unreadable" };
-  return Object.assign({ ok: true, pngKeys: Object.keys(t) }, best);
+  return Object.assign({ ok: true, pngKeys: Object.keys(t), partial: info.truncated }, best);
 }
 
 /* --- fingerprinting --- */
@@ -2025,7 +2028,9 @@ async function processCardFile(root, info, file) {
     if (info.ext === "png" || info.ext === "apng") {
       const headBytes = new Uint8Array(await file.slice(0, Math.min(file.size, SCAN_HEAD_BYTES)).arrayBuffer());
       parsed = await parseCardBytes(headBytes, info.file);
-      if (!parsed.ok && file.size > SCAN_HEAD_BYTES) {
+      // Read the whole file too when the head held only part of the card's data:
+      // a ccv3 chunk cut off there would leave just the older chara (v2) one.
+      if ((!parsed.ok || (parsed.partial && parsed.spec !== "v3")) && file.size > SCAN_HEAD_BYTES) {
         const full = new Uint8Array(await file.arrayBuffer());
         parsed = await parseCardBytes(full, info.file);
       }
