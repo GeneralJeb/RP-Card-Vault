@@ -172,6 +172,61 @@ async function main() {
       "and the lorebook on disk still has every field it had before");
   }
 
+  console.log("\nSave to card keeps the card fields the vault doesn't model");
+  {
+    const card = JSON.parse(JSON.stringify(ORIGINAL));
+    card.data.assets = [{ type: "icon", uri: "ccdefault:", name: "main", ext: "png" }, { type: "emotion", uri: "https://example.com/happy.png", name: "happy", ext: "png" }];
+    card.data.creator_notes_multilingual = { fr: "Un horloger." };
+    card.data.some_front_end = { keep: true };
+    for (const ext of ["png", "json"]) {
+      const fsys = memFs("Scratch");
+      const bytes = ext === "png" ? V.writeCardIntoPng(PNG_1PX, card, V.buildV2Payload(card)) : enc(card);
+      fsys.put("ada." + ext, bytes);
+      const parsed = await V.parseCardBytes(bytes, "ada." + ext);
+      const rec = { id: "r:ada." + ext, rootId: "r", rel: "ada." + ext, dir: "", file: "ada." + ext, ext, sig: "s" };
+      await V.saveCardToFile(rec, parsed.data, { fields: { description: "Edited." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
+      const d = (await V.parseCardBytes(fsys.get("ada." + ext), "ada." + ext)).raw.data;
+      t.ok(d.description === "Edited." && (d.assets || []).length === 2 && d.assets[1].name === "happy"
+        && (d.creator_notes_multilingual || {}).fr === "Un horloger." && (d.some_front_end || {}).keep === true,
+        "a ." + ext + " card keeps its assets, multilingual creator notes and a front end's own field");
+    }
+    const v1 = V.buildV3Payload({ name: "Old" }, null, null, { name: "Old", char_persona: "stale", fav: true }).data;
+    t.ok(!("char_persona" in v1) && !("fav" in v1), "a v1 card's top level isn't copied into the saved card");
+    const alias = V.buildV3Payload({ name: "Ada" }, null, null, { spec: "chara_card_v2", data: { name: "Ada", characterBook: { entries: [] }, char_greeting: "old" } }).data;
+    t.ok(!("characterBook" in alias) && !("char_greeting" in alias), "other spellings of fields the vault writes aren't carried over");
+    t.ok(!("assets" in V.buildV2Payload({ data: { name: "x", assets: [] } }).data), "and the v2 copy leaves the v3-only assets out");
+  }
+
+  console.log("\nSave to card puts the original back when the write lands short");
+  {
+    const fsys = memFs("Scratch");
+    const orig = V.writeCardIntoPng(PNG_1PX, ORIGINAL, V.buildV2Payload(ORIGINAL));
+    fsys.put("ada.png", orig);
+    // The disk takes only the first half of the first write: the v2 copy still reads as the card.
+    const getFileHandle = fsys.handle.getFileHandle.bind(fsys.handle);
+    let writes = 0;
+    fsys.handle.getFileHandle = async (n, o) => {
+      const fh = await getFileHandle(n, o);
+      const open = fh.createWritable.bind(fh);
+      fh.createWritable = async () => {
+        const w = await open();
+        if (writes++ === 0) {
+          const write = w.write.bind(w);
+          w.write = async (b) => { const a = new Uint8Array(await new Blob([b]).arrayBuffer()); return write(a.subarray(0, a.length >> 1)); };
+        }
+        return w;
+      };
+      return fh;
+    };
+    const parsed = await V.parseCardBytes(orig, "ada.png");
+    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png", sig: "s" };
+    let err = "";
+    try { await V.saveCardToFile(rec, parsed.data, { fields: { personality: "Punctual." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false }); }
+    catch (e) { err = e.message; }
+    t.ok(/put back/.test(err), "the save fails (" + (err || "no error") + ")");
+    t.ok(Buffer.compare(Buffer.from(fsys.get("ada.png")), Buffer.from(orig)) === 0, "and the file on disk is the original again");
+  }
+
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");
   {
     const png = PNG_1PX;
