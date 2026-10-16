@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.4";
+const APP_VERSION = "1.5.6";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1875,10 +1875,22 @@ const SKIP_DIRS = new Set(["node_modules", ".git", ".vault_thumbs", "$recycle.bi
  * Recursively list candidate card files under a directory handle.
  * Not a generator — Babel's ES5 generator transform needs a runtime we
  * don't ship, so this pushes into an array via callback instead.
+ * A folder that can't be read to the end (removed meanwhile, or no access)
+ * goes into failAcc as { rel, err } when one is given; without it, the error
+ * is thrown.
  */
-async function listCardFiles(dirHandle, rel, acc, onTick, depth, dirAcc) {
+async function listCardFiles(dirHandle, rel, acc, onTick, depth, dirAcc, failAcc) {
   depth = depth || 0;
   if (depth > 12) return;
+  try {
+    await listCardDir(dirHandle, rel, acc, onTick, depth, dirAcc, failAcc);
+  } catch (e) {
+    if (!failAcc) throw e;
+    failAcc.push({ rel, err: e });
+  }
+}
+
+async function listCardDir(dirHandle, rel, acc, onTick, depth, dirAcc, failAcc) {
   let entries;
   try { entries = dirHandle.values(); } catch (e) { return; }
   for await (const entry of entries) {
@@ -1890,7 +1902,7 @@ async function listCardFiles(dirHandle, rel, acc, onTick, depth, dirAcc) {
       // Record the folder itself, so folders you just made — and folders that
       // are currently empty — still appear in the tree.
       if (dirAcc) dirAcc.push(sub);
-      await listCardFiles(entry, sub, acc, onTick, depth + 1, dirAcc);
+      await listCardFiles(entry, sub, acc, onTick, depth + 1, dirAcc, failAcc);
     } else {
       const ext = extOf(nm);
       if (CARD_EXTS.indexOf(ext) < 0) continue;
@@ -2100,14 +2112,18 @@ async function scanRoot(root, existing, ctl, onProgress) {
   onProgress({ phase: "listing", done: 0, total: 0, label: "Listing " + root.name + "…" });
   const files = [];
   const dirList = [];
-  await listCardFiles(root.handle, "", files, (n) => onProgress({ phase: "listing", done: n, total: 0, label: "Listing " + root.name + " — " + n + " files" }), 0, dirList);
+  const unread = [];
+  await listCardFiles(root.handle, "", files, (n) => onProgress({ phase: "listing", done: n, total: 0, label: "Listing " + root.name + " — " + n + " files" }), 0, dirList, unread);
+  if (unread.some((u) => !u.rel)) {
+    return { error: "Couldn't read " + root.name + ": " + unread[0].err.message, records: [], bodies: [], thumbs: [], removed: [] };
+  }
 
   const records = [], bodies = [], thumbs = [];
   const seenIds = new Set();
-  let done = 0;
+  let done = 0, stopped = false;
 
   for (const f of files) {
-    if (ctl && ctl.stop) break;
+    if (ctl && ctl.stop) { stopped = true; break; }
     const id = root.id + ":" + f.rel;
     seenIds.add(id);
     done++;
@@ -2115,11 +2131,11 @@ async function scanRoot(root, existing, ctl, onProgress) {
       onProgress({ phase: "parsing", done, total: files.length, label: f.file });
     }
 
+    const prev = existing.get(id);
     let file;
     try { file = await f.handle.getFile(); }
-    catch (e) { continue; }
+    catch (e) { if (prev) records.push(prev); continue; }
 
-    const prev = existing.get(id);
     if (reusableRecord(prev, file)) { records.push(prev); continue; }
 
     const out = await processCardFile(root, f, file);
@@ -2128,10 +2144,16 @@ async function scanRoot(root, existing, ctl, onProgress) {
     if (out.thumb) thumbs.push(out.thumb);
   }
 
+  // A card is only gone if the scan looked where it was: not when the scan
+  // was stopped first, or its folder couldn't be read. Those keep their records.
+  const inUnread = (dir) => unread.some((u) => dir === u.rel || String(dir || "").startsWith(u.rel + "/"));
   const removed = [];
   for (const [id, r] of existing) {
-    if (r.rootId === root.id && !seenIds.has(id)) removed.push(id);
+    if (r.rootId !== root.id || seenIds.has(id)) continue;
+    if (stopped || inUnread(r.dir)) records.push(r);
+    else removed.push(id);
   }
+  for (const d of root.dirs || []) if (inUnread(d) && dirList.indexOf(d) < 0) dirList.push(d);
 
   return { records, bodies, thumbs, removed, error: null, count: files.length, dirs: dirList.sort() };
 }
@@ -2149,9 +2171,10 @@ async function scanImportRoot(root, existing, ctl, onProgress) {
 
   const records = [], bodies = [], thumbs = [];
   const seenIds = new Set();
+  let stopped = false;
 
   for (let i = 0; i < pending.length; i++) {
-    if (ctl && ctl.stop) break;
+    if (ctl && ctl.stop) { stopped = true; break; }
     const info = pending[i];
     const id = root.id + ":" + info.rel;
     seenIds.add(id);
@@ -2167,9 +2190,12 @@ async function scanImportRoot(root, existing, ctl, onProgress) {
     if (out.thumb) thumbs.push(out.thumb);
   }
 
+  // A stopped scan keeps the cards it hadn't reached yet.
   const removed = [];
   for (const [id, r] of existing) {
-    if (r.rootId === root.id && !seenIds.has(id)) removed.push(id);
+    if (r.rootId !== root.id || seenIds.has(id)) continue;
+    if (stopped) records.push(r);
+    else removed.push(id);
   }
 
   const dirSet = new Set();
@@ -2996,19 +3022,44 @@ function lorebookPatch(body, lb) {
   return { lorebook: next && orig && sameLorebook(next, orig) ? null : next };
 }
 
+/* The card fields the vault reads (normalizeCard), with the other spellings it
+   reads them by: a save writes these from its own copy, so the file's are left out. */
+const MODELLED_CARD_KEYS = new Set([
+  "name", "char_name", "nickname", "description", "char_persona", "personality", "personality_summary",
+  "scenario", "world_scenario", "first_mes", "char_greeting", "mes_example", "example_dialogue",
+  "system_prompt", "post_history_instructions", "creator_notes", "creator", "create_by",
+  "character_version", "version", "tags", "alternate_greetings", "group_only_greetings", "source",
+  "creation_date", "modification_date", "character_book", "characterBook", "character_bookv3", "extensions",
+]);
+
+/**
+ * The fields of a parsed card file's data that the vault doesn't model (a v3
+ * card's assets and creator_notes_multilingual, or a front end's own), to be
+ * written back as they were. Only for a card that wraps its fields in `data`;
+ * a v1 card's top level is the file's own business.
+ */
+function unmodelledCardFields(raw) {
+  const out = {};
+  const src = raw && typeof raw === "object" && raw.data && typeof raw.data === "object" ? raw.data : null;
+  if (!src) return out;
+  for (const k of Object.keys(src)) if (!MODELLED_CARD_KEYS.has(k) && k !== "__proto__") out[k] = src[k];
+  return out;
+}
+
 /**
  * The card to write, as chara_card_v3. `rawBook` is the original file's
- * character_book (rawCharacterBook): pass it whenever the file was read, so
- * the lorebook keeps everything the vault doesn't model.
+ * character_book (rawCharacterBook) and `raw` the file's whole parsed card:
+ * pass them whenever the file was read, so the card keeps everything the
+ * vault doesn't model.
  */
-function buildV3Payload(body, edit, rawBook) {
+function buildV3Payload(body, edit, rawBook, raw) {
   const d = {};
   for (const f of CARD_FIELDS) d[f.key] = effectiveField(body, edit, f.key);
   const greet = (edit && edit.greetings) || null;
   return {
     spec: "chara_card_v3",
     spec_version: "3.0",
-    data: Object.assign({
+    data: Object.assign(unmodelledCardFields(raw), {
       name: effectiveField(body, edit, "name") || (body && body.name) || "",
       nickname: body ? body.nickname : "",
       creator: body ? body.creator : "",
@@ -3030,6 +3081,8 @@ function buildV2Payload(v3) {
   delete d.nickname;
   delete d.group_only_greetings;
   delete d.source;
+  delete d.assets;
+  delete d.creator_notes_multilingual;
   return { spec: "chara_card_v2", spec_version: "2.0", data: d };
 }
 
@@ -3124,18 +3177,19 @@ async function readOriginalBytes(rec, roots) {
   return { bytes: new Uint8Array(await file.arrayBuffer()), file };
 }
 
-/** The original character_book in a card file's bytes, or null if it can't be read. */
-async function rawBookFromBytes(bytes, filename) {
+/** The parsed card in a card file's bytes, as the file has it, or null if it can't be read. */
+async function rawCardFromBytes(bytes, filename) {
   try {
     const p = await parseCardBytes(bytes, filename);
-    return p && p.ok ? rawCharacterBook(p.raw) : null;
+    return p && p.ok ? p.raw : null;
   } catch (e) { return null; }
 }
 
 /** Produce the edited card as a Blob, never touching the source file. */
 async function materializeEdit(rec, body, edit, roots) {
   const { bytes } = await readOriginalBytes(rec, roots);
-  const v3 = buildV3Payload(body, edit, await rawBookFromBytes(bytes, rec.file));
+  const raw = await rawCardFromBytes(bytes, rec.file);
+  const v3 = buildV3Payload(body, edit, rawCharacterBook(raw), raw);
   const v2 = buildV2Payload(v3);
   const name = safeFileName(v3.data.name || rec.name) + " (vault)";
   if (rec.ext === "json") {
@@ -3249,8 +3303,9 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   const fh = await dir.getFileHandle(rec.file, { create: false });
   const originalBytes = new Uint8Array(await (await fh.getFile()).arrayBuffer());
 
-  // Start the lorebook from the file's own, so nothing the vault doesn't model is lost.
-  const v3 = buildV3Payload(body, edit, await rawBookFromBytes(originalBytes, rec.file));
+  // Start from the file's own card, so nothing the vault doesn't model is lost.
+  const raw = await rawCardFromBytes(originalBytes, rec.file);
+  const v3 = buildV3Payload(body, edit, rawCharacterBook(raw), raw);
   const v2 = buildV2Payload(v3);
 
   let outBytes;
@@ -3293,7 +3348,11 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   let verified = null;
   try {
     const back = new Uint8Array(await (await fh.getFile()).arrayBuffer());
-    verified = await parseCardBytes(back, rec.file);
+    // A write cut short can still parse: the v2 copy comes first in the file.
+    let same = back.length === outBytes.length;
+    for (let i = 0; same && i < back.length; i++) same = back[i] === outBytes[i];
+    verified = same ? await parseCardBytes(back, rec.file)
+      : { ok: false, err: "read back " + back.length + " bytes of the " + outBytes.length + " written" };
   } catch (e) {
     verified = { ok: false, err: e.message };
   }
@@ -11241,14 +11300,14 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
 
   useEffect(() => { setTab("overview"); }, [rec.id]);
 
-  // The Raw tab shows what a save would write, so it needs the file's own lorebook too.
-  const [rawBook, setRawBook] = useState(null);
+  // The Raw tab shows what a save would write, so it needs the file's own card too.
+  const [rawCard, setRawCard] = useState(null);
   useEffect(() => {
     let dead = false;
-    setRawBook(null);
-    if (tab !== "raw" || !rec.loreCount) return () => { dead = true; };
-    readOriginalBytes(rec, roots).then((o) => rawBookFromBytes(o.bytes, rec.file))
-      .then((b) => { if (!dead) setRawBook(b); }).catch(() => {});
+    setRawCard(null);
+    if (tab !== "raw") return () => { dead = true; };
+    readOriginalBytes(rec, roots).then((o) => rawCardFromBytes(o.bytes, rec.file))
+      .then((c) => { if (!dead) setRawCard(c); }).catch(() => {});
     return () => { dead = true; };
   }, [tab, rec.id, rec.fp]);
 
@@ -11618,10 +11677,10 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
           <Fragment>
             <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
               <SmallBtn color="cyan" onClick={() => {
-                navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(buildV3Payload(body, edit, rawBook), null, 2));
+                navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2));
                 onToast("V3 JSON copied", "cyan");
               }}>Copy V3 JSON</SmallBtn>
-              <SmallBtn color="muted" onClick={() => downloadFile(JSON.stringify(buildV3Payload(body, edit, rawBook), null, 2), safeFileName(rec.name) + ".json", "application/json")}>
+              <SmallBtn color="muted" onClick={() => downloadFile(JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2), safeFileName(rec.name) + ".json", "application/json")}>
                 Download JSON
               </SmallBtn>
             </div>
@@ -11630,7 +11689,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
               background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
               borderRadius: "var(--radius-sm)", padding: 10, overflow: "auto",
               whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--text-secondary)",
-            }}>{JSON.stringify(buildV3Payload(body, edit, rawBook), null, 2)}</pre>
+            }}>{JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2)}</pre>
           </Fragment>
         ) : null}
       </div>
@@ -14196,7 +14255,8 @@ function App() {
     const edit = editsMap.get(rec.fp);
     const name = String(newName || "").trim() || (String(effectiveField(body, edit, "name") || rec.name) + " (copy)");
     const named = Object.assign({}, edit, { fields: Object.assign({}, edit && edit.fields, { name }) });
-    const v3 = buildV3Payload(body, named, await rawBookFromBytes(orig.bytes, rec.file));
+    const raw = await rawCardFromBytes(orig.bytes, rec.file);
+    const v3 = buildV3Payload(body, named, rawCharacterBook(raw), raw);
     const asPng = isPng(orig.bytes);
     const blob = asPng
       ? new Blob([writeCardIntoPng(orig.bytes, v3, buildV2Payload(v3))], { type: "image/png" })
