@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.5";
+const APP_VERSION = "1.5.6";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1875,10 +1875,22 @@ const SKIP_DIRS = new Set(["node_modules", ".git", ".vault_thumbs", "$recycle.bi
  * Recursively list candidate card files under a directory handle.
  * Not a generator — Babel's ES5 generator transform needs a runtime we
  * don't ship, so this pushes into an array via callback instead.
+ * A folder that can't be read to the end (removed meanwhile, or no access)
+ * goes into failAcc as { rel, err } when one is given; without it, the error
+ * is thrown.
  */
-async function listCardFiles(dirHandle, rel, acc, onTick, depth, dirAcc) {
+async function listCardFiles(dirHandle, rel, acc, onTick, depth, dirAcc, failAcc) {
   depth = depth || 0;
   if (depth > 12) return;
+  try {
+    await listCardDir(dirHandle, rel, acc, onTick, depth, dirAcc, failAcc);
+  } catch (e) {
+    if (!failAcc) throw e;
+    failAcc.push({ rel, err: e });
+  }
+}
+
+async function listCardDir(dirHandle, rel, acc, onTick, depth, dirAcc, failAcc) {
   let entries;
   try { entries = dirHandle.values(); } catch (e) { return; }
   for await (const entry of entries) {
@@ -1890,7 +1902,7 @@ async function listCardFiles(dirHandle, rel, acc, onTick, depth, dirAcc) {
       // Record the folder itself, so folders you just made — and folders that
       // are currently empty — still appear in the tree.
       if (dirAcc) dirAcc.push(sub);
-      await listCardFiles(entry, sub, acc, onTick, depth + 1, dirAcc);
+      await listCardFiles(entry, sub, acc, onTick, depth + 1, dirAcc, failAcc);
     } else {
       const ext = extOf(nm);
       if (CARD_EXTS.indexOf(ext) < 0) continue;
@@ -2100,14 +2112,18 @@ async function scanRoot(root, existing, ctl, onProgress) {
   onProgress({ phase: "listing", done: 0, total: 0, label: "Listing " + root.name + "…" });
   const files = [];
   const dirList = [];
-  await listCardFiles(root.handle, "", files, (n) => onProgress({ phase: "listing", done: n, total: 0, label: "Listing " + root.name + " — " + n + " files" }), 0, dirList);
+  const unread = [];
+  await listCardFiles(root.handle, "", files, (n) => onProgress({ phase: "listing", done: n, total: 0, label: "Listing " + root.name + " — " + n + " files" }), 0, dirList, unread);
+  if (unread.some((u) => !u.rel)) {
+    return { error: "Couldn't read " + root.name + ": " + unread[0].err.message, records: [], bodies: [], thumbs: [], removed: [] };
+  }
 
   const records = [], bodies = [], thumbs = [];
   const seenIds = new Set();
-  let done = 0;
+  let done = 0, stopped = false;
 
   for (const f of files) {
-    if (ctl && ctl.stop) break;
+    if (ctl && ctl.stop) { stopped = true; break; }
     const id = root.id + ":" + f.rel;
     seenIds.add(id);
     done++;
@@ -2115,11 +2131,11 @@ async function scanRoot(root, existing, ctl, onProgress) {
       onProgress({ phase: "parsing", done, total: files.length, label: f.file });
     }
 
+    const prev = existing.get(id);
     let file;
     try { file = await f.handle.getFile(); }
-    catch (e) { continue; }
+    catch (e) { if (prev) records.push(prev); continue; }
 
-    const prev = existing.get(id);
     if (reusableRecord(prev, file)) { records.push(prev); continue; }
 
     const out = await processCardFile(root, f, file);
@@ -2128,10 +2144,16 @@ async function scanRoot(root, existing, ctl, onProgress) {
     if (out.thumb) thumbs.push(out.thumb);
   }
 
+  // A card is only gone if the scan looked where it was: not when the scan
+  // was stopped first, or its folder couldn't be read. Those keep their records.
+  const inUnread = (dir) => unread.some((u) => dir === u.rel || String(dir || "").startsWith(u.rel + "/"));
   const removed = [];
   for (const [id, r] of existing) {
-    if (r.rootId === root.id && !seenIds.has(id)) removed.push(id);
+    if (r.rootId !== root.id || seenIds.has(id)) continue;
+    if (stopped || inUnread(r.dir)) records.push(r);
+    else removed.push(id);
   }
+  for (const d of root.dirs || []) if (inUnread(d) && dirList.indexOf(d) < 0) dirList.push(d);
 
   return { records, bodies, thumbs, removed, error: null, count: files.length, dirs: dirList.sort() };
 }
@@ -2149,9 +2171,10 @@ async function scanImportRoot(root, existing, ctl, onProgress) {
 
   const records = [], bodies = [], thumbs = [];
   const seenIds = new Set();
+  let stopped = false;
 
   for (let i = 0; i < pending.length; i++) {
-    if (ctl && ctl.stop) break;
+    if (ctl && ctl.stop) { stopped = true; break; }
     const info = pending[i];
     const id = root.id + ":" + info.rel;
     seenIds.add(id);
@@ -2167,9 +2190,12 @@ async function scanImportRoot(root, existing, ctl, onProgress) {
     if (out.thumb) thumbs.push(out.thumb);
   }
 
+  // A stopped scan keeps the cards it hadn't reached yet.
   const removed = [];
   for (const [id, r] of existing) {
-    if (r.rootId === root.id && !seenIds.has(id)) removed.push(id);
+    if (r.rootId !== root.id || seenIds.has(id)) continue;
+    if (stopped) records.push(r);
+    else removed.push(id);
   }
 
   const dirSet = new Set();

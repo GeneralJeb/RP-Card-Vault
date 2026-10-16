@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.6
+
+- **Stopping a rescan no longer drops cards from the vault.** Pressing Stop part-way through a rescan took every card the scan hadn't reached yet as deleted: they vanished from the grid, lost their thumbnails and cached text, and came back with new short ids on the next scan. A stopped scan now leaves those cards as they were. The same goes for folders added with the read-only folder picker.
+- **A folder that can't be read no longer leaves the scan stuck.** If a folder was removed, or couldn't be opened, while a scan listed it, the scan stopped with an error and the progress bar stayed up for good, with no Rescan button. Now an unreadable subfolder is passed over and its cards keep their place; if the whole folder can't be read, the scan says so and changes nothing.
+- **A card file that's in use keeps its place.** A card the scan couldn't open at that moment, for example while another program had it locked, disappeared from the grid until the vault was reloaded. It now stays listed as it was.
+
 ## 1.5.5
 
 - **Save to card keeps a card's assets.** Saving a v3 card wrote back only the fields the vault shows, so its list of assets (icon, emotions, backgrounds), its creator notes in other languages, and any field a front end had added of its own were dropped from the file. They are now written back as they were. The same goes for Copy and Download copy, and the Raw tab now shows them too.

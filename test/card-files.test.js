@@ -14,7 +14,7 @@ const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
-  "moveCardTo", "unzipEntryLimited", "processCardFile", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed",
+  "moveCardTo", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -443,6 +443,66 @@ async function main() {
     const acc2 = [];
     await V.listCardFiles(data, "", acc2, null, 0, []);
     t.eq(acc2.map((x) => x.rel).join(), "Ada.png", "nor anything in _vault data (vault-data backups are .json, which would look like cards)");
+  }
+
+  console.log("\na rescan only drops the cards whose files are really gone");
+  {
+    const cardJson = (n) => new TextEncoder().encode(JSON.stringify({ spec: "chara_card_v2", spec_version: "2.0", data: { name: n, description: "About " + n, first_mes: "Hi." } }));
+    // fail: { open: file name whose getFile() throws, list: folder name whose listing throws after one entry }
+    const tree = (fail) => {
+      fail = fail || {};
+      const file = (name) => ({ kind: "file", name, async getFile() {
+        if (fail.open === name) throw new Error("The file is in use");
+        return new File([cardJson(name)], name, { lastModified: 1 });
+      } });
+      const dir = (name, kids) => ({ kind: "directory", name,
+        async queryPermission() { return "granted"; }, async requestPermission() { return "granted"; },
+        values: async function* () {
+          for (let i = 0; i < kids.length; i++) {
+            if (fail.list === name && i === 1) throw Object.assign(new Error("A requested file or directory could not be found"), { name: "NotFoundError" });
+            yield kids[i];
+          }
+        } });
+      return dir("Cards", [file("Ada.json"), file("Bram.json"), file("Cora.json"),
+        dir("Old", [file("Dain.json"), file("Edda.json")])]);
+    };
+    const root = (fail) => ({ id: "r1", name: "Cards", role: "library", handle: tree(fail) });
+    const go = { stop: false };
+    const first = await V.scanRoot(root(), new Map(), go, () => {});
+    const all = first.records.map((r) => r.rel).sort().join(", ");
+    t.eq(all, "Ada.json, Bram.json, Cora.json, Old/Dain.json, Old/Edda.json", "a first scan finds every card");
+    const known = () => new Map(first.records.map((r) => [r.id, r]));
+
+    // Stop pressed while the first card is being read.
+    let looks = 0;
+    const stopAfterOne = { get stop() { return looks++ > 0; } };
+    const stopped = await V.scanRoot(root(), known(), stopAfterOne, () => {});
+    t.eq(stopped.removed, [], "stopping a rescan part-way removes nothing");
+    t.eq(stopped.records.map((r) => r.rel).sort().join(", "), all, "and the cards it hadn't reached yet stay indexed");
+
+    const locked = await V.scanRoot(root({ open: "Bram.json" }), known(), go, () => {});
+    t.ok(locked.records.some((r) => r.rel === "Bram.json") && !locked.removed.length,
+      "a card file that can't be opened just now keeps its record", locked.records.map((r) => r.rel).join());
+
+    let res, threw = null;
+    try { res = await V.scanRoot(root({ list: "Old" }), known(), go, () => {}); } catch (e) { threw = e; }
+    t.ok(!threw, "a subfolder that can't be listed doesn't make the scan fail", threw && threw.message);
+    t.ok(res && !res.removed.length && res.records.some((r) => r.rel === "Old/Edda.json"),
+      "and the cards in it that weren't listed stay indexed", res && JSON.stringify(res.removed));
+
+    threw = null;
+    try { res = await V.scanRoot(root({ list: "Cards" }), known(), go, () => {}); } catch (e) { threw = e; }
+    t.ok(!threw && res && res.error && !res.removed.length,
+      "a folder that can't be listed at all is reported as an error, with nothing removed", threw ? threw.message : res && res.error);
+
+    const file = (n) => ({ rel: n, dir: "", file: n, ext: "json", fileObj: new File([cardJson(n)], n, { lastModified: 2 }) });
+    const imp = { id: "imp:cards", name: "cards", mode: "import" };
+    looks = 0;
+    V.IMPORT_PENDING.set(imp.id, ["Ada.json", "Bram.json", "Cora.json"].map(file));
+    const impKnown = new Map((await V.scanImportRoot(imp, new Map(), go, () => {})).records.map((r) => [r.id, r]));
+    V.IMPORT_PENDING.set(imp.id, ["Ada.json", "Bram.json", "Cora.json"].map(file));
+    const impStopped = await V.scanImportRoot(imp, impKnown, stopAfterOne, () => {});
+    t.eq([impStopped.removed, impStopped.records.length], [[], 3], "stopping the scan of an imported folder removes nothing either");
   }
 
   console.log("\nold backups of a card are pruned, and nothing else");
