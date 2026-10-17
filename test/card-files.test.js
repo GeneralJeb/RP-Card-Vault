@@ -14,7 +14,7 @@ const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
-  "moveCardTo", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed",
+  "moveCardTo", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -293,6 +293,16 @@ async function main() {
     t.eq(V.remapRootSettings({ privateFolders: ["r1::Secret"] }, { privateFolders: ["r1::Secret"] }, inner).patch.privateFolders,
       ["r1::Secret", "outer::Library/Secret"], "a private folder inside a replaced registration stays private under the outer folder");
     t.eq(V.remapDirKeyed({ "r1::A": "inbox", "zz::B": "archive" }, inner), { "outer::Library/A": "inbox" }, "folder labels move with it");
+    // The same when a registration sitting inside another is dropped ("Fix it", or adding the folder around it).
+    const roots = [{ id: "outer", name: "Parent", role: "library" }, { id: "big", name: "Big", role: "archive" }, { id: "other", name: "Inbox" }];
+    const moved = V.absorbRegistration(roots, roots[1], "outer", "Big",
+      { privateFolders: ["big::", "other::Mine"], trashKey: "big::Old", ingestSourceKeys: ["other::"] }, { "big::Sub": "inbox" }, { "big::Sub": "exclude" });
+    t.eq(moved.patch.privateFolders.slice().sort(), ["big::", "other::Mine", "outer::Big"], "a private registration stays private under the folder around it");
+    t.eq([moved.patch.trashKey, moved.patch.ingestSourceKeys], ["outer::Big/Old", ["other::"]], "its trash follows, and other folders' settings are left as they are");
+    t.eq([moved.folderRoles["outer::Big"], moved.folderRoles["outer::Big/Sub"], moved.dupeMode["outer::Big/Sub"]], ["archive", "inbox", "exclude"],
+      "its role becomes the subfolder's label, and its labels and duplicate rules move with it");
+    t.eq(V.absorbRegistration(roots, roots[1], "outer", "Big", {}, { "big::": "inbox" }, {}).folderRoles["outer::Big"], "inbox",
+      "a label on the registration's own top folder wins over its role");
   }
 
   console.log("\nlorebook edits in the vault");

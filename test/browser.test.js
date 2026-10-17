@@ -468,6 +468,34 @@ async function main() {
       t.eq(await orphanCount(), 0, "and they're gone from the index");
     });
 
+    if (!reloadCrashes) await step("fixing a folder registered inside another keeps it private from the AI", async () => {
+      // A registration of Parent/Big left from before, private and labelled.
+      const outerId = (await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const big = await (await (await navigator.storage.getDirectory()).getDirectoryHandle("Parent")).getDirectoryHandle("Big");
+        const settings = await new Promise((res) => { const q = db.transaction("kv").objectStore("kv").get("settings"); q.onsuccess = () => res(q.result); });
+        await new Promise((res) => {
+          const tx = db.transaction(["roots", "kv"], "readwrite");
+          tx.objectStore("roots").put({ id: "oldbig", name: "Big", role: "archive", handle: big, addedAt: Date.now(), lastScan: 0 });
+          tx.objectStore("kv").put(Object.assign({}, settings, { privateFolders: ["oldbig::"] }), "settings");
+          tx.oncomplete = res;
+        });
+      }), (await cardRecords()).find((c) => /^Extra \d+\.png$/.test(c.file)).rootId);
+      await page.reload();
+      await page.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
+      await page.getByText(/sits inside/).first().waitFor();
+      await page.getByRole("button", { name: "Fix it" }).click();
+      await toast(/Dropped the duplicate registration/);
+      const kv = await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const get = (k) => new Promise((res) => { const q = db.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); });
+        return { priv: (await get("settings")).privateFolders, roles: await get("folderRoles") };
+      });
+      t.ok(kv.priv.indexOf(outerId + "::Big") >= 0, "Parent/Big is still private from the AI", kv.priv);
+      t.eq(kv.roles[outerId + "::Big"], "archive", "and keeps its role as a label");
+      t.ok(!(await rootKeys()).includes("oldbig"), "the inner registration is gone");
+    });
+
     await step("a theme is applied, and is there from the first moment after a reload", async () => {
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByLabel("Theme").selectOption("parchment");

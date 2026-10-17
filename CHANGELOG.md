@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.7
+
+- **A folder you keep private from the AI stays private when a doubled-up registration is fixed.** When one linked folder sat inside another, the vault offered to fix it with "Fix it", which drops the inner registration and keeps the cards under the outer folder. Its settings were left behind on the dropped registration, so a private folder quietly became open to the AI, and its trash folder, folder labels and duplicate-check rules stopped applying. They now move to the same folder under the outer one, as they already did when you add the folder around a linked one.
+- **A linked folder's role is kept when the folder around it is added.** Adding a folder that contains one you'd already linked dropped the inner folder's role (Inbox, Archive and so on); it's now kept as that subfolder's label, as "Fix it" does.
+- **Renaming a private folder only in capitals keeps it private.** Windows treats "Secret" and "secret" as the same folder, but after such a rename the vault no longer saw it as private, and its cards could reach the AI. Private folders now match whatever the capitals.
+
 ## 1.5.6
 
 - **Stopping a rescan no longer drops cards from the vault.** Pressing Stop part-way through a rescan took every card the scan hadn't reached yet as deleted: they vanished from the grid, lost their thumbnails and cached text, and came back with new short ids on the next scan. A stopped scan now leaves those cards as they were. The same goes for folders added with the read-only folder picker.
