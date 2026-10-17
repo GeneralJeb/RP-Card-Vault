@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.6";
+const APP_VERSION = "1.5.7";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -2281,11 +2281,18 @@ const TRASH_NAMES = /^(_vault trash|trash cards|trash|recycle|_recycle|_vault ba
    can't list, search, read or change them, and card actions refuse them.
    ──────────────────────────────────────────────────────────────────── */
 
-/** (rootId, dir) → true when that folder is, or is inside, a private one. */
+/**
+ * (rootId, dir) → true when that folder is, or is inside, a private one.
+ * Folder names match in any case, as Windows does: a folder renamed from
+ * "Secret" to "secret" is still the private one.
+ */
 function makePrivateTest(settings) {
-  const keys = ((settings && settings.privateFolders) || []).map(parseDirKey);
+  const keys = ((settings && settings.privateFolders) || []).map((k) => {
+    const p = parseDirKey(k);
+    return { rootId: p.rootId, dir: p.dir.toLowerCase() };
+  });
   return function isPrivate(rootId, dir) {
-    const d = String(dir || "");
+    const d = String(dir || "").toLowerCase();
     return keys.some((k) => k.rootId === rootId && (!k.dir || d === k.dir || d.indexOf(k.dir + "/") === 0));
   };
 }
@@ -2443,6 +2450,24 @@ function remapDirKeyed(obj, idMap) {
     if (m) out[m] = obj[k];
   }
   return out;
+}
+
+/**
+ * A registered folder dropped for the registered folder around it (`outerId`,
+ * where it sits at `path`): its private folders, trash, labels, duplicate
+ * rules and the like, carried under the outer folder. Its own role becomes
+ * the label of that subfolder.
+ */
+function absorbRegistration(roots, inner, outerId, path, settings, folderRoles, dupeMode) {
+  const idMap = importRootIdMap([], roots);
+  idMap[inner.id] = { id: outerId, prefix: path };
+  const roles = Object.assign({}, folderRoles, remapDirKeyed(folderRoles, idMap));
+  roles[dirKey(outerId, path)] = (folderRoles || {})[dirKey(inner.id, "")] || inner.role || "inbox";
+  return {
+    patch: remapRootSettings(settings, settings, idMap).patch,
+    folderRoles: roles,
+    dupeMode: Object.assign({}, dupeMode, remapDirKeyed(dupeMode, idMap)),
+  };
 }
 
 function parseDirKey(k) {
@@ -14662,13 +14687,10 @@ function App() {
       )) return;
       // Its private folders, labels, trash and the like now live under the
       // outer folder: carry them over before its registration goes.
-      const idMap = importRootIdMap([], roots);
-      idMap[nest.root.id] = { id: root.id, prefix: nest.path };
-      patchSettings(remapRootSettings(settings, settings, idMap).patch);
-      const roles = Object.assign({}, folderRoles, remapDirKeyed(folderRoles, idMap));
-      setFolderRoles(roles); saveFolderRoles(roles);
-      const dm = Object.assign({}, dupeMode, remapDirKeyed(dupeMode, idMap));
-      setDupeMode(dm); saveDupeMode(dm);
+      const moved = absorbRegistration(roots, nest.root, root.id, nest.path, settings, folderRoles, dupeMode);
+      patchSettings(moved.patch);
+      setFolderRoles(moved.folderRoles); saveFolderRoles(moved.folderRoles);
+      setDupeMode(moved.dupeMode); saveDupeMode(moved.dupeMode);
       await dbDel(STORE_ROOTS, nest.root.id);
       await dbDelCardsOfRoot(nest.root.id);
       setRoots((prev) => prev.filter((r) => r.id !== nest.root.id));
@@ -14722,8 +14744,12 @@ function App() {
   );
 
   const repairNesting = useCallback(async (pair) => {
-    const role = pair.inner.role || "inbox";
-    setFolderRole(dirKey(pair.outer.id, pair.path), role);
+    // Its private folders, labels, trash and the like move under the outer folder.
+    const moved = absorbRegistration(roots, pair.inner, pair.outer.id, pair.path, settings, folderRoles, dupeMode);
+    const role = moved.folderRoles[dirKey(pair.outer.id, pair.path)];
+    patchSettings(moved.patch);
+    setFolderRoles(moved.folderRoles); saveFolderRoles(moved.folderRoles);
+    setDupeMode(moved.dupeMode); saveDupeMode(moved.dupeMode);
     await dbDel(STORE_ROOTS, pair.inner.id);
     await dbDelCardsOfRoot(pair.inner.id);
     setRoots((prev) => prev.filter((r) => r.id !== pair.inner.id));
@@ -14734,7 +14760,7 @@ function App() {
       " is now labelled " + (ROOT_ROLES[role] || ROOT_ROLES.reference).label,
       "green"
     );
-  }, [cards, setFolderRole, showToast]);
+  }, [roots, settings, folderRoles, dupeMode, patchSettings, showToast]);
 
   const forgetRoot = useCallback(async (id) => {
     const root = roots.find((r) => r.id === id);
@@ -15806,13 +15832,15 @@ function App() {
           hint: settings.trashKey === key ? "current" : "",
           onClick: () => { patchSettings({ trashKey: key }); showToast("Trash folder set to " + label, "warm"); } },
         (() => {
-          const own = (settings.privateFolders || []).indexOf(key) >= 0;
+          // Matched in any case, like makePrivateTest: a renamed folder can still be opened again.
+          const isKey = (k) => String(k).toLowerCase() === key.toLowerCase();
+          const own = (settings.privateFolders || []).some(isKey);
           const inherited = !own && makePrivateTest(settings)(root.id, node.dir);
           return {
             label: own ? "Allow the AI here again" : inherited ? "Private from the AI (a folder above is)" : "Keep private from the AI",
             icon: "\u{1F512}", color: own ? "green" : "warm", disabled: inherited,
             onClick: () => {
-              const list = (settings.privateFolders || []).filter((k) => k !== key);
+              const list = (settings.privateFolders || []).filter((k) => !isKey(k));
               if (!own) list.push(key);
               patchSettings({ privateFolders: list });
               showToast(own ? label + " is open to the AI again" : label + " is private: nothing in it is sent to a model", own ? "green" : "warm");
