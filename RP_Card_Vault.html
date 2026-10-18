@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.7";
+const APP_VERSION = "1.5.8";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1938,6 +1938,18 @@ async function byteSignature(file) {
   return sha256Hex(all);
 }
 
+/**
+ * True when two byte arrays are exactly the same. byteSignature samples only
+ * the head and tail of a big file, so two versions of a large card can share
+ * one; anything that drops or skips a file because it "matches" another
+ * checks this first.
+ */
+function sameBytes(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 async function makeThumb(file, targetW) {
   try {
     if (typeof createImageBitmap !== "function") return null;
@@ -2242,7 +2254,7 @@ const EMPTY_IGNORE = { exact: [], content: [], versions: [] };
    same card later either.
    ──────────────────────────────────────────────────────────────────── */
 
-const AUTO_NODUPE_NAMES = /^(_vault backups|_vault edits|_ingested|trash cards|trash|recycle|_recycle)$/i;
+const AUTO_NODUPE_NAMES = /^(_vault trash|_vault backups|_vault edits|_ingested|trash cards|trash|recycle|_recycle)$/i;
 
 /** Build the context once, then reuse it per record. */
 function makeDupeExcluder(settings, dupeMode) {
@@ -2679,6 +2691,24 @@ function defaultKeeper(items, roots) {
 }
 
 /**
+ * Which of `others` really are byte-for-byte copies of `keeper`. Exact
+ * duplicate groups are found by byteSignature, which samples big files, so a
+ * different version of a large card can sit in one; it goes in `differ` and
+ * is left alone, as is a copy that can't be read. Throws when the keeper
+ * itself can't be read: then nothing in the group may go.
+ */
+async function verifiedExactCopies(keeper, others, readBytes) {
+  const keep = await readBytes(keeper);
+  const same = [], differ = [];
+  for (const r of others) {
+    let bytes = null;
+    try { bytes = await readBytes(r); } catch (e) { /* unreadable: not proven the same */ }
+    (bytes && sameBytes(keep, bytes) ? same : differ).push(r);
+  }
+  return { same, differ };
+}
+
+/**
  * Move one card to another folder (optionally in another root).
  *
  * The only operation in the vault that removes a file from where you put it,
@@ -2826,7 +2856,9 @@ async function copyIntoRoot(destRoot, subfolder, filename, blob, sig) {
       const ef = await existing.getFile();
       if (ef.size === blob.size) {
         const esig = await byteSignature(ef);
-        if (esig === sig) return { skipped: true, name: finalName, reason: "identical file already there", fh: existing };
+        if (esig === sig && sameBytes(new Uint8Array(await ef.arrayBuffer()), new Uint8Array(await blob.arrayBuffer()))) {
+          return { skipped: true, name: finalName, reason: "identical file already there", fh: existing };
+        }
       }
     } catch (e) { /* fall through to rename */ }
     const b = baseName(filename), x = extOf(filename);
@@ -15147,28 +15179,42 @@ function App() {
   /** Clean up duplicate groups: keep one card per group, trash or delete the rest. */
   const resolveDupeGroups = useCallback(async (groups, mode, keepers) => {
     const victims = [];
+    let notSame = 0;
     for (const g of groups) {
       const keepId = (keepers && keepers[g.kind + g.key]) || (defaultKeeper(g.items, roots) || {}).id;
-      for (const it of g.items) {
-        if (it.id === keepId) continue;
+      let others = g.items.filter((it) => {
+        if (it.id === keepId) return false;
         const rt = roots.find((x) => x.id === it.rootId);
-        if (rt && isImportRoot(rt)) continue;   // can't touch read-only imports
-        victims.push(it.id);
+        return !(rt && isImportRoot(rt));   // can't touch read-only imports
+      });
+      // "Exact" groups share a sampled signature; only a copy whose bytes
+      // really match the keeper's is redundant.
+      if (g.kind === "exact" && others.length) {
+        const keeper = g.items.find((it) => it.id === keepId);
+        try {
+          const chk = await verifiedExactCopies(keeper, others, async (r) => (await readOriginalBytes(r, roots)).bytes);
+          notSame += chk.differ.length;
+          others = chk.same;
+        } catch (e) { notSame += others.length; others = []; }
       }
+      for (const it of others) victims.push(it.id);
       // Never let a group be emptied: if every copy but the keeper was skipped
       // there is nothing to do, and the keeper is excluded by construction.
     }
-    if (!victims.length) { showToast("Nothing to clean up — every copy is either the keeper or read-only", "warm"); return; }
+    const leftAlone = notSame ? fmtNum(notSame) + " file" + (notSame === 1 ? "" : "s") + " that looked identical but aren't (or couldn't be checked) were left alone" : "";
+    if (!victims.length) { showToast(leftAlone || "Nothing to clean up — every copy is either the keeper or read-only", "warm"); return; }
     const bytes = victims.reduce((a, id) => a + ((recById.get(id) || {}).size || 0), 0);
     if (mode === "delete") {
       if (!window.confirm(
         "Permanently delete " + victims.length + " redundant file" + (victims.length === 1 ? "" : "s") +
-        " (" + fmtBytes(bytes) + ")?\n\nOne copy of every card is kept. This cannot be undone."
+        " (" + fmtBytes(bytes) + ")?\n\nOne copy of every card is kept. This cannot be undone." +
+        (leftAlone ? "\n\n" + leftAlone + "." : "")
       )) return;
       await deleteCards(victims, { noConfirm: true });
     } else {
       await trashCards(victims, { noConfirm: false });
     }
+    if (leftAlone) showToast(leftAlone, "warm");
   }, [roots, recById, deleteCards, trashCards, showToast]);
 
   /* ---- drag and drop ---- */

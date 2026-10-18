@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.8
+
+- **Moving a big card onto one with the same name no longer loses it.** To tell whether a file is already where it's going, the vault compares the start and end of large files, not every byte. Two versions of a big card (say a JSON card with a large lorebook, where one entry's order changed) can match on that, so moving one into a folder holding the other skipped the copy as "already there" and then removed the card you moved. Now a file only counts as already there when every byte matches; otherwise the card lands beside it as "Name (2)". The same check guards Copy to, ingest and save backups.
+- **The duplicate finder's "Trash redundant" and "Delete redundant" only remove true copies.** Exact copies are found the same quick way, so a different version of a big card could be listed as an exact copy and removed. Before removing anything from an exact-copy group, the vault now checks every byte against the copy it keeps, and leaves any that differ (or that can't be read) where they are, saying how many. If the copy being kept can't be read, nothing in that group is touched.
+- **Cards in the vault's own trash folder no longer count as duplicates.** With no trash folder chosen in Settings, Move to trash puts cards in "_vault trash". The duplicate finder still counted those, so a card you'd trashed made the live one look like a duplicate, and ingest called a card you wanted back "already filed". That folder is now ignored like the other trash and backup folders.
+
 ## 1.5.7
 
 - **A folder you keep private from the AI stays private when a doubled-up registration is fixed.** When one linked folder sat inside another, the vault offered to fix it with "Fix it", which drops the inner registration and keeps the cards under the outer folder. Its settings were left behind on the dropped registration, so a private folder quietly became open to the AI, and its trash folder, folder labels and duplicate-check rules stopped applying. They now move to the same folder under the outer one, as they already did when you add the folder around a linked one.
