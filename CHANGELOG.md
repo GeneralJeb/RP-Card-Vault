@@ -8,6 +8,13 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.9
+
+- **Shift-click selects the cards you see between your two clicks.** The vault remembered where in the grid you last clicked, not which card, so after a re-sort, a search or a rescan, Shift-click started from whatever card had moved into that spot. That could select cards you never meant to, ready for the next Move, Trash or Delete. It now starts from the card you clicked. If that card is no longer shown, Shift-click picks just the card you click.
+- **Taking a merged tag off a selection takes off every spelling of it.** After merging "sci-fi" into "Science Fiction" in the Tag manager, removing "Science Fiction" with Tag… left the cards tagged "sci-fi", so the tag stayed in the list. Tag… now matches tags the way the tag list groups them, so it removes both. Adding a tag a card already has under a merged spelling no longer adds it a second time.
+- **A tag called "constructor" shows up as itself.** It was listed as "function Object() { [native code] }" and couldn't be filtered by. With "Normalize tag case and separators" off in Settings, tags such as "toString" were affected too.
+- **The Tag manager suggests merging "-y" words with their "-ies" plurals.** "Story" and "stories" (or "fantasy" and "fantasies") were never suggested as the same tag, though the code meant to. "Movie" and "movies" are still suggested as before.
+
 ## 1.5.8
 
 - **Moving a big card onto one with the same name no longer loses it.** To tell whether a file is already where it's going, the vault compares the start and end of large files, not every byte. Two versions of a big card (say a JSON card with a large lorebook, where one entry's order changed) can match on that, so moving one into a folder holding the other skipped the copy as "already there" and then removed the card you moved. Now a file only counts as already there when every byte matches; otherwise the card lands beside it as "Name (2)". The same check guards Copy to, ingest and save backups.

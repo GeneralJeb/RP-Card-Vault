@@ -24,6 +24,7 @@ const { mod: V } = loadPureRegion([
   "proposalAcceptPatch", "proposalFieldIsStale", "AI_PROPOSAL_KINDS", "AI_TIGHTEN_FIELDS",
   "aiBulkSummary", "effectiveField", "effectiveTags", "vaultTagsOf", "flagsOf", "flagDef", "addFlagEntries", "flagGroups", "isLoopbackAddress", "aiAddressWarning", "aiRoomChars", "aiFitWarning", "normalizeAiBase", "originOfUrl",
   "AI_PROMPT_RULES_DEFAULT", "aiAllActions", "aiTagExclusions", "aiTagVocabulary", "aiKnownTagsText", "buildTagIndex",
+  "resolveTags", "suggestTagMerges",
 ]);
 
 const RELAY = { available: true, needsUpgrade: false, build: V.EXPECTED_RELAY_BUILD, baseUrl: "http://127.0.0.1:11434/v1", model: "m", hasKey: false };
@@ -249,6 +250,24 @@ console.log("\ncritique and tags");
   t.ok(um(toCard).indexOf("Tags on cards") < um(toCard).indexOf("Vault-only tags you use"), "for card tags, the card tags come first");
   t.ok(toVault.hash !== toCard.hash, "so the two are different requests, cached separately");
   t.eq(V.aiKnownTagsText({ card: [], vault: [] }, "vault"), "(the vault has no tags yet)", "an empty vault says so");
+}
+
+console.log("\ntags group the way they read");
+{
+  // Tag keys are looked up in the alias map, a plain object: a tag spelled
+  // like one of Object's own properties must stay a tag.
+  t.eq(V.resolveTags(["constructor", "Mystery"], { aliases: {} }), ["constructor", "mystery"], "a tag called \"constructor\" is a tag, not Object");
+  t.eq(V.resolveTags(["toString", "hasOwnProperty"], { aliases: {} }, false), ["toString", "hasOwnProperty"], "nor are toString and the like, with normalising off");
+  t.eq(V.resolveTags(["constructor"], null), ["constructor"], "with no tag settings at all");
+  const idx = V.buildTagIndex([{ tags: ["constructor"], vaultTags: [] }], { aliases: {} }, true);
+  t.eq(idx.list.map((x) => x.key + "=" + x.label), ["constructor=constructor"], "and it's listed by its own name");
+  t.eq(V.resolveTags(["sci-fi"], { aliases: { "sci fi": "science fiction" } }), ["science fiction"], "a real alias still applies");
+
+  const pairs = (keys) => V.suggestTagMerges(keys.map((key, i) => ({ key, count: 10 - i })))
+    .map((g) => [g.canonical.key].concat(g.others.map((o) => o.key)).join("+"));
+  t.eq(pairs(["story", "stories", "fantasy", "fantasies"]), ["story+stories", "fantasy+fantasies"], "a -y word and its -ies plural are suggested as one tag");
+  t.eq(pairs(["movie", "movies", "elf", "elves"]), ["movie+movies"], "-ie words still pair with their plurals");
+  t.eq(pairs(["cat", "cats", "slow burn", "slowburn"]), ["cat+cats", "slow burn+slowburn"], "and plain plurals and run-together words, as before");
 }
 
 /* ── the cache ─────────────────────────────────────────────────────────── */
