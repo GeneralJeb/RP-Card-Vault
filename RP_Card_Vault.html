@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.6";
+const APP_VERSION = "1.5.9";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1741,9 +1741,10 @@ function resolveTags(rawTags, tagMeta, normalize) {
   for (const raw of rawTags || []) {
     let key = normalize === false ? String(raw).trim() : normTagName(raw);
     if (!key) continue;
-    // follow alias chain (guard against cycles)
+    // follow alias chain (guard against cycles). Own keys only: a tag called
+    // "constructor" isn't an alias for Object.
     let hops = 0;
-    while (aliases[key] && aliases[key] !== key && hops++ < 8) key = aliases[key];
+    while (Object.prototype.hasOwnProperty.call(aliases, key) && aliases[key] && aliases[key] !== key && hops++ < 8) key = aliases[key];
     if (!key || seen.has(key)) continue;
     seen.add(key);
     out.push(key);
@@ -1830,7 +1831,9 @@ function buildTagIndex(records, tagMeta, normalize) {
  */
 function suggestTagMerges(tagList) {
   const groups = new Map();
-  const skel = (k) => k.replace(/\s+/g, "").replace(/s$/, "").replace(/ies$/, "y");
+  // The s goes first, so "stories" and "story" meet at "story" ("ie" → "y"),
+  // and "movies" and "movie" still meet, at "movy".
+  const skel = (k) => k.replace(/\s+/g, "").replace(/s$/, "").replace(/ie$/, "y");
   for (const t of tagList) {
     const s = skel(t.key);
     if (!s) continue;
@@ -1936,6 +1939,18 @@ async function byteSignature(file) {
   const all = new Uint8Array(head.length + sizeBytes.length + tail.length);
   all.set(head, 0); all.set(sizeBytes, head.length); all.set(tail, head.length + sizeBytes.length);
   return sha256Hex(all);
+}
+
+/**
+ * True when two byte arrays are exactly the same. byteSignature samples only
+ * the head and tail of a big file, so two versions of a large card can share
+ * one; anything that drops or skips a file because it "matches" another
+ * checks this first.
+ */
+function sameBytes(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 async function makeThumb(file, targetW) {
@@ -2242,7 +2257,7 @@ const EMPTY_IGNORE = { exact: [], content: [], versions: [] };
    same card later either.
    ──────────────────────────────────────────────────────────────────── */
 
-const AUTO_NODUPE_NAMES = /^(_vault backups|_vault edits|_ingested|trash cards|trash|recycle|_recycle)$/i;
+const AUTO_NODUPE_NAMES = /^(_vault trash|_vault backups|_vault edits|_ingested|trash cards|trash|recycle|_recycle)$/i;
 
 /** Build the context once, then reuse it per record. */
 function makeDupeExcluder(settings, dupeMode) {
@@ -2281,11 +2296,18 @@ const TRASH_NAMES = /^(_vault trash|trash cards|trash|recycle|_recycle|_vault ba
    can't list, search, read or change them, and card actions refuse them.
    ──────────────────────────────────────────────────────────────────── */
 
-/** (rootId, dir) → true when that folder is, or is inside, a private one. */
+/**
+ * (rootId, dir) → true when that folder is, or is inside, a private one.
+ * Folder names match in any case, as Windows does: a folder renamed from
+ * "Secret" to "secret" is still the private one.
+ */
 function makePrivateTest(settings) {
-  const keys = ((settings && settings.privateFolders) || []).map(parseDirKey);
+  const keys = ((settings && settings.privateFolders) || []).map((k) => {
+    const p = parseDirKey(k);
+    return { rootId: p.rootId, dir: p.dir.toLowerCase() };
+  });
   return function isPrivate(rootId, dir) {
-    const d = String(dir || "");
+    const d = String(dir || "").toLowerCase();
     return keys.some((k) => k.rootId === rootId && (!k.dir || d === k.dir || d.indexOf(k.dir + "/") === 0));
   };
 }
@@ -2443,6 +2465,24 @@ function remapDirKeyed(obj, idMap) {
     if (m) out[m] = obj[k];
   }
   return out;
+}
+
+/**
+ * A registered folder dropped for the registered folder around it (`outerId`,
+ * where it sits at `path`): its private folders, trash, labels, duplicate
+ * rules and the like, carried under the outer folder. Its own role becomes
+ * the label of that subfolder.
+ */
+function absorbRegistration(roots, inner, outerId, path, settings, folderRoles, dupeMode) {
+  const idMap = importRootIdMap([], roots);
+  idMap[inner.id] = { id: outerId, prefix: path };
+  const roles = Object.assign({}, folderRoles, remapDirKeyed(folderRoles, idMap));
+  roles[dirKey(outerId, path)] = (folderRoles || {})[dirKey(inner.id, "")] || inner.role || "inbox";
+  return {
+    patch: remapRootSettings(settings, settings, idMap).patch,
+    folderRoles: roles,
+    dupeMode: Object.assign({}, dupeMode, remapDirKeyed(dupeMode, idMap)),
+  };
 }
 
 function parseDirKey(k) {
@@ -2654,6 +2694,24 @@ function defaultKeeper(items, roots) {
 }
 
 /**
+ * Which of `others` really are byte-for-byte copies of `keeper`. Exact
+ * duplicate groups are found by byteSignature, which samples big files, so a
+ * different version of a large card can sit in one; it goes in `differ` and
+ * is left alone, as is a copy that can't be read. Throws when the keeper
+ * itself can't be read: then nothing in the group may go.
+ */
+async function verifiedExactCopies(keeper, others, readBytes) {
+  const keep = await readBytes(keeper);
+  const same = [], differ = [];
+  for (const r of others) {
+    let bytes = null;
+    try { bytes = await readBytes(r); } catch (e) { /* unreadable: not proven the same */ }
+    (bytes && sameBytes(keep, bytes) ? same : differ).push(r);
+  }
+  return { same, differ };
+}
+
+/**
  * Move one card to another folder (optionally in another root).
  *
  * The only operation in the vault that removes a file from where you put it,
@@ -2801,7 +2859,9 @@ async function copyIntoRoot(destRoot, subfolder, filename, blob, sig) {
       const ef = await existing.getFile();
       if (ef.size === blob.size) {
         const esig = await byteSignature(ef);
-        if (esig === sig) return { skipped: true, name: finalName, reason: "identical file already there", fh: existing };
+        if (esig === sig && sameBytes(new Uint8Array(await ef.arrayBuffer()), new Uint8Array(await blob.arrayBuffer()))) {
+          return { skipped: true, name: finalName, reason: "identical file already there", fh: existing };
+        }
       }
     } catch (e) { /* fall through to rename */ }
     const b = baseName(filename), x = extOf(filename);
@@ -13900,7 +13960,7 @@ function App() {
   const [deepBusy, setDeepBusy] = useState(false);
   const [gridEl, setGridEl] = useState(null);   // a callback ref: the grid hook measures it once it appears
   const stopRef = useRef({ stop: false });
-  const lastClickIdx = useRef(-1);
+  const lastClickId = useRef(null);   // the card a Shift-click range starts from
   const sidNextRef = useRef(1);    // the next short card id's number
   const sidHintsRef = useRef({});  // new record id → short id, left by the vault's own moves
 
@@ -14325,8 +14385,11 @@ function App() {
   }, []);
 
   const bulkTag = useCallback((ids, add, remove) => {
-    const addKeys = add.map(normTagName);
-    const remKeys = new Set(remove.map(normTagName));
+    // Tags match the way the sidebar and the tag filter group them, merges
+    // included: removing "Science Fiction" removes the "sci-fi" merged into it.
+    const keyOf = (t) => resolveTags([t], tagMeta, settings.normalizeTags)[0] || String(t).trim();
+    const addKeys = add.map(keyOf);
+    const remKeys = new Set(remove.map(keyOf));
     setEditsMap((prev) => {
       const next = new Map(prev);
       const writes = [];
@@ -14336,9 +14399,9 @@ function App() {
         const cur = next.get(rec.fp) || emptyEdit(rec.fp);
         const fileTags = rec.fileTags || [];
         const base = Array.isArray(cur.tags) ? cur.tags : fileTags;
-        let tags = base.filter((t) => !remKeys.has(normTagName(t)));
+        let tags = base.filter((t) => !remKeys.has(keyOf(t)));
         for (let i = 0; i < add.length; i++) {
-          if (!tags.some((t) => normTagName(t) === addKeys[i])) tags = tags.concat([add[i]]);
+          if (!tags.some((t) => keyOf(t) === addKeys[i])) tags = tags.concat([add[i]]);
         }
         const sameList = (x, y) => x.length === y.length && x.every((t, k) => t === y[k]);
         // A card this doesn't change stays as it was, not marked edited.
@@ -14351,7 +14414,7 @@ function App() {
       return next;
     });
     showToast("Tagged " + fmtNum(ids.length) + " cards", "purple");
-  }, [recById, showToast]);
+  }, [recById, showToast, tagMeta, settings.normalizeTags]);
 
   /** Add or replace a flag on a set of cards. Passing note=null removes it. */
   /*
@@ -14662,13 +14725,10 @@ function App() {
       )) return;
       // Its private folders, labels, trash and the like now live under the
       // outer folder: carry them over before its registration goes.
-      const idMap = importRootIdMap([], roots);
-      idMap[nest.root.id] = { id: root.id, prefix: nest.path };
-      patchSettings(remapRootSettings(settings, settings, idMap).patch);
-      const roles = Object.assign({}, folderRoles, remapDirKeyed(folderRoles, idMap));
-      setFolderRoles(roles); saveFolderRoles(roles);
-      const dm = Object.assign({}, dupeMode, remapDirKeyed(dupeMode, idMap));
-      setDupeMode(dm); saveDupeMode(dm);
+      const moved = absorbRegistration(roots, nest.root, root.id, nest.path, settings, folderRoles, dupeMode);
+      patchSettings(moved.patch);
+      setFolderRoles(moved.folderRoles); saveFolderRoles(moved.folderRoles);
+      setDupeMode(moved.dupeMode); saveDupeMode(moved.dupeMode);
       await dbDel(STORE_ROOTS, nest.root.id);
       await dbDelCardsOfRoot(nest.root.id);
       setRoots((prev) => prev.filter((r) => r.id !== nest.root.id));
@@ -14722,8 +14782,12 @@ function App() {
   );
 
   const repairNesting = useCallback(async (pair) => {
-    const role = pair.inner.role || "inbox";
-    setFolderRole(dirKey(pair.outer.id, pair.path), role);
+    // Its private folders, labels, trash and the like move under the outer folder.
+    const moved = absorbRegistration(roots, pair.inner, pair.outer.id, pair.path, settings, folderRoles, dupeMode);
+    const role = moved.folderRoles[dirKey(pair.outer.id, pair.path)];
+    patchSettings(moved.patch);
+    setFolderRoles(moved.folderRoles); saveFolderRoles(moved.folderRoles);
+    setDupeMode(moved.dupeMode); saveDupeMode(moved.dupeMode);
     await dbDel(STORE_ROOTS, pair.inner.id);
     await dbDelCardsOfRoot(pair.inner.id);
     setRoots((prev) => prev.filter((r) => r.id !== pair.inner.id));
@@ -14734,7 +14798,7 @@ function App() {
       " is now labelled " + (ROOT_ROLES[role] || ROOT_ROLES.reference).label,
       "green"
     );
-  }, [cards, setFolderRole, showToast]);
+  }, [roots, settings, folderRoles, dupeMode, patchSettings, showToast]);
 
   const forgetRoot = useCallback(async (id) => {
     const root = roots.find((r) => r.id === id);
@@ -14893,11 +14957,14 @@ function App() {
   const onTileClick = useCallback((rec, idx, e) => {
     if (e.metaKey || e.ctrlKey) {
       setSelection((prev) => { const n = new Set(prev); if (n.has(rec.id)) n.delete(rec.id); else n.add(rec.id); return n; });
-      lastClickIdx.current = idx;
+      lastClickId.current = rec.id;
       return;
     }
-    if (e.shiftKey && lastClickIdx.current >= 0) {
-      const a = Math.min(lastClickIdx.current, idx), b = Math.max(lastClickIdx.current, idx);
+    // Found again by id: after a re-sort, a search or a rescan, its old place
+    // in the grid holds another card.
+    const from = e.shiftKey && lastClickId.current ? filtered.findIndex((r) => r.id === lastClickId.current) : -1;
+    if (from >= 0) {
+      const a = Math.min(from, idx), b = Math.max(from, idx);
       setSelection((prev) => {
         const n = new Set(prev);
         for (let i = a; i <= b; i++) if (filtered[i]) n.add(filtered[i].id);
@@ -14905,7 +14972,7 @@ function App() {
       });
       return;
     }
-    lastClickIdx.current = idx;
+    lastClickId.current = rec.id;
     setSelection(new Set([rec.id]));
     setFocusId(rec.id);
   }, [filtered]);
@@ -15121,28 +15188,42 @@ function App() {
   /** Clean up duplicate groups: keep one card per group, trash or delete the rest. */
   const resolveDupeGroups = useCallback(async (groups, mode, keepers) => {
     const victims = [];
+    let notSame = 0;
     for (const g of groups) {
       const keepId = (keepers && keepers[g.kind + g.key]) || (defaultKeeper(g.items, roots) || {}).id;
-      for (const it of g.items) {
-        if (it.id === keepId) continue;
+      let others = g.items.filter((it) => {
+        if (it.id === keepId) return false;
         const rt = roots.find((x) => x.id === it.rootId);
-        if (rt && isImportRoot(rt)) continue;   // can't touch read-only imports
-        victims.push(it.id);
+        return !(rt && isImportRoot(rt));   // can't touch read-only imports
+      });
+      // "Exact" groups share a sampled signature; only a copy whose bytes
+      // really match the keeper's is redundant.
+      if (g.kind === "exact" && others.length) {
+        const keeper = g.items.find((it) => it.id === keepId);
+        try {
+          const chk = await verifiedExactCopies(keeper, others, async (r) => (await readOriginalBytes(r, roots)).bytes);
+          notSame += chk.differ.length;
+          others = chk.same;
+        } catch (e) { notSame += others.length; others = []; }
       }
+      for (const it of others) victims.push(it.id);
       // Never let a group be emptied: if every copy but the keeper was skipped
       // there is nothing to do, and the keeper is excluded by construction.
     }
-    if (!victims.length) { showToast("Nothing to clean up — every copy is either the keeper or read-only", "warm"); return; }
+    const leftAlone = notSame ? fmtNum(notSame) + " file" + (notSame === 1 ? "" : "s") + " that looked identical but aren't (or couldn't be checked) were left alone" : "";
+    if (!victims.length) { showToast(leftAlone || "Nothing to clean up — every copy is either the keeper or read-only", "warm"); return; }
     const bytes = victims.reduce((a, id) => a + ((recById.get(id) || {}).size || 0), 0);
     if (mode === "delete") {
       if (!window.confirm(
         "Permanently delete " + victims.length + " redundant file" + (victims.length === 1 ? "" : "s") +
-        " (" + fmtBytes(bytes) + ")?\n\nOne copy of every card is kept. This cannot be undone."
+        " (" + fmtBytes(bytes) + ")?\n\nOne copy of every card is kept. This cannot be undone." +
+        (leftAlone ? "\n\n" + leftAlone + "." : "")
       )) return;
       await deleteCards(victims, { noConfirm: true });
     } else {
       await trashCards(victims, { noConfirm: false });
     }
+    if (leftAlone) showToast(leftAlone, "warm");
   }, [roots, recById, deleteCards, trashCards, showToast]);
 
   /* ---- drag and drop ---- */
@@ -15806,13 +15887,15 @@ function App() {
           hint: settings.trashKey === key ? "current" : "",
           onClick: () => { patchSettings({ trashKey: key }); showToast("Trash folder set to " + label, "warm"); } },
         (() => {
-          const own = (settings.privateFolders || []).indexOf(key) >= 0;
+          // Matched in any case, like makePrivateTest: a renamed folder can still be opened again.
+          const isKey = (k) => String(k).toLowerCase() === key.toLowerCase();
+          const own = (settings.privateFolders || []).some(isKey);
           const inherited = !own && makePrivateTest(settings)(root.id, node.dir);
           return {
             label: own ? "Allow the AI here again" : inherited ? "Private from the AI (a folder above is)" : "Keep private from the AI",
             icon: "\u{1F512}", color: own ? "green" : "warm", disabled: inherited,
             onClick: () => {
-              const list = (settings.privateFolders || []).filter((k) => k !== key);
+              const list = (settings.privateFolders || []).filter((k) => !isKey(k));
               if (!own) list.push(key);
               patchSettings({ privateFolders: list });
               showToast(own ? label + " is open to the AI again" : label + " is private: nothing in it is sent to a model", own ? "green" : "warm");

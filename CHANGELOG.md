@@ -8,6 +8,25 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.9
+
+- **Shift-click selects the cards you see between your two clicks.** The vault remembered where in the grid you last clicked, not which card, so after a re-sort, a search or a rescan, Shift-click started from whatever card had moved into that spot. That could select cards you never meant to, ready for the next Move, Trash or Delete. It now starts from the card you clicked. If that card is no longer shown, Shift-click picks just the card you click.
+- **Taking a merged tag off a selection takes off every spelling of it.** After merging "sci-fi" into "Science Fiction" in the Tag manager, removing "Science Fiction" with Tag… left the cards tagged "sci-fi", so the tag stayed in the list. Tag… now matches tags the way the tag list groups them, so it removes both. Adding a tag a card already has under a merged spelling no longer adds it a second time.
+- **A tag called "constructor" shows up as itself.** It was listed as "function Object() { [native code] }" and couldn't be filtered by. With "Normalize tag case and separators" off in Settings, tags such as "toString" were affected too.
+- **The Tag manager suggests merging "-y" words with their "-ies" plurals.** "Story" and "stories" (or "fantasy" and "fantasies") were never suggested as the same tag, though the code meant to. "Movie" and "movies" are still suggested as before.
+
+## 1.5.8
+
+- **Moving a big card onto one with the same name no longer loses it.** To tell whether a file is already where it's going, the vault compares the start and end of large files, not every byte. Two versions of a big card (say a JSON card with a large lorebook, where one entry's order changed) can match on that, so moving one into a folder holding the other skipped the copy as "already there" and then removed the card you moved. Now a file only counts as already there when every byte matches; otherwise the card lands beside it as "Name (2)". The same check guards Copy to, ingest and save backups.
+- **The duplicate finder's "Trash redundant" and "Delete redundant" only remove true copies.** Exact copies are found the same quick way, so a different version of a big card could be listed as an exact copy and removed. Before removing anything from an exact-copy group, the vault now checks every byte against the copy it keeps, and leaves any that differ (or that can't be read) where they are, saying how many. If the copy being kept can't be read, nothing in that group is touched.
+- **Cards in the vault's own trash folder no longer count as duplicates.** With no trash folder chosen in Settings, Move to trash puts cards in "_vault trash". The duplicate finder still counted those, so a card you'd trashed made the live one look like a duplicate, and ingest called a card you wanted back "already filed". That folder is now ignored like the other trash and backup folders.
+
+## 1.5.7
+
+- **A folder you keep private from the AI stays private when a doubled-up registration is fixed.** When one linked folder sat inside another, the vault offered to fix it with "Fix it", which drops the inner registration and keeps the cards under the outer folder. Its settings were left behind on the dropped registration, so a private folder quietly became open to the AI, and its trash folder, folder labels and duplicate-check rules stopped applying. They now move to the same folder under the outer one, as they already did when you add the folder around a linked one.
+- **A linked folder's role is kept when the folder around it is added.** Adding a folder that contains one you'd already linked dropped the inner folder's role (Inbox, Archive and so on); it's now kept as that subfolder's label, as "Fix it" does.
+- **Renaming a private folder only in capitals keeps it private.** Windows treats "Secret" and "secret" as the same folder, but after such a rename the vault no longer saw it as private, and its cards could reach the AI. Private folders now match whatever the capitals.
+
 ## 1.5.6
 
 - **Stopping a rescan no longer drops cards from the vault.** Pressing Stop part-way through a rescan took every card the scan hadn't reached yet as deleted: they vanished from the grid, lost their thumbnails and cached text, and came back with new short ids on the next scan. A stopped scan now leaves those cards as they were. The same goes for folders added with the read-only folder picker.

@@ -14,7 +14,7 @@ const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
-  "moveCardTo", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed",
+  "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -258,6 +258,61 @@ async function main() {
       "saving one card never removes the backups of another with the same file name");
   }
 
+  console.log("\na big card that only looks like the one already there is never lost");
+  {
+    // Two versions of a big-lorebook JSON card, the same size, differing by one
+    // entry's order in the middle of the file: byteSignature samples only the
+    // head and tail, so it can't tell them apart.
+    const big = (order) => {
+      const v3 = V.newCardPayload({ name: "Bram" });
+      v3.data.character_book = { entries: [] };
+      for (let i = 0; i < 1200; i++) v3.data.character_book.entries.push({ id: i, keys: ["k" + i], content: "Lore entry " + i + " ".repeat(300), insertion_order: i === 850 ? order : 100, enabled: true });
+      return new TextEncoder().encode(JSON.stringify(v3));
+    };
+    const A = big(100), B = big(250);
+    const sig = (b) => V.byteSignature(new File([b], "x"));
+    t.ok(A.length === B.length && (await sig(A)) === (await sig(B)) && !V.sameBytes(A, B),
+      "the two versions share a sampled signature, though their bytes differ");
+
+    const fsys = memFs("Cards");
+    const root = { id: "r", name: "Cards", role: "library", handle: fsys.handle };
+    fsys.put("Inbox/Bram.json", A);
+    fsys.put("Library/Bram.json", B);
+    const rec = { id: "r:Inbox/Bram.json", rootId: "r", rel: "Inbox/Bram.json", dir: "Inbox", file: "Bram.json", ext: "json", name: "Bram" };
+    const res = await V.moveCardTo(rec, root, root, "Library");
+    const lib = fsys.list("Library").map((n) => fsys.get("Library/" + n));
+    t.ok(lib.some((b) => V.sameBytes(b, A)) && lib.some((b) => V.sameBytes(b, B)),
+      "moving one onto the other's name keeps both versions (it landed as " + res.name + ")", fsys.list("Library"));
+
+    const same = memFs("Copy");
+    same.put("Lib/Bram.json", A);
+    const out = await V.copyIntoRoot({ id: "c", name: "Copy", handle: same.handle }, ["Lib"], "Bram.json", new Blob([A]), await sig(A));
+    t.ok(out.skipped && same.list("Lib").length === 1, "a truly identical file is still recognised, and not copied twice");
+
+    // The duplicate finder's clean-up only removes copies proven to be the keeper's bytes.
+    const files = { keep: A, twin: A.slice(), other: B };
+    const read = async (r) => { if (!files[r.id]) throw new Error("gone"); return files[r.id]; };
+    const chk = await V.verifiedExactCopies({ id: "keep" }, [{ id: "twin" }, { id: "other" }, { id: "missing" }], read);
+    t.eq([chk.same.map((r) => r.id), chk.differ.map((r) => r.id)], [["twin"], ["other", "missing"]],
+      "an exact-group clean-up only takes the real copy; the different version and an unreadable file stay");
+    let threw = false;
+    try { await V.verifiedExactCopies({ id: "missing" }, [{ id: "twin" }], read); } catch (e) { threw = true; }
+    t.ok(threw, "and when the copy being kept can't be read, nothing in the group is taken");
+  }
+
+  console.log("\na card in the vault's own trash folder isn't a duplicate");
+  {
+    // With no trash folder chosen, "Move to trash" makes "_vault trash".
+    const ex = V.makeDupeExcluder({ trashKey: "" }, {});
+    const live = { id: "r:Ada.png", rootId: "r", dir: "", rel: "Ada.png", sig: "s", ok: true, fp: "f", lfp: "l", hasName: true, size: 9, name: "Ada" };
+    const trashed = Object.assign({}, live, { id: "r:_vault trash/Ada.png", dir: "_vault trash", rel: "_vault trash/Ada.png" });
+    t.ok(ex(trashed) && ex(Object.assign({}, trashed, { dir: "_Vault Trash/old" })), "it's ignored by the duplicate finder, in any case and below it");
+    const d = V.detectDupes([live, trashed], null, ex);
+    t.ok(!d.exact.length && d.excludedCount === 1, "so a trashed copy doesn't make the live card a duplicate");
+    const plan = V.planIngest([Object.assign({}, live, { id: "i:Ada.png", rootId: "i" })], [trashed], { ingestSkipDupes: true }, {}, ex);
+    t.ok(plan[0].status === "new" && plan[0].action === "copy", "and a card you trashed can be added again", plan[0].status);
+  }
+
   console.log("\na .charx can't unpack past the limit, whatever its header says");
   {
     global.JSZip = require("../lib/jszip.min.js");
@@ -293,6 +348,16 @@ async function main() {
     t.eq(V.remapRootSettings({ privateFolders: ["r1::Secret"] }, { privateFolders: ["r1::Secret"] }, inner).patch.privateFolders,
       ["r1::Secret", "outer::Library/Secret"], "a private folder inside a replaced registration stays private under the outer folder");
     t.eq(V.remapDirKeyed({ "r1::A": "inbox", "zz::B": "archive" }, inner), { "outer::Library/A": "inbox" }, "folder labels move with it");
+    // The same when a registration sitting inside another is dropped ("Fix it", or adding the folder around it).
+    const roots = [{ id: "outer", name: "Parent", role: "library" }, { id: "big", name: "Big", role: "archive" }, { id: "other", name: "Inbox" }];
+    const moved = V.absorbRegistration(roots, roots[1], "outer", "Big",
+      { privateFolders: ["big::", "other::Mine"], trashKey: "big::Old", ingestSourceKeys: ["other::"] }, { "big::Sub": "inbox" }, { "big::Sub": "exclude" });
+    t.eq(moved.patch.privateFolders.slice().sort(), ["big::", "other::Mine", "outer::Big"], "a private registration stays private under the folder around it");
+    t.eq([moved.patch.trashKey, moved.patch.ingestSourceKeys], ["outer::Big/Old", ["other::"]], "its trash follows, and other folders' settings are left as they are");
+    t.eq([moved.folderRoles["outer::Big"], moved.folderRoles["outer::Big/Sub"], moved.dupeMode["outer::Big/Sub"]], ["archive", "inbox", "exclude"],
+      "its role becomes the subfolder's label, and its labels and duplicate rules move with it");
+    t.eq(V.absorbRegistration(roots, roots[1], "outer", "Big", {}, { "big::": "inbox" }, {}).folderRoles["outer::Big"], "inbox",
+      "a label on the registration's own top folder wins over its role");
   }
 
   console.log("\nlorebook edits in the vault");

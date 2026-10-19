@@ -1654,6 +1654,7 @@ async function privateTests() {
     t.ok(isPrivate("lib", "Personal") && isPrivate("lib", "Personal/Drafts") && isPrivate("other", "") && isPrivate("other", "Any/where"),
       "a private folder covers everything below it, and a whole root can be private");
     t.ok(!isPrivate("lib", "") && !isPrivate("lib", "Personalities") && !isPrivate("lib2", "Personal"), "and nothing else");
+    t.ok(isPrivate("lib", "personal") && isPrivate("lib", "PERSONAL/drafts"), "a private folder renamed only in case (Windows sees one folder) stays private");
 
     const recs = RECORDS.map((r) => Object.assign({}, r, r.id === "c2" ? { aiPrivate: true } : {}));
     const k = ctxFor();

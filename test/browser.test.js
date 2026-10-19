@@ -250,6 +250,48 @@ async function main() {
       await page.getByPlaceholder("filter tags…").fill("");
     });
 
+    await step("Shift-click selects the cards between, in the order shown now", async () => {
+      const sort = page.locator("select").filter({ has: page.locator("option[value='nameDesc']") }).first();
+      const was = await sort.inputValue();
+      await sort.selectOption("name");
+      await tile("Ada Clockmaker").click();
+      await page.keyboard.press("Escape");
+      // Z–A puts Cora first. The range starts at Ada wherever Ada is now, not
+      // at the place Ada had before the re-sort (Cora's place now).
+      await sort.selectOption("nameDesc");
+      await tile("Bram Lighthouse").click({ modifiers: ["Shift"] });
+      await page.getByText(/\b\d+ selected\b/).first().waitFor();
+      const n = Number(((await page.locator("body").innerText()).match(/(\d+) selected/) || [])[1]);
+      t.eq(n, 2, "Ada to Bram is 2 cards, Cora isn't one of them");
+      await page.getByRole("button", { name: "clear", exact: true }).click();
+      await sort.selectOption(was);
+    });
+
+    await step("taking a merged tag off a selection takes off every spelling of it", async () => {
+      const managerRow = (k) => page.locator(".tagRow", { has: page.getByRole("button", { name: "pin" }) }).filter({ hasText: k }).first();
+      await page.getByRole("button", { name: "Tags", exact: true }).click();
+      await managerRow("sea").getByRole("button", { name: "merge…" }).click();
+      await managerRow("victorian").getByRole("button", { name: "← merge here" }).click();
+      await page.getByText("sea → victorian").waitFor();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await tile("Ada Clockmaker").click();
+      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await page.getByText("2 selected").waitFor();
+      await page.getByRole("button", { name: "Tag…", exact: true }).click();
+      const remove = page.getByPlaceholder("add tag, Enter to commit").nth(1);
+      await remove.fill("Victorian");
+      await remove.press("Enter");
+      await page.getByRole("button", { name: /^Apply to 2/ }).click();
+      await toast(/Tagged 2 cards/);
+      const listed = (await page.locator("body").innerText()).split("\n").filter((l) => /^(victorian|sea)$/i.test(l.trim()));
+      t.eq(listed, [], "neither Ada's \"victorian\" nor Bram's \"sea\" (merged into it) is left in the tag list");
+      // Put the tag settings back for the steps after this one.
+      await page.getByRole("button", { name: "Tags", exact: true }).click();
+      await page.getByText("sea → victorian").locator("span").click();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.getByRole("button", { name: "clear", exact: true }).click();
+    });
+
     await step("moving to trash hides the card, and Show trash brings it back", async () => {
       await tile("Cora Gardener").click({ button: "right" });
       await page.getByText("Move to trash", { exact: true }).click();
@@ -466,6 +508,34 @@ async function main() {
       await page.getByText(/Cleaned up 2 leftover index entries/).first().waitFor();
       t.ok(true, "the vault says it cleaned them up");
       t.eq(await orphanCount(), 0, "and they're gone from the index");
+    });
+
+    if (!reloadCrashes) await step("fixing a folder registered inside another keeps it private from the AI", async () => {
+      // A registration of Parent/Big left from before, private and labelled.
+      const outerId = (await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const big = await (await (await navigator.storage.getDirectory()).getDirectoryHandle("Parent")).getDirectoryHandle("Big");
+        const settings = await new Promise((res) => { const q = db.transaction("kv").objectStore("kv").get("settings"); q.onsuccess = () => res(q.result); });
+        await new Promise((res) => {
+          const tx = db.transaction(["roots", "kv"], "readwrite");
+          tx.objectStore("roots").put({ id: "oldbig", name: "Big", role: "archive", handle: big, addedAt: Date.now(), lastScan: 0 });
+          tx.objectStore("kv").put(Object.assign({}, settings, { privateFolders: ["oldbig::"] }), "settings");
+          tx.oncomplete = res;
+        });
+      }), (await cardRecords()).find((c) => /^Extra \d+\.png$/.test(c.file)).rootId);
+      await page.reload();
+      await page.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
+      await page.getByText(/sits inside/).first().waitFor();
+      await page.getByRole("button", { name: "Fix it" }).click();
+      await toast(/Dropped the duplicate registration/);
+      const kv = await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const get = (k) => new Promise((res) => { const q = db.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); });
+        return { priv: (await get("settings")).privateFolders, roles: await get("folderRoles") };
+      });
+      t.ok(kv.priv.indexOf(outerId + "::Big") >= 0, "Parent/Big is still private from the AI", kv.priv);
+      t.eq(kv.roles[outerId + "::Big"], "archive", "and keeps its role as a label");
+      t.ok(!(await rootKeys()).includes("oldbig"), "the inner registration is gone");
     });
 
     await step("a theme is applied, and is there from the first moment after a reload", async () => {
