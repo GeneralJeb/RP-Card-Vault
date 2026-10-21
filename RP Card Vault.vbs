@@ -117,10 +117,57 @@ If Not ServerUp() Then
   End If
 End If
 
-' ---- open it, preferring a Chromium browser -------------------------------
+' ---- open it: your default browser when it can run the vault -------------
+' The vault needs a Chromium browser (it reads your folders through the File
+' System Access API), so the default browser is used when it's Chrome, Edge,
+' Brave or Vivaldi. Brave ships with that API switched off; the vault explains
+' how to turn it on.
+
+' The program in a command line such as
+'   "C:\...\brave.exe" --single-argument %1
+Function ExeFromCommand(cmd)
+  Dim c, q
+  ExeFromCommand = ""
+  c = Trim(cmd)
+  If Left(c, 1) = """" Then
+    q = InStr(2, c, """")
+    If q > 2 Then ExeFromCommand = Mid(c, 2, q - 2)
+  Else
+    q = InStr(LCase(c), ".exe")
+    If q > 0 Then ExeFromCommand = Left(c, q + 3)
+  End If
+End Function
+
+Function IsChromium(exe)
+  Dim n
+  n = LCase(fso.GetFileName(exe))
+  IsChromium = (n = "chrome.exe" Or n = "msedge.exe" Or n = "brave.exe" Or n = "vivaldi.exe")
+End Function
+
+' The default browser's program, if it's one of those; "" otherwise.
+Function DefaultChromium()
+  Dim progId, cmd, exe
+  DefaultChromium = ""
+  On Error Resume Next
+  progId = sh.RegRead("HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice\ProgId")
+  If Err.Number = 0 And progId <> "" Then
+    cmd = sh.RegRead("HKCR\" & progId & "\shell\open\command\")
+    If Err.Number = 0 Then
+      exe = ExeFromCommand(cmd)
+      If exe <> "" Then
+        If fso.FileExists(exe) Then
+          If IsChromium(exe) Then DefaultChromium = exe
+        End If
+      End If
+    End If
+  End If
+  Err.Clear
+  On Error GoTo 0
+End Function
+
 Dim candidates, i, exe, found
-' Chrome and Edge first: Brave removes the File System Access API the vault
-' needs to read your folders, so it is only the choice when nothing else is here.
+' When the default browser can't run the vault (Firefox, say): Chrome and Edge
+' first, as Brave has the API off until you turn it on.
 candidates = Array( _
   sh.ExpandEnvironmentStrings("%ProgramFiles%\Google\Chrome\Application\chrome.exe"), _
   sh.ExpandEnvironmentStrings("%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"), _
@@ -131,7 +178,7 @@ candidates = Array( _
   sh.ExpandEnvironmentStrings("%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe"), _
   sh.ExpandEnvironmentStrings("%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe") )
 
-found = ""
+found = DefaultChromium()
 For i = 0 To UBound(candidates)
   exe = candidates(i)
   If found = "" And fso.FileExists(exe) Then found = exe

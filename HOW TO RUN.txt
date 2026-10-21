@@ -19,6 +19,11 @@ START IT
   Open in Browser Tab.vbs     As above, but an ordinary browser tab rather than
                               a standalone app window.
 
+                              Both open in your default browser when it's
+                              Chrome, Edge, Brave or Vivaldi (the vault needs
+                              one of those). Otherwise they use Chrome, then
+                              Edge, then Brave, whichever is installed.
+
   Stop RP Card Vault.bat      Shuts the server down. Start doesn't need it (a
                               new server takes over from a running one), so
                               use it to turn the vault off, or when an old
@@ -29,6 +34,11 @@ START IT
 
 Then leave it running and use the browser window it opens. Ctrl+C in the
 console window (or closing it) stops that server.
+
+Closing the vault's window or tab does NOT stop the server: it keeps running
+in the background (it uses very little), so the vault opens straight away next
+time. To turn it off, run "Stop RP Card Vault.bat". Restarting Windows stops
+it too.
 
 No Node on this computer (a USB drive, say)? Put a portable Node with the
 vault: download the Windows "zip" build from https://nodejs.org and unpack

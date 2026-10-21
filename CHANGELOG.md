@@ -8,6 +8,13 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.4
+
+- **The shortcuts open your default browser.** RP Card Vault.vbs, which the desktop and Start Menu shortcuts run, always looked for Chrome first, then Edge, then Brave, whatever your default browser was. It now asks Windows for your default browser and uses it whenever it's one the vault runs in: Chrome, Edge, Brave or Vivaldi. Only when it isn't (Firefox, say) does it fall back to that list. Brave ships with the File System Access API the vault needs switched off; the vault explains how to turn it on.
+- **HOW TO RUN says that closing the vault doesn't stop its server.** It keeps running in the background, so the vault opens straight away next time; Stop RP Card Vault.bat turns it off.
+
+**Updating:** this release changes RP Card Vault.vbs and HOW TO RUN.txt as well as the usual files. Your shortcuts don't need making again.
+
 ## 1.6.3
 
 - **Reference folders are never written to, as they say.** Creating, copying and moving cards into a Reference folder was already refused, but Save to card, Delete, Move to trash and moving cards out of one weren't. Now nothing changes a card file in a Reference folder, or puts one there, whichever part of the vault asks (the agent included). That goes for a folder you've labelled Reference inside another folder too. The inspector's Save to card button is off for those cards and says why. To change cards there, give the folder another role (right-click it in the folder tree).
