@@ -23,7 +23,7 @@ const { mod: V } = loadPureRegion([
   "emptyProposal", "proposalOf", "proposalCount", "mergeProposal", "proposalWithout",
   "proposalAcceptPatch", "proposalFieldIsStale", "AI_PROPOSAL_KINDS", "AI_TIGHTEN_FIELDS",
   "aiBulkSummary", "effectiveField", "effectiveTags", "vaultTagsOf", "flagsOf", "flagDef", "addFlagEntries", "flagGroups", "isLoopbackAddress", "aiAddressWarning", "aiRoomChars", "aiFitWarning", "normalizeAiBase", "originOfUrl",
-  "AI_PROMPT_RULES_DEFAULT", "aiAllActions", "aiTagExclusions", "aiTagVocabulary", "aiKnownTagsText", "buildTagIndex",
+  "AI_PROMPT_RULES_DEFAULT", "aiAllActions", "aiTagExclusions", "aiTagVocabulary", "aiKnownTagsText", "buildTagIndex", "filterTagList",
   "resolveTags", "suggestTagMerges",
 ]);
 
@@ -268,6 +268,17 @@ console.log("\ntags group the way they read");
   t.eq(pairs(["story", "stories", "fantasy", "fantasies"]), ["story+stories", "fantasy+fantasies"], "a -y word and its -ies plural are suggested as one tag");
   t.eq(pairs(["movie", "movies", "elf", "elves"]), ["movie+movies"], "-ie words still pair with their plurals");
   t.eq(pairs(["cat", "cats", "slow burn", "slowburn"]), ["cat+cats", "slow burn+slowburn"], "and plain plurals and run-together words, as before");
+
+  // The tag search boxes (the sidebar's, the Tag manager's, a card's suggestions).
+  const recs = [{ tags: ["Sci-Fi", "NSFW"], vaultTags: [] }, { tags: ["nsfw", "Fantasy"], vaultTags: [] }];
+  const keys = (idx, q) => V.filterTagList(idx, q).map((x) => x.key).sort().join(",");
+  const on = V.buildTagIndex(recs, {}, true);
+  t.eq([keys(on, "sci"), keys(on, "Sci-Fi"), keys(on, "NSFW"), keys(on, "")], ["sci fi", "sci fi", "nsfw", "fantasy,nsfw,sci fi"],
+    "with normalising on, the tag search finds a tag however it's typed");
+  const off = V.buildTagIndex(recs, {}, false);
+  t.eq([keys(off, "sci"), keys(off, "Sci-Fi"), keys(off, "nsfw"), keys(off, "  fan ")], ["Sci-Fi", "Sci-Fi", "NSFW,nsfw", "Fantasy"],
+    "with it off, the tags as embedded are still found, in any case (it used to find nothing)");
+  t.eq(keys(off, "sci fi"), "", "and off, a separator is matched as typed");
 }
 
 /* ── the cache ─────────────────────────────────────────────────────────── */

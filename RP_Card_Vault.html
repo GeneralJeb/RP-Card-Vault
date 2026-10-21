@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.9";
+const APP_VERSION = "1.5.10";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1753,8 +1753,21 @@ function resolveTags(rawTags, tagMeta, normalize) {
 }
 
 /**
+ * A tag index's entries matching what's typed in a tag search box. Keys are
+ * normalized only when the index was built with normalizing on; off, they're
+ * the tags as embedded ("Sci-Fi", "NSFW"), so the query is matched as typed,
+ * in any case.
+ */
+function filterTagList(tagIndex, query) {
+  const raw = tagIndex.normalize === false;
+  const q = raw ? String(query || "").trim().toLowerCase() : normTagName(query);
+  if (!q) return tagIndex.list;
+  return tagIndex.list.filter((t) => (raw ? t.key.toLowerCase() : t.key).indexOf(q) >= 0);
+}
+
+/**
  * Build the tag facet index over a set of records.
- * Returns { list: [{key,label,count,custom,embedded}], byKey }
+ * Returns { list: [{key,label,count,custom,embedded}], byKey, normalize }
  */
 function buildTagIndex(records, tagMeta, normalize) {
   const hidden = new Set((tagMeta && tagMeta.hidden) || []);
@@ -1821,7 +1834,7 @@ function buildTagIndex(records, tagMeta, normalize) {
     if (b.count !== a.count) return b.count - a.count;
     return a.key.localeCompare(b.key);
   });
-  return { list, byKey };
+  return { list, byKey, normalize: normalize !== false };
 }
 
 /**
@@ -7396,8 +7409,20 @@ function pickOne(list, avoid) {
   return v;
 }
 
-/** Cards in the grid's order for a sort key (see SORTS). Random shuffles a copy. */
-function sortCards(list, key) {
+/** A card's place in a Random order: a hash of the shuffle's seed and its id. */
+function randomRank(seed, id) {
+  const s = String(seed) + "\u0000" + String(id);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return h >>> 0;
+}
+
+/**
+ * Cards in the grid's order for a sort key (see SORTS). Random orders a copy
+ * by `seed`: the same seed keeps the same order while cards change (a
+ * favourite, a note, a rescan), and with no seed it's a fresh shuffle.
+ */
+function sortCards(list, key, seed) {
   const out = (list || []).slice();
   const cmp = {
     name: (a, b) => a.name.localeCompare(b.name),
@@ -7412,8 +7437,9 @@ function sortCards(list, key) {
     specDesc: (a, b) => specRank(b.spec) - specRank(a.spec) || a.name.localeCompare(b.name),
   }[key];
   if (key === "random") {
-    for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = out[i]; out[i] = out[j]; out[j] = t; }
-    return out;
+    const s = seed == null ? Math.random() : seed;
+    const rank = new Map(out.map((c) => [c, randomRank(s, c.id)]));
+    return out.sort((a, b) => rank.get(a) - rank.get(b) || String(a.id).localeCompare(String(b.id)));
   }
   return cmp ? out.sort(cmp) : out;
 }
@@ -8645,12 +8671,7 @@ function FilterSidebar({
     patch({ tagsInc: Array.from(inc), tagsExc: Array.from(exc) });
   };
 
-  const visibleTags = useMemo(() => {
-    const q = normTagName(tagQuery);
-    let list = tagIndex.list;
-    if (q) list = list.filter((t) => t.key.indexOf(q) >= 0);
-    return list;
-  }, [tagIndex, tagQuery]);
+  const visibleTags = useMemo(() => filterTagList(tagIndex, tagQuery), [tagIndex, tagQuery]);
 
   const incSet = new Set(filters.tagsInc), excSet = new Set(filters.tagsExc);
   const activeCount = filters.tagsInc.length + filters.tagsExc.length +
@@ -9461,7 +9482,7 @@ function WorkspaceModal({ onClose, onToast, initialPath }) {
  * loop and tools, handed the workspace, the vault (read-only), the model via
  * the relay, and your approval.
  */
-function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, onCardFiles, dupes }) {
+function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, shuffleSeed, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, onCardFiles, dupes }) {
   const [sessions, setSessions] = useState([]);
   const [sess, setSess] = useState(() => newAgentSession(uid(), Date.now()));
   const [input, setInput] = useState("");
@@ -10134,7 +10155,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
   const pinnedRec = agentPinnedRecord(sess, records);
   const pinLabel = sess.pinnedId ? (pinnedRec ? pinnedRec.name : (sess.pinnedName || sess.pinnedId) + " (no longer in the vault)") : "All characters";
   // Before you type: every card, in the main grid's sort. Typing narrows it.
-  const pinSorted = useMemo(() => (pinOpen ? sortCards(records, sortKey) : []), [pinOpen, records, sortKey]);
+  const pinSorted = useMemo(() => (pinOpen ? sortCards(records, sortKey, shuffleSeed) : []), [pinOpen, records, sortKey, shuffleSeed]);
   const pinMatches = useMemo(() => {
     const q = pinQuery.trim().toLowerCase();
     if (!q) return pinSorted;
@@ -10464,10 +10485,10 @@ function TagEditor({ tags, baseTags, onChange, tagIndex }) {
   };
 
   const suggestions = useMemo(() => {
-    const q = normTagName(draft);
-    if (!q) return [];
+    const hits = filterTagList(tagIndex, draft);
+    if (hits === tagIndex.list) return [];   // nothing typed that could match
     const have = new Set(tags.map(normTagName));
-    return tagIndex.list.filter((t) => t.key.indexOf(q) >= 0 && !have.has(t.key)).slice(0, 8);
+    return hits.filter((t) => !have.has(normTagName(t.key))).slice(0, 8);
   }, [draft, tags, tagIndex]);
 
   return (
@@ -11854,8 +11875,7 @@ function TagManagerModal({ tagIndex, tagMeta, onSaveMeta, onClose, allTagsUnfilt
   };
 
   const filtered = useMemo(() => {
-    const n = normTagName(q);
-    return n ? tagIndex.list.filter((t) => t.key.indexOf(n) >= 0) : tagIndex.list;
+    return filterTagList(tagIndex, q);
   }, [q, tagIndex]);
 
   const aliasEntries = Object.keys(tagMeta.aliases || {});
@@ -14178,6 +14198,9 @@ function App() {
   }, [filters.deep, filters.q]);
 
   /* ---- filtering ---- */
+  // Random is one shuffle per choice of it: favouriting a card or typing a
+  // note mustn't deal the whole grid again.
+  const shuffleSeed = useMemo(() => Math.random(), [filters.sort]);
   const filtered = useMemo(() => {
     const norm = settings.normalizeTags;
     const inc = filters.tagsInc, exc = filters.tagsExc;
@@ -14243,8 +14266,8 @@ function App() {
     });
 
     // The agent chat's pin list uses the same sortCards, so the two agree.
-    return sortCards(out, filters.sort);
-  }, [records, filters, tagMeta, settings.normalizeTags, settings.trashKey, dupes, deepIds]);
+    return sortCards(out, filters.sort, shuffleSeed);
+  }, [records, filters, tagMeta, settings.normalizeTags, settings.trashKey, dupes, deepIds, shuffleSeed]);
 
   /* ---- edits ---- */
   /* `patch` is an object, or a function of the current edit record returning
@@ -16090,6 +16113,9 @@ function App() {
       // Escape closes the inspector, never a dialog: those close only from their own buttons.
       if (e.key === "Escape" && !modal && focusId) setFocusId(null);
       if (!focusId || modal) return;
+      // Ctrl+F is the browser's find and Ctrl+S its save, Alt+arrows its back
+      // and forward: none of them is the card's f, s or arrow key.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const idx = filtered.findIndex((r) => r.id === focusId);
       if (idx < 0) return;
       let next = -1;
@@ -16406,7 +16432,7 @@ function App() {
               onMode={(m) => { setSideMode(m); if (m === "agent") setAgentOpened(true); }}
               agent={agentOpened ? (
                 <AgentPanel ai={aiSettings} relay={aiRelay} agent={agentSettings} onSaveAgent={patchAgentSettings}
-                  records={records} editsMap={editsMap} tagIndex={tagIndex} sortKey={filters.sort} onPatchEdit={patchEdit}
+                  records={records} editsMap={editsMap} tagIndex={tagIndex} sortKey={filters.sort} shuffleSeed={shuffleSeed} onPatchEdit={patchEdit}
                   onPatchMany={patchManyEdits} roots={roots}
                   onCardFiles={{ create: createCardFile, copy: copyCardFile, move: moveCardFile }} dupes={dupes}
                   onOpenCard={(id) => setFocusId(id)}
