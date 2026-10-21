@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.3
+
+- **Reference folders are never written to, as they say.** Creating, copying and moving cards into a Reference folder was already refused, but Save to card, Delete, Move to trash and moving cards out of one weren't. Now nothing changes a card file in a Reference folder, or puts one there, whichever part of the vault asks (the agent included). That goes for a folder you've labelled Reference inside another folder too. The inspector's Save to card button is off for those cards and says why. To change cards there, give the folder another role (right-click it in the folder tree).
+- **Editing lorebook keys keeps a regex key whole.** The keys box splits what you type at commas, which cut a regex key with a comma in it, like `/(gulls?|terns?){1,2}/i`, in two. A key written as a regex (`/…/` and its flags) is now always one key, commas and all.
+- **The Raw tab says when it hasn't read the card file.** The JSON there (and Copy V3 JSON and Download JSON) includes what the card file has beyond what the vault keeps itself, such as lorebook entry extensions and V3 assets, but only once the file has been read. Until then, or when the file can't be read, the tab says so, and Copy and Download ask before going ahead without it.
+
 ## 1.6.2
 
 - **Clicking into a lorebook entry's keys and out again no longer changes them.** Leaving the keys box always split its text again at every comma, even when you hadn't typed anything. A regex key with a comma in it, like `/(gulls?|terns?){1,2}/i`, came out as `{1, 2}`, a different pattern, and the card showed a lorebook change waiting to be saved. The keys are now only read again when you change them.
