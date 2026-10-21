@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.1
+
+- **A card file the vault can't open now shows up, saying why.** Chrome and Edge can see a file whose full path is longer than Windows' 260-character limit, but can't open it, and the scan used to leave such a card out without a word: it was in your folder but not in the vault. It's now indexed as unreadable (Filters → Unreadable), with what to do: rename it to something shorter, then rescan. The scan's notice says how many couldn't be opened, and the problem log lists them. An archive that can't read a file says the same.
+
 ## 1.6.0
 
 - **Vault archive: everything in one .zip.** Settings → Vault archive → Export archive saves your linked card folders, as they are on disk, together with your vault data (tags, notes, ratings, edits, settings and agent chats) in a single .zip. Keep it on another drive in case something goes wrong, or use it to move the vault to another computer. It's a plain zip, so any computer can open it and you can take a card out by hand.
