@@ -10,6 +10,7 @@ A local library for roleplay character cards (the PNG and JSON cards used by Sil
 - **Organises without touching the originals:** tags, flags, ratings, favourites and private notes live in the vault's own database.
 - **Edits cards:** fields, greetings, tags and lorebook entries. **Save to card** writes them into the file, after making a backup and checking the result.
 - **Copies, moves and creates cards** in the folders you've linked, and finds duplicates.
+- **Archives everything in one .zip:** your card folders, tags, notes and settings, optionally with an AES-256 password, to keep on another drive or to move the vault to another computer. Restore brings it all back.
 - **Sends cards to your front end:** into a folder it reads, or uploaded straight into SillyTavern, Lumiverse or any front end with an import endpoint.
 - **Optional AI** with any OpenAI-compatible endpoint (a local model, OpenRouter, OpenAI and so on): summaries, critiques, tag suggestions and rewrites that wait for your approval, and an agent chat that can search your library and suggest changes.
 
