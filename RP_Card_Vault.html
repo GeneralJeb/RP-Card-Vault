@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.6.2";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -667,6 +667,9 @@ const THEMES = {
   midnight: { label: "Midnight (dark, cool)", light: false, colors: [
     "#0a0e1a", "#10162a", "#162036", "#1b2742", "#121a2e", "#25324f", "#34456b", "#e3e8f4", "#a8b3cc", "#7c87a2",
     "#79a6e8", "#5a83bf", "rgba(121,166,232,0.12)", "#d0605c", "#6aaa7f", "#6b8fd6", "#c4719a", "#55b0b8", "#9a7fd8", "100%"] },
+  lantern: { label: "Lantern (dark, low glare)", light: false, colors: [
+    "#0b0a09", "#121110", "#181614", "#1e1b18", "#141210", "#2b2723", "#3d3730", "#d9d2c5", "#a89f90", "#8e8578",
+    "#c98f52", "#9a6c3e", "rgba(201,143,82,0.12)", "#c8665b", "#76a46f", "#6f8fb8", "#b47389", "#64a5a1", "#9a80b9", "100%"] },
   parchment: { label: "Parchment (light)", light: true, colors: [
     "#f3efe6", "#fbf8f2", "#ece6da", "#ffffff", "#ffffff", "#dcd3c2", "#c2b59c", "#2b2620", "#4d463b", "#6f6659",
     "#a5652a", "#83501f", "rgba(165,101,42,0.12)", "#b23a34", "#3d7d3d", "#335f8f", "#9b4565", "#2b7b7b", "#6c4799", "55%"] },
@@ -674,7 +677,7 @@ const THEMES = {
     "#000000", "#0b0b0b", "#151515", "#1d1d1d", "#0f0f0f", "#6a6a6a", "#9a9a9a", "#ffffff", "#e2e2e2", "#b4b4b4",
     "#ffb547", "#d9932e", "rgba(255,181,71,0.16)", "#ff6f6f", "#72e072", "#72b6ff", "#ff92bd", "#62e4e4", "#c7a0ff", "100%"] },
 };
-const THEME_CHOICES = ["auto", "vault", "midnight", "parchment", "contrast"];
+const THEME_CHOICES = ["auto", "vault", "midnight", "lantern", "parchment", "contrast"];
 
 /** The theme a setting means: "auto" is Vault or Parchment by the system's preference. */
 function themeKeyFor(choice, prefersLight) {
@@ -3145,6 +3148,16 @@ function lorebookPatch(body, lb) {
   const orig = (body && body.lorebook) || null;
   if (!next && !orig) return { lorebook: null };
   return { lorebook: next && orig && sameLorebook(next, orig) ? null : next };
+}
+
+/**
+ * The patch that puts `list` into the vault's edits as the alternate
+ * greetings, or { greetings: null } (no edit) when it matches the file's again.
+ */
+function greetingsPatch(body, list) {
+  const orig = (body && Array.isArray(body.alternate_greetings)) ? body.alternate_greetings : [];
+  const same = list.length === orig.length && list.every((g, i) => g === orig[i]);
+  return { greetings: same ? null : list };
 }
 
 /* The card fields the vault reads (normalizeCard), with the other spellings it
@@ -11746,7 +11759,11 @@ function InspectorAiTab({ rec, body, edit, ai, relay, tagIndex, onRun, onClearNo
   );
 }
 
-/** A comma-separated list (lorebook keys), committed when you leave the box or press Enter. */
+/**
+ * A comma-separated list (lorebook keys), committed when you leave the box or
+ * press Enter. Only if it was changed: a regex key can hold a comma ({1,3}),
+ * and splitting the text again would break it.
+ */
 function ListInput({ value, onChange, placeholder, className }) {
   const joined = (value || []).join(", ");
   const [draft, setDraft] = useState(joined);
@@ -11756,7 +11773,7 @@ function ListInput({ value, onChange, placeholder, className }) {
     <input className={className} value={focus ? draft : joined} placeholder={placeholder}
       onFocus={() => { setFocus(true); setDraft(joined); }}
       onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => { setFocus(false); onChange(draft.split(",").map((x) => x.trim()).filter(Boolean)); }}
+      onBlur={() => { setFocus(false); if (draft !== joined) onChange(draft.split(",").map((x) => x.trim()).filter(Boolean)); }}
       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }}
       style={Object.assign({}, inputBase, { padding: "5px 8px", fontSize: 11 })} />
   );
@@ -12150,17 +12167,17 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             </Field>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "14px 0 8px" }}>
               <label style={Object.assign({}, tinyLabel, { marginBottom: 0 })}>Alternate greetings ({greetings.length})</label>
-              <SmallBtn color="cyan" onClick={() => onPatchEdit({ greetings: greetings.concat([""]) })}>+ add</SmallBtn>
+              <SmallBtn color="cyan" onClick={() => onPatchEdit(greetingsPatch(body, greetings.concat([""])))}>+ add</SmallBtn>
             </div>
             {greetings.length === 0 ? <div style={{ fontSize: 11, color: "var(--text-muted)" }}>None.</div> : null}
             {greetings.map((g, i) => (
               <div key={i} style={{ marginBottom: 10 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
                   <span style={Object.assign({}, monoTiny, { color: "var(--text-muted)" })}>#{i + 1} · {fmtTokens(estimateTokens(g))}</span>
-                  <SmallBtn color="red" onClick={() => onPatchEdit({ greetings: greetings.filter((_, j) => j !== i) })}>remove</SmallBtn>
+                  <SmallBtn color="red" onClick={() => onPatchEdit(greetingsPatch(body, greetings.filter((_, j) => j !== i)))}>remove</SmallBtn>
                 </div>
                 <textarea value={g} rows={4}
-                  onChange={(e) => { const n = greetings.slice(); n[i] = e.target.value; onPatchEdit({ greetings: n }); }}
+                  onChange={(e) => { const n = greetings.slice(); n[i] = e.target.value; onPatchEdit(greetingsPatch(body, n)); }}
                   style={Object.assign({}, inputBase, { fontFamily: "'Outfit', sans-serif", lineHeight: 1.55 })} />
               </div>
             ))}

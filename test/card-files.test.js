@@ -13,7 +13,7 @@ const t = require("./harness");
 const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
-  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
+  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
 ]);
 
@@ -382,6 +382,16 @@ async function main() {
     t.eq(out.extensions, { st_world: "keep me" }, "and keeps the book's own extensions");
     t.eq(V.lorebookPatch({ lorebook: null }, V.cleanLorebook({ entries: [{ content: "First." }] })).lorebook.entries[0].content, "First.",
       "a card without a lorebook can be given one");
+  }
+
+  console.log("\ngreeting edits in the vault");
+  {
+    const body = { alternate_greetings: ["Hello.", "Hi."] };
+    t.eq(V.greetingsPatch(body, ["Hello.", "Hi there."]), { greetings: ["Hello.", "Hi there."] }, "a changed greeting is an edit");
+    t.eq(V.greetingsPatch(body, ["Hello.", "Hi."]), { greetings: null }, "greetings typed back to the file's are no edit at all");
+    t.eq(V.greetingsPatch(body, ["Hi.", "Hello."]), { greetings: ["Hi.", "Hello."] }, "a new order is an edit");
+    t.eq(V.greetingsPatch({ alternate_greetings: [] }, []), { greetings: null }, "none added to none is no edit");
+    t.eq(V.greetingsPatch(body, []), { greetings: [] }, "removing them all is an edit");
   }
 
   console.log("\nnew cards");

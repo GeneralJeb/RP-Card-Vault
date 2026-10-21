@@ -33,8 +33,9 @@ const ROOT = path.join(__dirname, "..");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry"]);
-const cardPng = (o, rgb) => {
+const cardPng = (o, rgb, more) => {
   const v3 = V.newCardPayload(o);
+  Object.assign(v3.data, more || {});
   return Buffer.from(V.writeCardIntoPng(V.solidPng(40, 60, rgb), v3, V.buildV2Payload(v3)));
 };
 
@@ -188,7 +189,10 @@ async function main() {
 
     await writeFiles(page, "Cards", [
       ["Ada Clockmaker.png", cardPng({ name: "Ada Clockmaker", description: "A clockmaker.", tags: ["victorian"] }, [90, 60, 120])],
-      ["Bram Lighthouse.png", cardPng({ name: "Bram Lighthouse", description: "Keeps the light.", tags: ["sea"] }, [40, 90, 120])],
+      ["Bram Lighthouse.png", cardPng({ name: "Bram Lighthouse", description: "Keeps the light.", tags: ["sea"] }, [40, 90, 120], {
+        alternate_greetings: ["The lamp is lit.", "A storm is coming."],
+        character_book: { name: "Coast", entries: [{ keys: ["/\\b(gulls?|terns?){1,2}\\b/i", "seabird"], content: "Birds of the coast.", insertion_order: 100 }] },
+      })],
       ["Cora Gardener.png", cardPng({ name: "Cora Gardener", description: "Grows roses.", tags: [] }, [60, 120, 60])],
     ]);
     await page.evaluate(async () => (await navigator.storage.getDirectory()).getDirectoryHandle("Frontend", { create: true }));
@@ -273,6 +277,26 @@ async function main() {
       await page.locator("text=clockwork").nth(1).waitFor();
       t.ok(true, "it appears in the sidebar's tag list");
       await page.getByPlaceholder("filter tags…").fill("");
+    });
+
+    await step("looking through a card's lorebook and greetings changes nothing", async () => {
+      await tile("Bram Lighthouse").click();
+      const saved = page.getByRole("button", { name: /Saved/ }).first();
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      // A regex key can hold a comma: going in and out of the box mustn't split it.
+      const keys = page.locator(".lore-keys").first();
+      await keys.click();
+      await keys.press("Tab");
+      t.eq(await keys.inputValue(), "/\\b(gulls?|terns?){1,2}\\b/i, seabird", "the keys are as the file has them");
+      t.ok(await saved.isVisible(), "and there's nothing to save");
+      // A greeting typed back to what it was is no change either, as a field is.
+      await page.getByRole("tab", { name: /^Greetings/ }).click();
+      const second = page.locator("xpath=//label[starts-with(normalize-space(), 'Alternate greetings')]/following::textarea[2]");
+      t.eq(await second.inputValue(), "A storm is coming.", "the second greeting is the file's");
+      await second.fill("A storm is coming tonight.");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).waitFor();
+      await second.fill("A storm is coming.");
+      t.ok(await saved.isVisible(), "typing it back leaves nothing to save");
     });
 
     await step("Shift-click selects the cards between, in the order shown now", async () => {
