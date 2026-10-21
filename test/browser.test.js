@@ -32,7 +32,7 @@ const t = require("./harness");
 const ROOT = path.join(__dirname, "..");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes"]);
+const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry"]);
 const cardPng = (o, rgb) => {
   const v3 = V.newCardPayload(o);
   return Buffer.from(V.writeCardIntoPng(V.solidPng(40, 60, rgb), v3, V.buildV2Payload(v3)));
@@ -143,7 +143,14 @@ async function main() {
   // Confirmations are answered yes, as you would.
   page.on("dialog", (d) => d.accept());
   // The folder picker hands over an OPFS folder: "Cards" unless told otherwise.
+  // The save dialog hands over an OPFS file: window.__saveAs, a path.
   await page.addInitScript(() => {
+    window.showSaveFilePicker = async (o) => {
+      const parts = (window.__saveAs || o.suggestedName).split("/");
+      let h = await navigator.storage.getDirectory();
+      for (const p of parts.slice(0, -1)) h = await h.getDirectoryHandle(p, { create: true });
+      return h.getFileHandle(parts[parts.length - 1], { create: true });
+    };
     window.showDirectoryPicker = async () =>
       (window.__pickFolder || "Cards").split("/").reduce(async (h, part) => (await h).getDirectoryHandle(part, { create: true }), navigator.storage.getDirectory());
   });
@@ -469,6 +476,49 @@ async function main() {
       });
       // Keys are made when a flag is added and never change, so renaming it is safe.
       t.ok(saved.some((x) => /^u-[a-z0-9-]+:Only the default picture.$/.test(x)), "the card has the flag, with its note", saved);
+    });
+
+    await step("a vault archive is exported with a password, and restored into a new folder", async () => {
+      await page.evaluate(() => { window.__saveAs = "Out/vault.zip"; });
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByLabel("Archive password", { exact: true }).fill("s3cret");
+      await page.getByLabel("Archive password again").fill("s3cret");
+      await page.getByRole("button", { name: "Export archive" }).click();
+      await toast(/^Archive saved: \d+ files? from \d+ folders?, .*encrypted/);
+      const zip = Buffer.from(await readFile(page, "Out", "vault.zip"));
+      const read = async (off, len) => new Uint8Array(zip.subarray(off, off + len));
+      const entries = await V.readZipDirectory(read, zip.length);
+      const names = entries.map((e) => e.name);
+      t.ok(names.includes("cards/Cards/Ada Clockmaker.png") && names.includes("vault-data.json") && names.includes("manifest.json"),
+        "it holds the cards, the vault data and the manifest", names);
+      t.ok(!names.some((n) => /_vault (backups|data)\//.test(n)), "but not the save backups or the vault-data copies (not asked for)");
+      t.ok(entries.every((e) => e.name === "README.txt" ? !(e.flags & 1) : e.flags & 1), "everything but the README is encrypted");
+      const ada = entries.find((e) => e.name === "cards/Cards/Ada Clockmaker.png");
+      t.eq(Buffer.from(await V.readZipEntry(read, zip.length, ada, "s3cret")).toString("hex"),
+        Buffer.from(await readFile(page, "Cards", "Ada Clockmaker.png")).toString("hex"), "a card in it is the file on disk, byte for byte");
+
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      const pick = () => page.getByLabel("Archive to restore").setInputFiles({ name: "vault.zip", mimeType: "application/zip", buffer: zip });
+      await page.getByLabel("Archive password", { exact: true }).fill("wrong");
+      await pick();
+      await toast(/That password doesn't open this archive/);
+      t.ok(true, "a wrong password is caught before anything is written");
+      await page.getByLabel("Archive password", { exact: true }).fill("s3cret");
+      await pick();
+      const picked = page.locator(".archive-picked");
+      await picked.waitFor();
+      t.ok(/Encrypted/.test(await picked.innerText()), "the right one shows what's inside before restoring", await picked.innerText());
+      await page.evaluate(() => { window.__pickFolder = "Restored"; });
+      const adas = await page.locator(".cardTile").filter({ hasText: "Ada Clockmaker" }).count();
+      await page.getByRole("button", { name: "Choose where to restore…" }).click();
+      // One notice once it's all done: a quick scan mustn't swap it for another before you can read it.
+      await toast(/^Restored \d+ files? into vault and linked \d+ folders?, and brought back \d+ card records/);
+      t.ok(true, "one notice says what was restored and that the vault data is back");
+      t.eq(Buffer.from(await readFile(page, "Restored", "vault/Cards/Ada Clockmaker.png")).toString("hex"),
+        Buffer.from(await readFile(page, "Cards", "Ada Clockmaker.png")).toString("hex"), "the card is back on disk, in a new folder named after the archive");
+      await page.waitForFunction((n) => document.querySelectorAll(".cardTile").length > 0 &&
+        Array.from(document.querySelectorAll(".cardTile")).filter((e) => /Ada Clockmaker/.test(e.textContent)).length > n, adas);
+      t.ok(true, "the restored folder is linked and scanned (its Ada Clockmaker is in the grid too)");
     });
 
     // Saved folders are read by key only: their records hold folder handles,

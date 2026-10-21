@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.5.10";
+const APP_VERSION = "1.6.0";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1165,15 +1165,7 @@ function limitedBytes(limit, what) {
 async function inflateRaw(bytes, max) {
   // zTXt uses zlib (deflate with header). DecompressionStream("deflate") handles it.
   if (typeof DecompressionStream === "undefined") throw new Error("no DecompressionStream");
-  const out = limitedBytes(max || CARD_UNPACK_MAX, "compressed chunk");
-  const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate")).getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    try { out.add(value); }
-    catch (e) { try { await reader.cancel(); } catch (e2) { /* already closed */ } throw e; }
-  }
-  return out.bytes();
+  return streamBytes(bytes, new DecompressionStream("deflate"), max || CARD_UNPACK_MAX, "compressed chunk");
 }
 
 /**
@@ -1925,6 +1917,24 @@ async function listCardDir(dirHandle, rel, acc, onTick, depth, dirAcc, failAcc) 
       acc.push({ handle: entry, rel: rel ? rel + "/" + nm : nm, dir: rel, file: nm, ext });
       if (onTick && acc.length % 50 === 0) onTick(acc.length);
     }
+  }
+}
+
+/**
+ * Every file under a folder (not only cards), for an archive. `skipDir(name,
+ * rel)` says which folders to leave out; hidden files and folders are left
+ * out, and so is any archive the vault made, so one never ends up in the next.
+ */
+async function listAllFiles(dirHandle, rel, acc, skipDir, depth) {
+  depth = depth || 0;
+  if (depth > 12) return;
+  for await (const entry of dirHandle.values()) {
+    const nm = entry.name;
+    if (nm.startsWith(".")) continue;
+    const sub = rel ? rel + "/" + nm : nm;
+    if (entry.kind === "directory") {
+      if (!skipDir(nm, sub)) await listAllFiles(entry, sub, acc, skipDir, depth + 1);
+    } else if (!isArchiveFileName(nm)) acc.push({ handle: entry, rel: sub });
   }
 }
 
@@ -7760,6 +7770,459 @@ function formatProblemLog(entries, header, names) {
   // The header is the vault's own words, so names aren't looked for there
   // (a folder called "Cards" would hide the card count).
   return scrubLogText((header || []).join("\n")) + "\n\n" + scrubLogText(lines.join("\n"), names);
+}
+
+/* ── vault archives ───────────────────────────────────────────────────────
+   Export vault archive writes one .zip: every linked folder as it is on disk
+   (under cards/<folder>/), the vault data, and a manifest that tells Restore
+   which folder was which. It's a plain zip, so any computer can open it and
+   pull a card out by hand.
+
+   With a password, every file in it is encrypted the way WinZip and 7-Zip do
+   it (AES-256, "AE-2"), which 7-Zip and WinRAR open too. Zip keeps file names
+   in the clear, so the names of cards and folders still show; their contents
+   don't. Card pictures are already compressed, so an archive comes out close
+   to the size of the folders; the card text in them is what shrinks.
+   ──────────────────────────────────────────────────────────────────────── */
+const ARCHIVE_FORMAT = 1;
+const ARCHIVE_PREFIX = "rp-card-vault-archive ";
+const ARCHIVE_CARDS_DIR = "cards";
+const ARCHIVE_DATA_FILE = "vault-data.json";
+const ARCHIVE_MANIFEST = "manifest.json";
+const ARCHIVE_README = "README.txt";
+const ARCHIVE_ENTRY_MAX = 1024 * 1024 * 1024;   // one file in an archive: 1 GB
+const ARCHIVE_ENTRIES_MAX = 500000;
+
+function archiveFileName(stamp) { return ARCHIVE_PREFIX + stamp + ".zip"; }
+
+/** An archive the vault wrote (the browser may have added " (1)"): never put inside the next one. */
+function isArchiveFileName(name) {
+  return String(name || "").toLowerCase().indexOf(ARCHIVE_PREFIX) === 0 && /\.zip$/i.test(name);
+}
+
+/** A problem reading an archive: `kind` is "password", "damaged" or "unsupported". */
+function archiveError(kind, message) {
+  const e = new Error(message);
+  e.kind = kind;
+  return e;
+}
+
+/* AES, encryption only (counter mode needs no more). WebCrypto has AES-CTR,
+   but its counter counts big-endian and WinZip's counts little-endian, so the
+   block cipher is done here and checked against FIPS-197 and Node's own AES
+   in the tests. */
+const AES_TABLES = (function () {
+  const xt = (a) => ((a << 1) ^ (a & 0x80 ? 0x1b : 0)) & 0xff;
+  const mul = (a, b) => { let p = 0; while (b) { if (b & 1) p ^= a; a = xt(a); b >>= 1; } return p; };
+  const rotl = (x, n) => ((x << n) | (x >> (8 - n))) & 0xff;
+  const inv = new Uint8Array(256);
+  for (let a = 1; a < 256; a++) for (let b = 1; b < 256; b++) if (mul(a, b) === 1) { inv[a] = b; break; }
+  const S = new Uint8Array(256), T0 = new Uint32Array(256), T1 = new Uint32Array(256), T2 = new Uint32Array(256), T3 = new Uint32Array(256);
+  for (let x = 0; x < 256; x++) {
+    const b = inv[x];
+    const s = b ^ rotl(b, 1) ^ rotl(b, 2) ^ rotl(b, 3) ^ rotl(b, 4) ^ 0x63;
+    S[x] = s;
+    const w = ((xt(s) << 24) | (s << 16) | (s << 8) | (xt(s) ^ s)) >>> 0;
+    T0[x] = w;
+    T1[x] = ((w >>> 8) | (w << 24)) >>> 0;
+    T2[x] = ((w >>> 16) | (w << 16)) >>> 0;
+    T3[x] = ((w >>> 24) | (w << 8)) >>> 0;
+  }
+  return { S, T0, T1, T2, T3 };
+})();
+
+/** A 16-, 24- or 32-byte key expanded into its round keys. */
+function aesExpandKey(key) {
+  const nk = key.length / 4, nr = nk + 6, w = new Uint32Array(4 * (nr + 1)), S = AES_TABLES.S;
+  for (let i = 0; i < nk; i++) w[i] = ((key[4 * i] << 24) | (key[4 * i + 1] << 16) | (key[4 * i + 2] << 8) | key[4 * i + 3]) >>> 0;
+  const sub = (t) => ((S[t >>> 24] << 24) | (S[(t >>> 16) & 255] << 16) | (S[(t >>> 8) & 255] << 8) | S[t & 255]) >>> 0;
+  let rcon = 1;
+  for (let i = nk; i < w.length; i++) {
+    let t = w[i - 1];
+    if (i % nk === 0) {
+      t = (sub(((t << 8) | (t >>> 24)) >>> 0) ^ (rcon << 24)) >>> 0;
+      rcon = ((rcon << 1) ^ (rcon & 0x80 ? 0x1b : 0)) & 0xff;
+    } else if (nk > 6 && i % nk === 4) t = sub(t);
+    w[i] = (w[i - nk] ^ t) >>> 0;
+  }
+  return { w, nr };
+}
+
+/** One block (four big-endian words) encrypted into `out`. */
+function aesEncryptWords(k, a0, a1, a2, a3, out) {
+  const { S, T0, T1, T2, T3 } = AES_TABLES, w = k.w;
+  let s0 = a0 ^ w[0], s1 = a1 ^ w[1], s2 = a2 ^ w[2], s3 = a3 ^ w[3], i = 4;
+  for (let r = 1; r < k.nr; r++, i += 4) {
+    const t0 = T0[s0 >>> 24] ^ T1[(s1 >>> 16) & 255] ^ T2[(s2 >>> 8) & 255] ^ T3[s3 & 255] ^ w[i];
+    const t1 = T0[s1 >>> 24] ^ T1[(s2 >>> 16) & 255] ^ T2[(s3 >>> 8) & 255] ^ T3[s0 & 255] ^ w[i + 1];
+    const t2 = T0[s2 >>> 24] ^ T1[(s3 >>> 16) & 255] ^ T2[(s0 >>> 8) & 255] ^ T3[s1 & 255] ^ w[i + 2];
+    const t3 = T0[s3 >>> 24] ^ T1[(s0 >>> 16) & 255] ^ T2[(s1 >>> 8) & 255] ^ T3[s2 & 255] ^ w[i + 3];
+    s0 = t0; s1 = t1; s2 = t2; s3 = t3;
+  }
+  out[0] = ((S[s0 >>> 24] << 24) | (S[(s1 >>> 16) & 255] << 16) | (S[(s2 >>> 8) & 255] << 8) | S[s3 & 255]) ^ w[i];
+  out[1] = ((S[s1 >>> 24] << 24) | (S[(s2 >>> 16) & 255] << 16) | (S[(s3 >>> 8) & 255] << 8) | S[s0 & 255]) ^ w[i + 1];
+  out[2] = ((S[s2 >>> 24] << 24) | (S[(s3 >>> 16) & 255] << 16) | (S[(s0 >>> 8) & 255] << 8) | S[s1 & 255]) ^ w[i + 2];
+  out[3] = ((S[s3 >>> 24] << 24) | (S[(s0 >>> 16) & 255] << 16) | (S[(s1 >>> 8) & 255] << 8) | S[s2 & 255]) ^ w[i + 3];
+}
+
+/** WinZip's AES counter mode: a little-endian counter from 1. Encrypts and decrypts alike. */
+function aesCtrLE(k, data) {
+  const out = new Uint8Array(data.length), ks = [0, 0, 0, 0];
+  for (let off = 0, n = 1; off < data.length; off += 16, n++) {
+    aesEncryptWords(k, ((n & 255) << 24 | ((n >>> 8) & 255) << 16 | ((n >>> 16) & 255) << 8 | (n >>> 24)) >>> 0, 0, 0, 0, ks);
+    const end = Math.min(16, data.length - off);
+    for (let j = 0; j < end; j++) out[off + j] = data[off + j] ^ ((ks[j >> 2] >>> (24 - 8 * (j & 3))) & 255);
+  }
+  return out;
+}
+
+/** WinZip AES-256 keys from a password and a file's salt: PBKDF2-SHA1, 1000 rounds. */
+async function winzipAesKeys(password, salt) {
+  const subtle = crypto.subtle;
+  const base = await subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-1", salt, iterations: 1000 }, base, 66 * 8));
+  const mac = await subtle.importKey("raw", bits.slice(32, 64), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  return { aes: aesExpandKey(bits.slice(0, 32)), mac, verifier: bits.slice(64, 66) };
+}
+
+function joinBytes(list) {
+  let n = 0;
+  for (const b of list) n += b.length;
+  const out = new Uint8Array(n);
+  let at = 0;
+  for (const b of list) { out.set(b, at); at += b.length; }
+  return out;
+}
+
+/** One file's data as WinZip stores it encrypted: salt, password check, data, then a 10-byte HMAC. */
+async function winzipAesEncrypt(password, data) {
+  // A new salt for every file: the same key twice would reuse the keystream.
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const k = await winzipAesKeys(password, salt);
+  const enc = aesCtrLE(k.aes, data);
+  const tag = new Uint8Array(await crypto.subtle.sign("HMAC", k.mac, enc)).subarray(0, 10);
+  return joinBytes([salt, k.verifier, enc, tag]);
+}
+
+async function winzipAesDecrypt(password, raw) {
+  if (raw.length < 28) throw archiveError("damaged", "an encrypted file in it is cut short");
+  const k = await winzipAesKeys(password, raw.subarray(0, 16));
+  if (k.verifier[0] !== raw[16] || k.verifier[1] !== raw[17]) throw archiveError("password", "wrong password");
+  const enc = raw.subarray(18, raw.length - 10), tag = raw.subarray(raw.length - 10);
+  const want = new Uint8Array(await crypto.subtle.sign("HMAC", k.mac, enc));
+  for (let i = 0; i < 10; i++) if (want[i] !== tag[i]) throw archiveError("password", "wrong password, or the archive is damaged");
+  return aesCtrLE(k.aes, enc);
+}
+
+/** Bytes put through a CompressionStream or DecompressionStream, refusing more than `limit` out. */
+async function streamBytes(bytes, transform, limit, what) {
+  const out = limitedBytes(limit, what);
+  const reader = new Blob([bytes]).stream().pipeThrough(transform).getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    try { out.add(value); }
+    catch (e) { try { await reader.cancel(); } catch (e2) { /* already closed */ } throw e; }
+  }
+  return out.bytes();
+}
+
+function dosDateTime(ms) {
+  const d = new Date(ms > 0 ? ms : Date.now());
+  const y = Math.min(2107, Math.max(1980, d.getFullYear()));
+  return {
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    date: ((y - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
+function setU64(dv, at, v) { dv.setUint32(at, v % 4294967296, true); dv.setUint32(at + 4, Math.floor(v / 4294967296), true); }
+function getU64(dv, at) { return dv.getUint32(at, true) + dv.getUint32(at + 4, true) * 4294967296; }
+
+/** The extra field that marks a file as WinZip AES-256 (AE-2), naming the real method. */
+function zipAesExtra(method) {
+  const b = new Uint8Array(11), dv = new DataView(b.buffer);
+  dv.setUint16(0, 0x9901, true); dv.setUint16(2, 7, true); dv.setUint16(4, 2, true);
+  b[6] = 0x41; b[7] = 0x45; b[8] = 3; dv.setUint16(9, method, true);
+  return b;
+}
+
+/**
+ * A zip written front to back through `write(bytes)` (awaited), one file at a
+ * time, so an archive of many gigabytes never has to fit in memory. Each
+ * file is deflated when that saves anything, and encrypted when there's a
+ * password. Zip64 records are added when the archive outgrows plain zip's
+ * 4 GB or 65,535 files (`zip64: true` adds them anyway, for the tests).
+ */
+function makeZipWriter(write, opts) {
+  opts = opts || {};
+  const password = opts.password || "";
+  const enc = new TextEncoder();
+  const entries = [];
+  let offset = 0;
+  const put = async (b) => { await write(b); offset += b.length; };
+  return {
+    size() { return offset; },
+    count() { return entries.length; },
+    // `plain` leaves one file unencrypted even with a password (the README, so
+    // anyone who opens the zip can read what it is).
+    async add(name, data, mtime, plain) {
+      const pw = plain ? "" : password;
+      if (data.length > ARCHIVE_ENTRY_MAX) throw new Error("over " + Math.round(ARCHIVE_ENTRY_MAX / 1048576) + " MB");
+      const nameBytes = enc.encode(name);
+      let method = 0, body = data;
+      if (data.length > 64) {
+        // Data that won't pack comes out a little bigger, and is stored as it is.
+        const z = await streamBytes(data, new CompressionStream("deflate-raw"), data.length + (data.length >> 6) + 1024, name);
+        if (z.length < data.length * 0.98) { method = 8; body = z; }
+      }
+      if (pw) body = await winzipAesEncrypt(pw, body);
+      const e = {
+        nameBytes, method, size: data.length, csize: body.length, offset, dt: dosDateTime(mtime),
+        // AE-2 leaves the checksum out (the HMAC covers the data instead).
+        crc: pw ? 0 : crc32(data), extra: pw ? zipAesExtra(method) : new Uint8Array(0), pw: !!pw,
+      };
+      const h = new Uint8Array(30), dv = new DataView(h.buffer);
+      dv.setUint32(0, 0x04034b50, true);
+      dv.setUint16(4, pw ? 51 : 20, true);
+      dv.setUint16(6, 0x0800 | (pw ? 1 : 0), true);   // names in UTF-8; encrypted
+      dv.setUint16(8, pw ? 99 : method, true);
+      dv.setUint16(10, e.dt.time, true); dv.setUint16(12, e.dt.date, true);
+      dv.setUint32(14, e.crc, true); dv.setUint32(18, e.csize, true); dv.setUint32(22, e.size, true);
+      dv.setUint16(26, nameBytes.length, true); dv.setUint16(28, e.extra.length, true);
+      await put(joinBytes([h, nameBytes, e.extra]));
+      await put(body);
+      entries.push(e);
+    },
+    async finish() {
+      const cdStart = offset;
+      for (const e of entries) {
+        const far = opts.zip64 || e.offset >= 0xffffffff;
+        const x64 = new Uint8Array(far ? 12 : 0);
+        if (far) { const xv = new DataView(x64.buffer); xv.setUint16(0, 1, true); xv.setUint16(2, 8, true); setU64(xv, 4, e.offset); }
+        const extra = joinBytes([x64, e.extra]);
+        const h = new Uint8Array(46), dv = new DataView(h.buffer);
+        const ver = e.pw ? 51 : far ? 45 : 20;
+        dv.setUint32(0, 0x02014b50, true);
+        dv.setUint16(4, ver, true); dv.setUint16(6, ver, true);
+        dv.setUint16(8, 0x0800 | (e.pw ? 1 : 0), true);
+        dv.setUint16(10, e.pw ? 99 : e.method, true);
+        dv.setUint16(12, e.dt.time, true); dv.setUint16(14, e.dt.date, true);
+        dv.setUint32(16, e.crc, true); dv.setUint32(20, e.csize, true); dv.setUint32(24, e.size, true);
+        dv.setUint16(28, e.nameBytes.length, true); dv.setUint16(30, extra.length, true);
+        dv.setUint32(38, 0x20, true);   // the "archive" attribute, as Windows sets it
+        dv.setUint32(42, far ? 0xffffffff : e.offset, true);
+        await put(joinBytes([h, e.nameBytes, extra]));
+      }
+      const cdSize = offset - cdStart;
+      const big = opts.zip64 || entries.length >= 0xffff || cdStart >= 0xffffffff || cdSize >= 0xffffffff;
+      const tail = [];
+      if (big) {
+        const z = new Uint8Array(56 + 20), zv = new DataView(z.buffer);
+        zv.setUint32(0, 0x06064b50, true); setU64(zv, 4, 44);
+        zv.setUint16(12, 45, true); zv.setUint16(14, 45, true);
+        setU64(zv, 24, entries.length); setU64(zv, 32, entries.length); setU64(zv, 40, cdSize); setU64(zv, 48, cdStart);
+        zv.setUint32(56, 0x07064b50, true); setU64(zv, 64, offset); zv.setUint32(72, 1, true);
+        tail.push(z);
+      }
+      const end = new Uint8Array(22), ev = new DataView(end.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(8, big ? 0xffff : entries.length, true); ev.setUint16(10, big ? 0xffff : entries.length, true);
+      ev.setUint32(12, big ? 0xffffffff : cdSize, true); ev.setUint32(16, big ? 0xffffffff : cdStart, true);
+      tail.push(end);
+      await put(joinBytes(tail));
+      return offset;
+    },
+  };
+}
+
+/**
+ * The files listed in a zip, from its central directory. `read(offset, length)`
+ * returns those bytes (a slice of the File, in the page). Anything that
+ * doesn't add up is refused rather than guessed at: this reads files from
+ * anywhere.
+ */
+async function readZipDirectory(read, size) {
+  const bad = (why) => archiveError("damaged", "This isn't a zip file the vault can read (" + why + ")");
+  if (!(size >= 22)) throw bad("too short");
+  const tailLen = Math.min(size, 22 + 65535 + 20);
+  const tail = await read(size - tailLen, tailLen), tv = new DataView(tail.buffer, tail.byteOffset, tail.length);
+  let p = -1;
+  for (let i = tail.length - 22; i >= 0; i--) if (tv.getUint32(i, true) === 0x06054b50) { p = i; break; }
+  if (p < 0) throw bad("no end record");
+  let count = tv.getUint16(p + 10, true), cdSize = tv.getUint32(p + 12, true), cdOff = tv.getUint32(p + 16, true);
+  if (count === 0xffff || cdSize === 0xffffffff || cdOff === 0xffffffff) {
+    if (p < 20 || tv.getUint32(p - 20, true) !== 0x07064b50) throw bad("no zip64 locator");
+    const at = getU64(tv, p - 12);
+    if (at + 56 > size) throw bad("zip64 record past the end");
+    const z = await read(at, 56), zv = new DataView(z.buffer, z.byteOffset, z.length);
+    if (zv.getUint32(0, true) !== 0x06064b50) throw bad("no zip64 record");
+    count = getU64(zv, 32); cdSize = getU64(zv, 40); cdOff = getU64(zv, 48);
+  }
+  if (count > ARCHIVE_ENTRIES_MAX) throw bad("over " + ARCHIVE_ENTRIES_MAX + " files");
+  if (cdOff + cdSize > size || cdSize > 512 * 1048576) throw bad("file list out of range");
+  const cd = await read(cdOff, cdSize), dv = new DataView(cd.buffer, cd.byteOffset, cd.length);
+  const dec = new TextDecoder("utf-8");
+  const out = [];
+  let q = 0;
+  for (let n = 0; n < count; n++) {
+    if (q + 46 > cd.length || dv.getUint32(q, true) !== 0x02014b50) throw bad("file list cut short");
+    const nlen = dv.getUint16(q + 28, true), xlen = dv.getUint16(q + 30, true), clen = dv.getUint16(q + 32, true);
+    if (q + 46 + nlen + xlen + clen > cd.length) throw bad("file list cut short");
+    const e = {
+      name: dec.decode(cd.subarray(q + 46, q + 46 + nlen)),
+      flags: dv.getUint16(q + 8, true), method: dv.getUint16(q + 10, true), crc: dv.getUint32(q + 16, true),
+      csize: dv.getUint32(q + 20, true), size: dv.getUint32(q + 24, true), offset: dv.getUint32(q + 42, true), aes: null,
+    };
+    for (let x = q + 46 + nlen, xe = x + xlen; x + 4 <= xe;) {
+      const id = dv.getUint16(x, true), len = dv.getUint16(x + 2, true), d = x + 4;
+      if (d + len > xe) break;
+      if (id === 1) {
+        let r = d;
+        for (const f of ["size", "csize", "offset"]) {
+          if (e[f] !== 0xffffffff) continue;
+          if (r + 8 > d + len) throw bad("zip64 field cut short");
+          e[f] = getU64(dv, r); r += 8;
+        }
+      } else if (id === 0x9901 && len >= 7) {
+        e.aes = { version: dv.getUint16(d, true), strength: cd[d + 4], method: dv.getUint16(d + 5, true) };
+      }
+      x = d + len;
+    }
+    out.push(e);
+    q += 46 + nlen + xlen + clen;
+  }
+  return out;
+}
+
+/** One file out of a zip, checked: its HMAC when encrypted, its size and checksum always. */
+async function readZipEntry(read, size, e, password) {
+  if (e.size > ARCHIVE_ENTRY_MAX || e.csize > ARCHIVE_ENTRY_MAX + 65536) throw archiveError("unsupported", e.name + " is over " + Math.round(ARCHIVE_ENTRY_MAX / 1048576) + " MB");
+  const lh = await read(e.offset, 30), lv = new DataView(lh.buffer, lh.byteOffset, lh.length);
+  if (lh.length < 30 || lv.getUint32(0, true) !== 0x04034b50) throw archiveError("damaged", e.name + " is damaged (no header)");
+  const start = e.offset + 30 + lv.getUint16(26, true) + lv.getUint16(28, true);
+  if (start + e.csize > size) throw archiveError("damaged", e.name + " is cut short");
+  let body = await read(start, e.csize), method = e.method;
+  if (e.flags & 1) {
+    if (!e.aes || e.method !== 99) throw archiveError("unsupported", e.name + " uses an encryption the vault can't open (only AES)");
+    if (e.aes.strength < 1 || e.aes.strength > 3) throw archiveError("unsupported", e.name + " has an unknown AES strength");
+    if (!password) throw archiveError("password", "This archive has a password");
+    body = await winzipAesDecrypt(password, body);
+    method = e.aes.method;
+  }
+  let data;
+  if (method === 0) data = body;
+  else if (method === 8) {
+    try { data = await streamBytes(body, new DecompressionStream("deflate-raw"), e.size, e.name); }
+    catch (x) { throw archiveError("damaged", e.name + " is damaged (" + x.message + ")"); }
+  } else throw archiveError("unsupported", e.name + " is packed in a way the vault can't open (method " + method + ")");
+  if (data.length !== e.size) throw archiveError("damaged", e.name + " is damaged (wrong size)");
+  // AE-2 has no checksum to compare; its HMAC was checked above.
+  if (!(e.aes && e.aes.version === 2) && crc32(data) !== e.crc) throw archiveError("damaged", e.name + " is damaged (checksum)");
+  return data;
+}
+
+/**
+ * A path from inside an archive as folder names, or null when it isn't safe to
+ * write on Windows: no "..", no drive or absolute paths, no backslashes, no
+ * device names like CON, nothing Windows would quietly rename.
+ */
+function safeArchivePath(name) {
+  if (typeof name !== "string" || !name || name.length > 1024) return null;
+  if (/[\\:*?"<>|\x00-\x1f]/.test(name) || name[0] === "/") return null;
+  const parts = name.split("/");
+  for (const p of parts) {
+    if (!p || p === "." || p === ".." || p.length > 255 || /[. ]$/.test(p)) return null;
+    if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)/i.test(p)) return null;
+  }
+  return parts;
+}
+
+/** A folder name in the archive for each linked folder, by id: its own name, made unique. */
+function archiveFolderNames(roots) {
+  const used = new Set(), out = {};
+  for (const r of roots || []) {
+    const base = safeFileName(r.name || "folder") || "folder";
+    let n = base;
+    for (let i = 2; used.has(n.toLowerCase()); i++) n = base + " (" + i + ")";
+    used.add(n.toLowerCase());
+    out[r.id] = n;
+  }
+  return out;
+}
+
+/** The folders a manifest lists, checked, or null when it isn't a vault archive's. */
+function readArchiveManifest(m) {
+  if (!m || typeof m !== "object" || m.format !== ARCHIVE_FORMAT || !Array.isArray(m.roots)) return null;
+  const seen = new Set(), roots = [];
+  for (const r of m.roots) {
+    if (!r || typeof r.folder !== "string") continue;
+    const parts = safeArchivePath(r.folder);
+    if (!parts || parts.length !== 1 || seen.has(r.folder.toLowerCase())) continue;
+    seen.add(r.folder.toLowerCase());
+    roots.push({ id: typeof r.id === "string" ? r.id : "", name: String(r.name || r.folder), folder: r.folder,
+      role: Object.prototype.hasOwnProperty.call(ROOT_ROLES, r.role) ? r.role : "library" });
+  }
+  return {
+    roots, createdAt: Number(m.createdAt) || 0, version: String(m.version || ""), encrypted: !!m.encrypted,
+    files: Number(m.files) || 0, bytes: Number(m.bytes) || 0,
+  };
+}
+
+/**
+ * What a restore writes: each file under cards/<a listed folder>/ whose path is
+ * safe, once (Windows doesn't tell "A.png" from "a.png"). Anything else in the
+ * archive is left out and named in `refused`.
+ */
+function planArchiveRestore(entries, manifest) {
+  const folders = new Map(manifest.roots.map((r) => [r.folder.toLowerCase(), r]));
+  const files = [], refused = [], seen = new Set();
+  let bytes = 0;
+  for (const e of entries) {
+    if (/\/$/.test(e.name) || e.name === ARCHIVE_MANIFEST || e.name === ARCHIVE_DATA_FILE || e.name === ARCHIVE_README) continue;
+    const parts = safeArchivePath(e.name);
+    const root = parts && parts.length >= 3 && parts[0] === ARCHIVE_CARDS_DIR ? folders.get(parts[1].toLowerCase()) : null;
+    const key = parts ? parts.join("/").toLowerCase() : "";
+    if (!root || seen.has(key)) { refused.push(e.name); continue; }
+    seen.add(key);
+    files.push({ entry: e, root, dirs: parts.slice(2, -1), file: parts[parts.length - 1] });
+    bytes += e.size;
+  }
+  return { files, refused, bytes };
+}
+
+/**
+ * A picked archive, read far enough to restore: its file list, its manifest
+ * (which needs the password when it has one) and what a restore would write.
+ */
+async function openVaultArchive(file, password) {
+  const read = async (off, len) => new Uint8Array(await file.slice(off, off + len).arrayBuffer());
+  const entries = await readZipDirectory(read, file.size);
+  const me = entries.find((e) => e.name === ARCHIVE_MANIFEST);
+  if (!me) throw archiveError("unsupported", "That zip isn't a vault archive (it has no " + ARCHIVE_MANIFEST + ")");
+  let manifest = null;
+  const text = new TextDecoder().decode(await readZipEntry(read, file.size, me, password));
+  try { manifest = readArchiveManifest(JSON.parse(text)); } catch (e) { manifest = null; }
+  if (!manifest) throw archiveError("unsupported", "That archive was made by a newer vault, or its manifest is damaged");
+  return {
+    file, read, entries, manifest, plan: planArchiveRestore(entries, manifest),
+    encrypted: entries.some((e) => e.flags & 1),
+    data: entries.find((e) => e.name === ARCHIVE_DATA_FILE) || null,
+  };
+}
+
+function archiveReadme(createdAt, encrypted) {
+  return [
+    "RP Card Vault archive, made " + new Date(createdAt).toLocaleString() + ".",
+    "",
+    "cards/            your linked folders, each as it was on disk",
+    ARCHIVE_DATA_FILE + "   your tags, notes, ratings, edits, settings and agent chats",
+    ARCHIVE_MANIFEST + "    which folder was which, for Restore",
+    "",
+    "To restore: in RP Card Vault, Settings > Vault archive > Restore from archive.",
+    "The cards are ordinary card files, so you can also take any of them out by hand.",
+    encrypted ? "\nThe files in this archive are encrypted (AES-256). Open it with the vault, 7-Zip or WinRAR;\nWindows' own zip viewer can't. A forgotten password can't be recovered." : "",
+  ].join("\r\n");
 }
 
 /*__PURE_JS_END__*/
@@ -13659,7 +14122,90 @@ function ProblemLog({ info, onToast }) {
   );
 }
 
-function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage, problemLogInfo }) {
+/** Settings' Vault archive box: export options and password, and a picked archive waiting to be restored. */
+function ArchiveBox({ onExport, onOpen, onRestore, onToast }) {
+  const [includePrivate, setIncludePrivate] = useState(false);
+  const [includeBackups, setIncludeBackups] = useState(false);
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [opened, setOpened] = useState(null);
+  const [withData, setWithData] = useState(true);
+  const [reading, setReading] = useState(false);
+  const fileRef = useRef(null);
+  const pick = async (file) => {
+    setReading(true);
+    try { setOpened(await onOpen(file, pw)); }
+    catch (e) {
+      setOpened(null);
+      onToast(e.kind === "password"
+        ? (pw ? "That password doesn't open this archive" : "That archive has a password: type it in the Password box, then pick the archive again")
+        : e.message, e.kind === "password" ? "warm" : "red");
+    }
+    setReading(false);
+  };
+  const exportNow = () => {
+    if (pw && pw !== pw2) { onToast("The two passwords don't match", "warm"); return; }
+    onExport({ password: pw, includePrivate, includeBackups });
+  };
+  const box = { width: "auto", flex: "1 1 150px", padding: "4px 8px" };
+  const check = (on, set, label) => (
+    <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5, color: "var(--text-secondary)", cursor: "pointer" }}>
+      <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} />{label}
+    </label>
+  );
+  const m = opened && opened.manifest;
+  return (
+    <div className="vault-archive" style={{ padding: 11, borderRadius: "var(--radius-sm)", marginBottom: 16,
+      background: "var(--bg-tertiary)", border: "1px solid var(--border-subtle)" }}>
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>Vault archive</div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 8 }}>
+        One .zip of your card folders and everything above, to keep on another drive or to move the vault to another
+        computer. Card pictures are already compressed, so it comes out close to the size of your folders. Restoring
+        puts the folders into a new folder you pick, links them, and brings back your tags, notes and settings.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+        {check(includePrivate, setIncludePrivate, "Include folders kept private from the AI")}
+        {check(includeBackups, setIncludeBackups, "Include the copies Save to card keeps (" + BACKUP_FOLDER_NAME + ")")}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+        <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password (optional)"
+          aria-label="Archive password" autoComplete="new-password" style={Object.assign({}, inputBase, box)} />
+        <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} placeholder="Password again"
+          aria-label="Archive password again" autoComplete="new-password" disabled={!pw} style={Object.assign({}, inputBase, box)} />
+      </div>
+      <div style={{ fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 8 }}>
+        With a password, what's in the archive is encrypted (AES-256), though file and folder names still show. The vault,
+        7-Zip and WinRAR open it; Windows' own zip viewer can't. A forgotten password can't be recovered.
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <SmallBtn color="green" onClick={exportNow} disabled={!!(pw && pw !== pw2)}>Export archive</SmallBtn>
+        <SmallBtn color="cyan" onClick={() => fileRef.current && fileRef.current.click()} disabled={reading}>
+          {reading ? "Reading…" : "Restore from archive…"}
+        </SmallBtn>
+        <input ref={fileRef} type="file" accept=".zip" style={{ display: "none" }} aria-label="Archive to restore"
+          onChange={(e) => { const f = e.target.files[0]; if (f) pick(f); e.target.value = ""; }} />
+      </div>
+      {m ? (
+        <div className="archive-picked" style={{ marginTop: 10, padding: 9, borderRadius: "var(--radius-sm)", background: "var(--bg-secondary)", border: "1px solid var(--border-subtle)" }}>
+          <div style={{ fontSize: 11.5, color: "var(--text-primary)", marginBottom: 4, wordBreak: "break-word" }}>{opened.file.name}</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 6 }}>
+            {countWord(opened.plan.files.length, "file") + " (" + fmtBytes(opened.plan.bytes) + ") in " + countWord(m.roots.length, "folder") + ": " + m.roots.map((r) => r.folder).join(", ") + "."}
+            {m.createdAt ? " Made " + fmtDate(m.createdAt) + "." : ""}
+            {opened.encrypted ? " Encrypted." : ""}
+            {opened.plan.refused.length ? " " + countWord(opened.plan.refused.length, "file") + " in it won't be restored (not in a listed folder, or not a safe name)." : ""}
+          </div>
+          {opened.data ? check(withData, setWithData, "Also bring back tags, notes, ratings, edits, settings and chats") : null}
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <SmallBtn color="cyan" onClick={() => onRestore(opened, pw, withData)}>Choose where to restore…</SmallBtn>
+            <SmallBtn color="muted" onClick={() => setOpened(null)}>Cancel</SmallBtn>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage, problemLogInfo, onExportArchive, onOpenArchive, onRestoreArchive }) {
   const importRef = useRef(null);
   return (
     <Modal title="Settings" icon={"⚙"} width={640} onClose={onClose}
@@ -13865,6 +14411,8 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
           </span>
         </div>
       </div>
+
+      <ArchiveBox onExport={onExportArchive} onOpen={onOpenArchive} onRestore={onRestoreArchive} onToast={onToast} />
 
       <label style={tinyLabel}>Problem log</label>
       <ProblemLog info={problemLogInfo} onToast={onToast} />
@@ -14907,54 +15455,246 @@ function App() {
   const backupRef = useRef(backupVaultData);
   useEffect(() => { backupRef.current = backupVaultData; }, [backupVaultData]);
 
+  // Vault data put back (Import vault data, and Restore from archive). `moreIds`
+  // maps folder ids in the data to folders linked since, when names can't.
+  // `lead` ({ text, color }) is what the restore did, said in the same notice.
+  const applyVaultData = useCallback(async (p, moreIds, lead) => {
+    if (!p || !Array.isArray(p.edits)) throw new Error("Not a vault export");
+    if (p.tagMeta) saveMeta(Object.assign({}, DEFAULT_TAGMETA, p.tagMeta));
+    // Folder settings point at folder registrations, which have new ids
+    // once folders are added again: carry them over by folder name, and
+    // never let an import take a folder out of Keep private.
+    const idMap = Object.assign(importRootIdMap(p.roots, roots), moreIds || {});
+    let lostPrivate = 0;
+    if (p.settings) {
+      const moved = remapRootSettings(p.settings, settings, idMap);
+      lostPrivate = moved.lostPrivate;
+      patchSettings(Object.assign({}, p.settings, moved.patch));
+    }
+    await dbPutMany(STORE_EDITS, p.edits);
+    const m = new Map(editsMap);
+    for (const e of p.edits) if (e && e.fingerprint) m.set(e.fingerprint, e);
+    setEditsMap(m);
+    // Exports from before format 2 have none of these; that's fine.
+    if (p.folderRoles && typeof p.folderRoles === "object") {
+      const roles = Object.assign({}, folderRoles, remapDirKeyed(p.folderRoles, idMap));
+      setFolderRoles(roles); saveFolderRoles(roles);
+    }
+    if (p.dupeMode && typeof p.dupeMode === "object") {
+      const dm = Object.assign({}, dupeMode, remapDirKeyed(p.dupeMode, idMap));
+      setDupeMode(dm); saveDupeMode(dm);
+    }
+    const chats = Array.isArray(p.agentChats) ? p.agentChats.filter((c) => c && c.id) : [];
+    const answers = Array.isArray(p.aiAnswers) ? p.aiAnswers.filter((n) => n && n.id) : [];
+    if (chats.length) await dbPutMany(STORE_AGENT, chats);
+    if (answers.length) await dbPutMany(STORE_AINOTES, answers);
+    showToast((lead ? lead.text + ", and brought back " : "Imported ") + fmtNum(p.edits.length) + " card records" +
+      (chats.length ? ", " + fmtNum(chats.length) + " agent chats" : "") +
+      (answers.length ? ", " + fmtNum(answers.length) + " saved AI answers" : "") +
+      (chats.length || answers.length ? ". Reloading to show them…" : ""), lead ? lead.color : "green");
+    if (lostPrivate) {
+      showToast(countWord(lostPrivate, "folder") + " kept private from the AI in that export " +
+        (lostPrivate === 1 ? "isn't" : "aren't") + " linked here. Add " + (lostPrivate === 1 ? "it" : "them") +
+        ", then right-click → Keep private from the AI again.", "warm");
+    }
+    if (chats.length || answers.length) setTimeout(() => window.location.reload(), lostPrivate ? 6000 : 1500);
+  }, [editsMap, folderRoles, dupeMode, saveMeta, patchSettings, showToast, roots, settings]);
+
   const importVault = useCallback((file) => {
     const reader = new FileReader();
     reader.onload = async (ev) => {
-      try {
-        const p = JSON.parse(ev.target.result);
-        if (!p || !Array.isArray(p.edits)) throw new Error("Not a vault export");
-        if (p.tagMeta) saveMeta(Object.assign({}, DEFAULT_TAGMETA, p.tagMeta));
-        // Folder settings point at folder registrations, which have new ids
-        // once folders are added again: carry them over by folder name, and
-        // never let an import take a folder out of Keep private.
-        const idMap = importRootIdMap(p.roots, roots);
-        let lostPrivate = 0;
-        if (p.settings) {
-          const moved = remapRootSettings(p.settings, settings, idMap);
-          lostPrivate = moved.lostPrivate;
-          patchSettings(Object.assign({}, p.settings, moved.patch));
-        }
-        await dbPutMany(STORE_EDITS, p.edits);
-        const m = new Map(editsMap);
-        for (const e of p.edits) if (e && e.fingerprint) m.set(e.fingerprint, e);
-        setEditsMap(m);
-        // Exports from before format 2 have none of these; that's fine.
-        if (p.folderRoles && typeof p.folderRoles === "object") {
-          const roles = Object.assign({}, folderRoles, remapDirKeyed(p.folderRoles, idMap));
-          setFolderRoles(roles); saveFolderRoles(roles);
-        }
-        if (p.dupeMode && typeof p.dupeMode === "object") {
-          const dm = Object.assign({}, dupeMode, remapDirKeyed(p.dupeMode, idMap));
-          setDupeMode(dm); saveDupeMode(dm);
-        }
-        const chats = Array.isArray(p.agentChats) ? p.agentChats.filter((c) => c && c.id) : [];
-        const answers = Array.isArray(p.aiAnswers) ? p.aiAnswers.filter((n) => n && n.id) : [];
-        if (chats.length) await dbPutMany(STORE_AGENT, chats);
-        if (answers.length) await dbPutMany(STORE_AINOTES, answers);
-        showToast("Imported " + fmtNum(p.edits.length) + " card records" +
-          (chats.length ? ", " + fmtNum(chats.length) + " agent chats" : "") +
-          (answers.length ? ", " + fmtNum(answers.length) + " saved AI answers" : "") +
-          (chats.length || answers.length ? ". Reloading to show them…" : ""), "green");
-        if (lostPrivate) {
-          showToast(countWord(lostPrivate, "folder") + " kept private from the AI in that export " +
-            (lostPrivate === 1 ? "isn't" : "aren't") + " linked here. Add " + (lostPrivate === 1 ? "it" : "them") +
-            ", then right-click → Keep private from the AI again.", "warm");
-        }
-        if (chats.length || answers.length) setTimeout(() => window.location.reload(), lostPrivate ? 6000 : 1500);
-      } catch (e) { showToast("Import failed: " + e.message, "red"); }
+      try { await applyVaultData(JSON.parse(ev.target.result)); }
+      catch (e) { showToast("Import failed: " + e.message, "red"); }
     };
     reader.readAsText(file);
-  }, [editsMap, folderRoles, dupeMode, saveMeta, patchSettings, showToast, roots, settings]);
+  }, [applyVaultData, showToast]);
+
+  /*
+   * Export vault archive (see "vault archives" above). The save dialog comes
+   * first, while the button press still counts; then each folder is read one
+   * file at a time and written straight to the archive, so its size doesn't
+   * matter. Where there's no save dialog the zip is downloaded instead.
+   */
+  const exportArchive = useCallback(async (opts) => {
+    if (scan.running) { showToast("Wait for the current job to finish first", "warm"); return false; }
+    const usable = roots.filter((r) => isImportRoot(r) || r.handle);
+    if (!usable.length) { showToast("Add a folder first", "warm"); return false; }
+    const name = archiveFileName(stampNow());
+    let out = null;
+    if (typeof window.showSaveFilePicker === "function") {
+      try {
+        const fh = await window.showSaveFilePicker({ suggestedName: name, id: "rpCardVaultArchive",
+          types: [{ description: "Zip archive", accept: { "application/zip": [".zip"] } }] });
+        out = await fh.createWritable();
+      } catch (e) {
+        if (e && e.name === "AbortError") return false;
+        out = null;
+      }
+    }
+    const parts = [];
+    const write = out ? (b) => out.write(b) : async (b) => { parts.push(b); };
+    const isPrivate = makePrivateTest(settings);
+    const folders = archiveFolderNames(usable);
+    const kept = [], items = [], unread = [];
+    let privateLeft = 0;
+    stopRef.current = { stop: false };
+    setScan({ running: true, done: 0, total: 0, label: "Listing files…", rootName: "Archive" });
+    try {
+      for (const root of usable) {
+        const folder = folders[root.id];
+        if (!opts.includePrivate && isPrivate(root.id, "")) { privateLeft++; continue; }
+        if (isImportRoot(root)) {
+          for (const rec of cards) {
+            if (rec.rootId !== root.id) continue;
+            if (!opts.includePrivate && isPrivate(root.id, rec.dir)) { privateLeft++; continue; }
+            const f = fileFor(rec.id);
+            if (f) items.push({ folder, rel: rec.rel, get: async () => f });
+            else unread.push(folder + "/" + rec.rel + " (re-attach the folder to read it)");
+          }
+        } else {
+          if (!(await verifyPermission(root.handle, false))) { unread.push(folder + "/ (no access to the folder)"); continue; }
+          const acc = [];
+          await listAllFiles(root.handle, "", acc, (nm, rel) => {
+            const lower = nm.toLowerCase();
+            if (SKIP_DIRS.has(lower) && !(opts.includeBackups && lower === BACKUP_FOLDER_NAME)) return true;
+            if (!opts.includePrivate && isPrivate(root.id, rel)) { privateLeft++; return true; }
+            return false;
+          });
+          for (const f of acc) items.push({ folder, rel: f.rel, get: () => f.handle.getFile() });
+        }
+        kept.push(root);
+      }
+      const zw = makeZipWriter(write, { password: opts.password || "" });
+      const createdAt = Date.now();
+      const utf8 = (x) => new TextEncoder().encode(x);
+      await zw.add(ARCHIVE_README, utf8(archiveReadme(createdAt, !!opts.password)), createdAt, true);
+      let bytes = 0, files = 0;
+      for (let i = 0; i < items.length; i++) {
+        if (stopRef.current.stop) throw new Error("stopped");
+        const it = items[i];
+        if (i % 5 === 0) setScan({ running: true, done: i, total: items.length, label: it.rel, rootName: "Archive" });
+        // A file that can't be read is named in the archive and skipped;
+        // a failed write stops the whole thing (the archive would be broken).
+        let file, data;
+        try {
+          file = await it.get();
+          if (file.size > ARCHIVE_ENTRY_MAX) throw new Error("over " + fmtBytes(ARCHIVE_ENTRY_MAX));
+          data = new Uint8Array(await file.arrayBuffer());
+        } catch (e) { unread.push(it.folder + "/" + it.rel + " (" + e.message + ")"); continue; }
+        await zw.add(ARCHIVE_CARDS_DIR + "/" + it.folder + "/" + it.rel, data, file.lastModified);
+        bytes += data.length; files++;
+      }
+      setScan({ running: true, done: items.length, total: items.length, label: "Finishing…", rootName: "Archive" });
+      await zw.add(ARCHIVE_DATA_FILE, utf8(JSON.stringify(await buildVaultExport())), createdAt);
+      await zw.add(ARCHIVE_MANIFEST, utf8(JSON.stringify({
+        app: APP_NAME, version: APP_VERSION, format: ARCHIVE_FORMAT, createdAt, encrypted: !!opts.password,
+        roots: kept.map((r) => ({ id: r.id, name: r.name, role: r.role, folder: folders[r.id] })),
+        files, bytes, unreadable: unread,
+        includes: { privateFolders: !!opts.includePrivate, saveBackups: !!opts.includeBackups },
+      }, null, 2)), createdAt);
+      const size = await zw.finish();
+      if (out) await out.close();
+      else downloadBlob(new Blob(parts, { type: "application/zip" }), name);
+      setScan(SCAN_IDLE);
+      if (unread.length) logProblem("Archive", countWord(unread.length, "file") + " couldn't be read and aren't in the archive", unread.join("\n"), "warn");
+      showToast("Archive saved: " + countWord(files, "file") + " from " + countWord(kept.length, "folder") + ", " + fmtBytes(size) +
+        (opts.password ? ", encrypted" : "") + (privateLeft ? ". Private folders left out" : "") +
+        (unread.length ? ". " + countWord(unread.length, "file") + " couldn't be read (see the problem log)" : ""), unread.length ? "warm" : "green");
+      return true;
+    } catch (e) {
+      if (out) { try { await out.abort(); } catch (x) { /* already closed */ } }
+      setScan(SCAN_IDLE);
+      showToast(e.message === "stopped" ? "Archive stopped. Nothing was saved" : "Archive failed: " + e.message + ". Nothing was saved", "red");
+      return false;
+    }
+  }, [scan.running, roots, cards, settings, buildVaultExport, showToast]);
+
+  /*
+   * Restore from archive: the folders go into a new folder (named after the
+   * archive) inside one you pick, so nothing already on disk is touched; then
+   * they're linked and scanned, and the vault data is put back on top. Every
+   * file is checked (checksum, or the HMAC when encrypted) before it's written.
+   */
+  const restoreArchive = useCallback(async (info, password, withData) => {
+    if (scan.running) { showToast("Wait for the current job to finish first", "warm"); return false; }
+    if (!fsSupported()) { showToast("This browser can't write to folders: restore in Chrome or Edge", "red"); return false; }
+    let parent;
+    try { parent = await window.showDirectoryPicker({ mode: "readwrite", id: "rpCardVaultRestore" }); } catch (e) { return false; }
+    const nest = await detectNesting(parent, roots);
+    if (nest && nest.kind !== "contains") {
+      showToast("Pick a folder outside your linked folders: the restored folders are linked on their own", "warm");
+      return false;
+    }
+    const base = safeFileName(info.file.name.replace(/\.zip$/i, "")) || "vault archive";
+    let into = null, intoName = base;
+    try {
+      for (let i = 2; !into && i < 1000; i++) {
+        try { await parent.getDirectoryHandle(intoName, { create: false }); intoName = base + " (" + i + ")"; }
+        catch (e) { if (e && e.name === "NotFoundError") into = await parent.getDirectoryHandle(intoName, { create: true }); else throw e; }
+      }
+      if (!into) throw new Error("no free folder name");
+    } catch (e) { showToast("Couldn't make a folder there: " + e.message, "red"); return false; }
+
+    const files = info.plan.files, failed = [], dirs = new Map();
+    const dirFor = async (path) => {
+      const k = path.join("/").toLowerCase();
+      if (!dirs.has(k)) dirs.set(k, await getDirByPath(into, path, true));
+      return dirs.get(k);
+    };
+    stopRef.current = { stop: false };
+    let written = 0;
+    try {
+      for (const r of info.manifest.roots) await dirFor([r.folder]);   // empty folders come back too
+      for (let i = 0; i < files.length; i++) {
+        if (stopRef.current.stop) throw new Error("stopped");
+        const f = files[i];
+        if (i % 5 === 0) setScan({ running: true, done: i, total: files.length, label: f.file, rootName: "Restore" });
+        try {
+          const data = await readZipEntry(info.read, info.file.size, f.entry, password);
+          const fh = await (await dirFor([f.root.folder].concat(f.dirs))).getFileHandle(f.file, { create: true });
+          const w = await fh.createWritable();
+          try { await w.write(data); await w.close(); }
+          catch (e) { try { await w.abort(); } catch (x) { /* already closed */ } throw e; }
+          written++;
+        } catch (e) {
+          if (e.kind === "password") throw e;
+          failed.push(f.entry.name + " (" + e.message + ")");
+        }
+      }
+    } catch (e) {
+      setScan(SCAN_IDLE);
+      showToast((e.message === "stopped" ? "Restore stopped" : "Restore failed: " + e.message) + ". " +
+        countWord(written, "file") + " had been written into " + intoName + "; nothing was linked", "red");
+      return false;
+    }
+    const added = info.manifest.roots.map((r) => ({
+      id: uid(), name: r.folder, role: r.role, handle: dirs.get(r.folder.toLowerCase()), addedAt: Date.now(), lastScan: 0,
+    }));
+    for (const r of added) await dbPut(STORE_ROOTS, r);
+    setRoots((prev) => prev.concat(added));
+    setScan(SCAN_IDLE);
+    const refused = info.plan.refused.length;
+    if (failed.length || refused) {
+      logProblem("Restore", countWord(failed.length + refused, "file") + " from the archive weren't restored",
+        failed.concat(info.plan.refused.map((n) => n + " (not a safe path in a listed folder)")).join("\n"), "warn");
+    }
+    await runScanRef.current(added, false, { quiet: true });
+    // One notice for the whole restore, once it's all done.
+    const missed = failed.length + refused;
+    const lead = {
+      text: "Restored " + countWord(written, "file") + " into " + intoName + " and linked " + countWord(added.length, "folder") +
+        (missed ? " (" + countWord(missed, "file") + " weren't restored: see the problem log)" : ""),
+      color: missed ? "warm" : "green",
+    };
+    if (!(withData && info.data)) { showToast(lead.text, lead.color); return true; }
+    try {
+      const p = JSON.parse(new TextDecoder().decode(await readZipEntry(info.read, info.file.size, info.data, password)));
+      const ids = {};
+      info.manifest.roots.forEach((r, i) => { if (r.id) ids[r.id] = { id: added[i].id, prefix: "" }; });
+      await applyVaultData(p, ids, lead);
+    } catch (e) { showToast(lead.text + ", but the vault data couldn't be brought back: " + e.message, "red"); }
+    return true;
+  }, [scan.running, roots, applyVaultData, showToast]);
 
   /*
    * Everything the vault keeps in this browser goes: the index and card
@@ -16659,6 +17399,8 @@ function App() {
           onImportVault={importVault} cardCount={cards.length} trashOptions={moveTargets}
           destStatus={destStatus} onConnectDest={connectDest} onDisconnectDest={disconnectDest}
           onBackupNow={() => backupVaultData(true)} lastAutoBackup={lastAutoBackup}
+          onExportArchive={(o) => { setModal(null); exportArchive(o); }} onOpenArchive={openVaultArchive}
+          onRestoreArchive={(info, pw, withData) => { setModal(null); restoreArchive(info, pw, withData); }}
           flagUsage={Object.fromEntries(flagCounts.map((f) => [f.key, f.count]))} problemLogInfo={problemLogInfo} />
       ) : null}
 
