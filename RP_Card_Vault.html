@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.6.3";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -667,6 +667,9 @@ const THEMES = {
   midnight: { label: "Midnight (dark, cool)", light: false, colors: [
     "#0a0e1a", "#10162a", "#162036", "#1b2742", "#121a2e", "#25324f", "#34456b", "#e3e8f4", "#a8b3cc", "#7c87a2",
     "#79a6e8", "#5a83bf", "rgba(121,166,232,0.12)", "#d0605c", "#6aaa7f", "#6b8fd6", "#c4719a", "#55b0b8", "#9a7fd8", "100%"] },
+  lantern: { label: "Lantern (dark, low glare)", light: false, colors: [
+    "#0b0a09", "#121110", "#181614", "#1e1b18", "#141210", "#2b2723", "#3d3730", "#d9d2c5", "#a89f90", "#8e8578",
+    "#c98f52", "#9a6c3e", "rgba(201,143,82,0.12)", "#c8665b", "#76a46f", "#6f8fb8", "#b47389", "#64a5a1", "#9a80b9", "100%"] },
   parchment: { label: "Parchment (light)", light: true, colors: [
     "#f3efe6", "#fbf8f2", "#ece6da", "#ffffff", "#ffffff", "#dcd3c2", "#c2b59c", "#2b2620", "#4d463b", "#6f6659",
     "#a5652a", "#83501f", "rgba(165,101,42,0.12)", "#b23a34", "#3d7d3d", "#335f8f", "#9b4565", "#2b7b7b", "#6c4799", "55%"] },
@@ -674,7 +677,7 @@ const THEMES = {
     "#000000", "#0b0b0b", "#151515", "#1d1d1d", "#0f0f0f", "#6a6a6a", "#9a9a9a", "#ffffff", "#e2e2e2", "#b4b4b4",
     "#ffb547", "#d9932e", "rgba(255,181,71,0.16)", "#ff6f6f", "#72e072", "#72b6ff", "#ff92bd", "#62e4e4", "#c7a0ff", "100%"] },
 };
-const THEME_CHOICES = ["auto", "vault", "midnight", "parchment", "contrast"];
+const THEME_CHOICES = ["auto", "vault", "midnight", "lantern", "parchment", "contrast"];
 
 /** The theme a setting means: "auto" is Vault or Parchment by the system's preference. */
 function themeKeyFor(choice, prefersLight) {
@@ -2561,6 +2564,30 @@ function parseDirKey(k) {
  * This is what makes "Cards" a Library while "Cards/new" is an Inbox, without
  * registering the subfolder separately.
  */
+/* Reference folders are "scanned and searchable, never written to": no card
+   in one is saved, deleted or moved out, and none is copied or moved in,
+   whichever part of the vault asks. The file operations check it themselves,
+   against the folder labels as the vault has them now (set by the App). */
+let FOLDER_ROLES_NOW = {};
+function setFolderRolesNow(roles) { FOLDER_ROLES_NOW = roles || {}; }
+
+/** Why a folder's cards can't be written or changed because it's Reference, or "". */
+function referenceFolderError(root, dir, folderRoles) {
+  if (!root) return "";
+  const roles = folderRoles === undefined ? FOLDER_ROLES_NOW : folderRoles;
+  // A folder registered before roles existed has none: it was never meant to be read-only.
+  if (effectiveFolderRole(root.id, dir || "", roles, root.role || "library") !== "reference") return "";
+  return "\"" + [root.name].concat(dir ? [dir] : []).join("/") + "\" is a Reference folder, which is never written to. Give it another role to change cards there.";
+}
+
+/** Why a card's file can't be changed where it is: "imported", "reference", or "". */
+function cardFileLock(rec, roots, folderRoles) {
+  const root = (roots || []).find((r) => r.id === rec.rootId);
+  if (!root) return "";
+  if (isImportRoot(root)) return "imported";
+  return referenceFolderError(root, rec.dir, folderRoles) ? "reference" : "";
+}
+
 function effectiveFolderRole(rootId, dir, folderRoles, rootRole) {
   let d = dir || "";
   for (;;) {
@@ -2730,6 +2757,8 @@ const TRASH_FOLDER_NAME = "_vault trash";
 async function deleteCardFile(rec, root) {
   if (!root) throw new Error("Folder for this card is no longer registered");
   if (isImportRoot(root)) throw new Error("Imported folders are read-only");
+  const ref = referenceFolderError(root, rec.dir);
+  if (ref) throw new Error(ref);
   if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
   const dirs = rec.dir ? rec.dir.split("/") : [];
   const dir = await getDirByPath(root.handle, dirs, false);
@@ -2787,6 +2816,8 @@ async function verifiedExactCopies(keeper, others, readBytes) {
 async function moveCardTo(rec, srcRoot, destRoot, destDir) {
   if (isImportRoot(srcRoot)) throw new Error("Imported folders are read-only — nothing can be moved out of them");
   if (isImportRoot(destRoot)) throw new Error("Imported folders are read-only — nothing can be moved into them");
+  const ref = referenceFolderError(srcRoot, rec.dir) || referenceFolderError(destRoot, destDir);
+  if (ref) throw new Error(ref);
   if (srcRoot.id === destRoot.id && (rec.dir || "") === (destDir || "")) {
     return { skipped: true, reason: "already in that folder" };
   }
@@ -2912,6 +2943,8 @@ const INGEST_STATUS_META = {
  * overwrites a differing file — collisions get a numeric suffix.
  */
 async function copyIntoRoot(destRoot, subfolder, filename, blob, sig) {
+  const ref = referenceFolderError(destRoot, (subfolder || []).filter(Boolean).join("/"));
+  if (ref) throw new Error(ref);
   const dir = await getDirByPath(destRoot.handle, subfolder, true);
   let finalName = filename;
   // If a file with this name exists, check whether it's the same bytes.
@@ -3145,6 +3178,53 @@ function lorebookPatch(body, lb) {
   const orig = (body && body.lorebook) || null;
   if (!next && !orig) return { lorebook: null };
   return { lorebook: next && orig && sameLorebook(next, orig) ? null : next };
+}
+
+/**
+ * The patch that puts `list` into the vault's edits as the alternate
+ * greetings, or { greetings: null } (no edit) when it matches the file's again.
+ */
+/**
+ * A lorebook key box's text split into keys at its commas. A key written as a
+ * regex (/…/flags, as SillyTavern takes them) stays one key even with commas
+ * inside it, like /(gulls?|terns?){1,2}/i. A slash that never closes is plain text.
+ */
+function splitKeyList(text) {
+  const s = String(text || ""), out = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    let from = i;
+    if (s[i] === "/") {
+      let close = -1, inClass = false;
+      for (let k = i + 1; k < s.length; k++) {
+        const c = s[k];
+        if (c === "\\") { k++; continue; }
+        if (inClass) { if (c === "]") inClass = false; continue; }
+        if (c === "[") inClass = true;
+        else if (c === "/") { close = k; break; }
+      }
+      if (close > i + 1) {
+        let f = close + 1;
+        while (f < s.length && /[a-z]/i.test(s[f])) f++;
+        let next = f;
+        while (next < s.length && /\s/.test(s[next])) next++;
+        if (next >= s.length || s[next] === ",") from = f;   // the whole regex is the key
+      }
+    }
+    const comma = s.indexOf(",", from);
+    const end = comma < 0 ? s.length : comma;
+    const key = s.slice(i, end).trim();
+    if (key) out.push(key);
+    i = end + 1;
+  }
+  return out;
+}
+
+function greetingsPatch(body, list) {
+  const orig = (body && Array.isArray(body.alternate_greetings)) ? body.alternate_greetings : [];
+  const same = list.length === orig.length && list.every((g, i) => g === orig[i]);
+  return { greetings: same ? null : list };
 }
 
 /* The card fields the vault reads (normalizeCard), with the other spellings it
@@ -3421,6 +3501,8 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   const root = roots.find((r) => r.id === rec.rootId);
   if (!root) throw new Error("Folder for this card is no longer registered");
   if (isImportRoot(root)) throw new Error("Imported folders are read-only — use Download copy instead");
+  const ref = referenceFolderError(root, rec.dir);
+  if (ref) throw new Error(ref + " Use Download copy instead.");
   if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
 
   const dirs = rec.dir ? rec.dir.split("/") : [];
@@ -6392,9 +6474,9 @@ function agentBulkTagChanges(cards, editOf, kind, add, remove) {
 function agentFolderList(roots) {
   const out = [];
   for (const r of roots || []) {
-    const writable = !isImportRoot(r) && r.role !== "reference";
-    out.push({ path: r.name, rootId: r.id, dir: "", writable });
-    for (const d of (r.dirs || []).slice().sort()) out.push({ path: r.name + "/" + d, rootId: r.id, dir: d, writable });
+    const writable = (d) => !isImportRoot(r) && !referenceFolderError(r, d);
+    out.push({ path: r.name, rootId: r.id, dir: "", writable: writable("") });
+    for (const d of (r.dirs || []).slice().sort()) out.push({ path: r.name + "/" + d, rootId: r.id, dir: d, writable: writable(d) });
   }
   return out;
 }
@@ -11746,7 +11828,11 @@ function InspectorAiTab({ rec, body, edit, ai, relay, tagIndex, onRun, onClearNo
   );
 }
 
-/** A comma-separated list (lorebook keys), committed when you leave the box or press Enter. */
+/**
+ * A comma-separated list (lorebook keys), committed when you leave the box or
+ * press Enter. Only if it was changed: a regex key can hold a comma ({1,3}),
+ * and splitting the text again would break it.
+ */
 function ListInput({ value, onChange, placeholder, className }) {
   const joined = (value || []).join(", ");
   const [draft, setDraft] = useState(joined);
@@ -11756,7 +11842,7 @@ function ListInput({ value, onChange, placeholder, className }) {
     <input className={className} value={focus ? draft : joined} placeholder={placeholder}
       onFocus={() => { setFocus(true); setDraft(joined); }}
       onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => { setFocus(false); onChange(draft.split(",").map((x) => x.trim()).filter(Boolean)); }}
+      onBlur={() => { setFocus(false); if (draft !== joined) onChange(splitKeyList(draft)); }}
       onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }}
       style={Object.assign({}, inputBase, { padding: "5px 8px", fontSize: 11 })} />
   );
@@ -11867,7 +11953,7 @@ function LorebookEditor({ body, edit, onPatchEdit }) {
   );
 }
 
-function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate }) {
+function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate, writeBlock }) {
   const [tab, setTab] = useState("overview");
   const [body, setBody] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -11887,15 +11973,25 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
   useEffect(() => { setTab("overview"); }, [rec.id]);
 
   // The Raw tab shows what a save would write, so it needs the file's own card too.
+  // rawState: "reading", "read", or why the file couldn't be read. Until it's
+  // read, the JSON leaves out what the vault doesn't keep itself.
   const [rawCard, setRawCard] = useState(null);
+  const [rawState, setRawState] = useState("reading");
   useEffect(() => {
     let dead = false;
     setRawCard(null);
     if (tab !== "raw") return () => { dead = true; };
+    setRawState("reading");
     readOriginalBytes(rec, roots).then((o) => rawCardFromBytes(o.bytes, rec.file))
-      .then((c) => { if (!dead) setRawCard(c); }).catch(() => {});
+      .then((c) => { if (!dead) { setRawCard(c); setRawState(c ? "read" : "it has no card the vault can read"); } })
+      .catch((e) => { if (!dead) setRawState((e && e.message) || "unknown error"); });
     return () => { dead = true; };
   }, [tab, rec.id, rec.fp]);
+  const rawWarning = rawState === "read" ? ""
+    : (rawState === "reading" ? "Still reading the card file." : "The card file couldn't be read: " + rawState + ".") +
+      " Until it is, this JSON leaves out what the vault doesn't keep itself, such as lorebook entry extensions, V3 assets and other extra fields.";
+  // Copy and Download wait for the file; before it's read they ask first.
+  const rawGo = (what) => !rawWarning || window.confirm(rawWarning + "\n\n" + what + " anyway?");
 
   const root = roots.find((r) => r.id === rec.rootId);
   const rootMeta = root ? (ROOT_ROLES[root.role] || ROOT_ROLES.reference) : ROOT_ROLES.reference;
@@ -11991,8 +12087,8 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
           <SmallBtn color="cyan" onClick={() => { navigator.clipboard && navigator.clipboard.writeText((root ? root.name : "") + "/" + rec.rel); onToast("Path copied", "cyan"); }}>Copy path</SmallBtn>
           <SmallBtn color="purple" disabled={!body} onClick={() => exportCopy(null)}>Download copy</SmallBtn>
           {onDuplicate ? <SmallBtn color="green" disabled={!body} onClick={onDuplicate} title="A copy named “(copy)” in the same folder, as a card of its own">Duplicate</SmallBtn> : null}
-          <SmallBtn color={dirtyCount ? "red" : "muted"} disabled={!dirtyCount || !body || readOnlyRoot}
-            title={readOnlyRoot ? "Imported folders are read-only" : "Write these changes into the card file itself"}
+          <SmallBtn color={dirtyCount ? "red" : "muted"} disabled={!dirtyCount || !body || readOnlyRoot || !!writeBlock}
+            title={readOnlyRoot ? "Imported folders are read-only" : writeBlock || "Write these changes into the card file itself"}
             onClick={onSaveToCard}>
             {dirtyCount ? "\u{1F4BE} Save to card (" + dirtyCount + ")" : "\u{1F4BE} Saved"}
           </SmallBtn>
@@ -12150,17 +12246,17 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             </Field>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "14px 0 8px" }}>
               <label style={Object.assign({}, tinyLabel, { marginBottom: 0 })}>Alternate greetings ({greetings.length})</label>
-              <SmallBtn color="cyan" onClick={() => onPatchEdit({ greetings: greetings.concat([""]) })}>+ add</SmallBtn>
+              <SmallBtn color="cyan" onClick={() => onPatchEdit(greetingsPatch(body, greetings.concat([""])))}>+ add</SmallBtn>
             </div>
             {greetings.length === 0 ? <div style={{ fontSize: 11, color: "var(--text-muted)" }}>None.</div> : null}
             {greetings.map((g, i) => (
               <div key={i} style={{ marginBottom: 10 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
                   <span style={Object.assign({}, monoTiny, { color: "var(--text-muted)" })}>#{i + 1} · {fmtTokens(estimateTokens(g))}</span>
-                  <SmallBtn color="red" onClick={() => onPatchEdit({ greetings: greetings.filter((_, j) => j !== i) })}>remove</SmallBtn>
+                  <SmallBtn color="red" onClick={() => onPatchEdit(greetingsPatch(body, greetings.filter((_, j) => j !== i)))}>remove</SmallBtn>
                 </div>
                 <textarea value={g} rows={4}
-                  onChange={(e) => { const n = greetings.slice(); n[i] = e.target.value; onPatchEdit({ greetings: n }); }}
+                  onChange={(e) => { const n = greetings.slice(); n[i] = e.target.value; onPatchEdit(greetingsPatch(body, n)); }}
                   style={Object.assign({}, inputBase, { fontFamily: "'Outfit', sans-serif", lineHeight: 1.55 })} />
               </div>
             ))}
@@ -12263,13 +12359,23 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
           <Fragment>
             <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
               <SmallBtn color="cyan" onClick={() => {
+                if (!rawGo("Copy it")) return;
                 navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2));
-                onToast("V3 JSON copied", "cyan");
+                onToast("V3 JSON copied" + (rawWarning ? " (without the file's extra fields)" : ""), rawWarning ? "warm" : "cyan");
               }}>Copy V3 JSON</SmallBtn>
-              <SmallBtn color="muted" onClick={() => downloadFile(JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2), safeFileName(rec.name) + ".json", "application/json")}>
+              <SmallBtn color="muted" onClick={() => {
+                if (!rawGo("Download it")) return;
+                downloadFile(JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2), safeFileName(rec.name) + ".json", "application/json");
+              }}>
                 Download JSON
               </SmallBtn>
             </div>
+            {rawWarning ? (
+              <div className="raw-warning" role="status" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-secondary)", marginBottom: 8, padding: "6px 9px",
+                borderRadius: "var(--radius-sm)", background: acRgba("warm", 0.08), border: "1px solid " + acRgba("warm", 0.3) }}>
+                {rawWarning}
+              </div>
+            ) : null}
             <pre style={{
               fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, lineHeight: 1.55,
               background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
@@ -14539,6 +14645,7 @@ function App() {
   const [tagMeta, setTagMeta] = useState(DEFAULT_TAGMETA);
   const [dupeIgnore, setDupeIgnore] = useState(EMPTY_IGNORE);
   const [folderRoles, setFolderRoles] = useState({});
+  useEffect(() => { setFolderRolesNow(folderRoles); }, [folderRoles]);
   const [dupeMode, setDupeMode] = useState({});
   const [nestedWarn, setNestedWarn] = useState([]);
   const [roots, setRoots] = useState([]);
@@ -15148,6 +15255,8 @@ function App() {
       showToast("That card is in a read-only imported folder — use Download copy", "red");
       return false;
     }
+    const ref = referenceFolderError(root, rec.dir, folderRoles);
+    if (ref) { showToast(ref, "warm"); return false; }
     const backup = settings.backupBeforeSave !== false;
     if (!window.confirm(
       "Write " + pendingEditCount(edit) + " change(s) into the card file?\n\n" +
@@ -15173,7 +15282,7 @@ function App() {
       showToast("Save failed: " + e.message, "red");
       return false;
     }
-  }, [editsMap, roots, settings.backupBeforeSave, settings.backupKeep, showToast, writeCardEdits]);
+  }, [editsMap, roots, settings.backupBeforeSave, settings.backupKeep, showToast, writeCardEdits, folderRoles]);
 
   /**
    * Save to card for a selection: one confirmation, then each card in turn,
@@ -15183,9 +15292,9 @@ function App() {
   const saveManyToCard = useCallback(async (ids) => {
     const recs = ids.map((id) => recById.get(id)).filter(Boolean);
     const withEdits = recs.filter((r) => isEdited(editsMap.get(r.fp)));
-    const writable = withEdits.filter((r) => { const rt = roots.find((x) => x.id === r.rootId); return rt && !isImportRoot(rt); });
+    const writable = withEdits.filter((r) => roots.some((x) => x.id === r.rootId) && !cardFileLock(r, roots, folderRoles));
     if (!writable.length) {
-      showToast(withEdits.length ? "Those cards are in read-only imported folders — use Download copy" : "None of the selected cards has unsaved card changes", "warm");
+      showToast(withEdits.length ? "Those cards are in read-only folders (imported, or Reference) — use Download copy" : "None of the selected cards has unsaved card changes", "warm");
       return;
     }
     const backup = settings.backupBeforeSave !== false;
@@ -15219,7 +15328,7 @@ function App() {
       (skipped ? ", " + skipped + " skipped" : "") + (failed ? ", " + failed + " failed — " + errs.join(" | ") : ""),
       failed ? "red" : "green");
     if (touched.size) runScanRef.current(Array.from(touched), false, { quiet: true });
-  }, [recById, editsMap, roots, settings.backupBeforeSave, settings.backupKeep, showToast, writeCardEdits]);
+  }, [recById, editsMap, roots, settings.backupBeforeSave, settings.backupKeep, showToast, writeCardEdits, folderRoles]);
 
   /* ---- scanning ---- */
   const runScan = useCallback(async (rootIdOrIds, force, opts) => {
@@ -15853,12 +15962,14 @@ function App() {
     const recs = ids.map((id) => recById.get(id)).filter(Boolean);
     if (!recs.length) return;
     if (isImportRoot(destRoot)) { showToast("\"" + destRoot.name + "\" is imported read-only — it can't accept moves", "red"); return; }
-    const fromImport = recs.filter((r) => { const sr = roots.find((x) => x.id === r.rootId); return sr && isImportRoot(sr); });
-    if (fromImport.length) {
-      showToast(fmtNum(fromImport.length) + " card(s) live in a read-only imported folder and can't be moved", "red");
-      if (fromImport.length === recs.length) return;
+    const intoRef = referenceFolderError(destRoot, destDir, folderRoles);
+    if (intoRef) { showToast(intoRef, "warm"); return; }
+    const locked = recs.filter((r) => cardFileLock(r, roots, folderRoles));
+    if (locked.length) {
+      showToast(fmtNum(locked.length) + " card(s) live in a read-only folder (imported, or Reference) and can't be moved", locked.length === recs.length ? "warm" : "red");
+      if (locked.length === recs.length) return;
     }
-    const movable = recs.filter((r) => { const sr = roots.find((x) => x.id === r.rootId); return sr && !isImportRoot(sr); });
+    const movable = recs.filter((r) => roots.some((x) => x.id === r.rootId) && !cardFileLock(r, roots, folderRoles));
     const label = destRoot.name + (destDir ? "/" + destDir : "");
     if (!opts.noConfirm && movable.length > 1) {
       if (!window.confirm("Move " + movable.length + " cards into " + label + "?\n\nEach file is copied and verified before the original is removed.")) return;
@@ -15893,7 +16004,7 @@ function App() {
     }
     runScanRef.current(Array.from(touched), false, { quiet: true });
     return { moved, skipped, failed, label, errs };
-  }, [recById, roots, showToast]);
+  }, [recById, roots, showToast, folderRoles]);
 
   /* ---- trash + delete ---- */
 
@@ -15961,9 +16072,9 @@ function App() {
     opts = opts || {};
     const recs = ids.map((id) => recById.get(id)).filter(Boolean);
     if (!recs.length) return;
-    const readOnly = recs.filter((r) => { const rt = roots.find((x) => x.id === r.rootId); return rt && isImportRoot(rt); });
+    const readOnly = recs.filter((r) => cardFileLock(r, roots, folderRoles));
     if (readOnly.length === recs.length) {
-      showToast("These cards live in a read-only imported folder — nothing can be deleted from it", "red");
+      showToast("These cards live in a read-only folder (imported, or Reference) — nothing can be deleted from it", "warm");
       return;
     }
     const list = recs.slice(0, 6).map((r) => "  • " + r.rel).join("\n") + (recs.length > 6 ? "\n  • …and " + (recs.length - 6) + " more" : "");
@@ -15991,7 +16102,7 @@ function App() {
       (failed.length ? " · " + failed.length + " failed — " + failed.slice(0, 2).join(" | ") : ""),
       failed.length ? "red" : "warm"
     );
-  }, [recById, roots, purgeFromIndex, showToast]);
+  }, [recById, roots, purgeFromIndex, showToast, folderRoles]);
 
   const moveCardsRef = useRef(moveCards);
   useEffect(() => { moveCardsRef.current = moveCards; }, [moveCards]);
@@ -16005,8 +16116,7 @@ function App() {
       const keepId = (keepers && keepers[g.kind + g.key]) || (defaultKeeper(g.items, roots) || {}).id;
       let others = g.items.filter((it) => {
         if (it.id === keepId) return false;
-        const rt = roots.find((x) => x.id === it.rootId);
-        return !(rt && isImportRoot(rt));   // can't touch read-only imports
+        return !cardFileLock(it, roots, folderRoles);   // can't touch imported or Reference folders
       });
       // "Exact" groups share a sampled signature; only a copy whose bytes
       // really match the keeper's is redundant.
@@ -16036,7 +16146,7 @@ function App() {
       await trashCards(victims, { noConfirm: false });
     }
     if (leftAlone) showToast(leftAlone, "warm");
-  }, [roots, recById, deleteCards, trashCards, showToast]);
+  }, [roots, recById, deleteCards, trashCards, showToast, folderRoles]);
 
   /* ---- drag and drop ---- */
   const [dragActive, setDragActive] = useState(false);
@@ -17371,6 +17481,7 @@ function App() {
               <Inspector rec={focusRec} roots={roots} edit={focusEdit} tagIndex={tagIndex}
                 dupeGroup={focusDupeGroup}
                 onSaveToCard={() => saveToCard(focusRec)}
+                writeBlock={referenceFolderError(roots.find((r) => r.id === focusRec.rootId), focusRec.dir, folderRoles)}
                 onOpenFlag={(key, note, index) => setFlagModal({ ids: [focusRec.id], key, note, index })}
                 onJumpTo={(id) => { setFocusId(id); setSelection(new Set([id])); }}
                 onPatchEdit={(p) => patchEdit(focusRec.fp, p)}

@@ -33,8 +33,9 @@ const ROOT = path.join(__dirname, "..");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry"]);
-const cardPng = (o, rgb) => {
+const cardPng = (o, rgb, more) => {
   const v3 = V.newCardPayload(o);
+  Object.assign(v3.data, more || {});
   return Buffer.from(V.writeCardIntoPng(V.solidPng(40, 60, rgb), v3, V.buildV2Payload(v3)));
 };
 
@@ -188,7 +189,10 @@ async function main() {
 
     await writeFiles(page, "Cards", [
       ["Ada Clockmaker.png", cardPng({ name: "Ada Clockmaker", description: "A clockmaker.", tags: ["victorian"] }, [90, 60, 120])],
-      ["Bram Lighthouse.png", cardPng({ name: "Bram Lighthouse", description: "Keeps the light.", tags: ["sea"] }, [40, 90, 120])],
+      ["Bram Lighthouse.png", cardPng({ name: "Bram Lighthouse", description: "Keeps the light.", tags: ["sea"] }, [40, 90, 120], {
+        alternate_greetings: ["The lamp is lit.", "A storm is coming."],
+        character_book: { name: "Coast", entries: [{ keys: ["/\\b(gulls?|terns?){1,2}\\b/i", "seabird"], content: "Birds of the coast.", insertion_order: 100 }] },
+      })],
       ["Cora Gardener.png", cardPng({ name: "Cora Gardener", description: "Grows roses.", tags: [] }, [60, 120, 60])],
     ]);
     await page.evaluate(async () => (await navigator.storage.getDirectory()).getDirectoryHandle("Frontend", { create: true }));
@@ -273,6 +277,81 @@ async function main() {
       await page.locator("text=clockwork").nth(1).waitFor();
       t.ok(true, "it appears in the sidebar's tag list");
       await page.getByPlaceholder("filter tags…").fill("");
+    });
+
+    await step("looking through a card's lorebook and greetings changes nothing", async () => {
+      await tile("Bram Lighthouse").click();
+      const saved = page.getByRole("button", { name: /Saved/ }).first();
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      // A regex key can hold a comma: going in and out of the box mustn't split it.
+      const keys = page.locator(".lore-keys").first();
+      await keys.click();
+      await keys.press("Tab");
+      t.eq(await keys.inputValue(), "/\\b(gulls?|terns?){1,2}\\b/i, seabird", "the keys are as the file has them");
+      t.ok(await saved.isVisible(), "and there's nothing to save");
+      // Editing the keys keeps the regex whole too, and typing them back is no change.
+      await keys.fill("/\\b(gulls?|terns?){1,2}\\b/i, seabird, gannet");
+      await keys.press("Tab");
+      t.eq(await keys.inputValue(), "/\\b(gulls?|terns?){1,2}\\b/i, seabird, gannet", "editing the keys keeps the regex key whole");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).waitFor();
+      await keys.fill("/\\b(gulls?|terns?){1,2}\\b/i, seabird");
+      await keys.press("Tab");
+      t.ok(await saved.isVisible(), "and typing them back leaves nothing to save");
+      // A greeting typed back to what it was is no change either, as a field is.
+      await page.getByRole("tab", { name: /^Greetings/ }).click();
+      const second = page.locator("xpath=//label[starts-with(normalize-space(), 'Alternate greetings')]/following::textarea[2]");
+      t.eq(await second.inputValue(), "A storm is coming.", "the second greeting is the file's");
+      await second.fill("A storm is coming tonight.");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).waitFor();
+      await second.fill("A storm is coming.");
+      t.ok(await saved.isVisible(), "typing it back leaves nothing to save");
+    });
+
+    await step("the Raw tab says when it hasn't read the card file, and asks before copying without it", async () => {
+      await tile("Ada Clockmaker").click();
+      await page.getByRole("tab", { name: /^Raw/ }).click();
+      await page.locator("pre").filter({ hasText: "chara_card_v3" }).first().waitFor();
+      await page.waitForFunction(() => !document.querySelector(".raw-warning"));
+      t.ok(true, "once the file is read there's no warning");
+      // A card whose file has gone since the last scan: the file can't be read.
+      await writeFiles(page, "Cards", [["Dora Vanishing.png", cardPng({ name: "Dora Vanishing", description: "Here and gone." }, [120, 40, 40])]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Dora Vanishing").waitFor();
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Dora Vanishing.png"));
+      await tile("Dora Vanishing").click();
+      await page.getByRole("tab", { name: /^Raw/ }).click();
+      const warn = page.locator(".raw-warning").filter({ hasText: "couldn't be read" });
+      await warn.waitFor();
+      t.ok(/couldn't be read/.test(await warn.innerText()) && /lorebook entry extensions/.test(await warn.innerText()), "a file that can't be read is said so, and what that leaves out", await warn.innerText());
+      const asked = [];
+      const seen = (d) => asked.push(d.message());
+      page.on("dialog", seen);
+      await page.getByRole("button", { name: "Copy V3 JSON" }).click();
+      await toast(/V3 JSON copied \(without the file's extra fields\)/);
+      page.off("dialog", seen);
+      t.ok(asked.length === 1 && /Copy it anyway\?/.test(asked[0]), "Copy asks first, and still copies when you say yes", asked);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Dora Vanishing/.test(e.textContent)));
+    });
+
+    await step("a card in a Reference folder can't be saved to its file", async () => {
+      const setRole = async (role) => {
+        await page.locator(".folder-tree, body").first().getByText("Cards", { exact: true }).first().click({ button: "right" });
+        await page.getByText(/^Role: /).hover();
+        await page.getByText(role, { exact: true }).last().click();
+      };
+      await setRole("Reference");
+      await tile("Cora Gardener").click();
+      await page.getByText("Fields", { exact: true }).click();
+      const desc = page.locator("xpath=//label[normalize-space()='Description']/following::textarea[1]");
+      await desc.fill("Grows roses and thorns.");
+      const save = page.locator("button", { hasText: "Save to card (1)" }).first();
+      await save.waitFor();
+      t.ok(await save.isDisabled(), "Save to card is off");
+      t.ok(/Reference folder, which is never written to/.test(await save.getAttribute("title")), "and says why", await save.getAttribute("title"));
+      await desc.fill("Grows roses.");
+      await setRole("Library");
+      t.ok(true, "the folder is a Library again");
     });
 
     await step("Shift-click selects the cards between, in the order shown now", async () => {

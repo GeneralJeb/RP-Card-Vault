@@ -13,8 +13,9 @@ const t = require("./harness");
 const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
-  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
+  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
+  "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -227,6 +228,45 @@ async function main() {
     t.ok(Buffer.compare(Buffer.from(fsys.get("ada.png")), Buffer.from(orig)) === 0, "and the file on disk is the original again");
   }
 
+  console.log("\nReference folders are never written to");
+  {
+    const card = (name) => { const v3 = V.newCardPayload({ name }); return V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3)); };
+    const refFs = memFs("Ref"), libFs = memFs("Lib");
+    const ref = { id: "ref", name: "Ref", role: "reference", handle: refFs.handle };
+    const lib = { id: "lib", name: "Lib", role: "library", handle: libFs.handle };
+    refFs.put("Ada.png", card("Ada"));
+    libFs.put("Kept/Bram.png", card("Bram"));
+    libFs.put("Cora.png", card("Cora"));
+    const rec = (root, dir, file) => ({ id: root.id + ":" + (dir ? dir + "/" : "") + file, rootId: root.id, rel: (dir ? dir + "/" : "") + file, dir, file, ext: "png", name: file });
+    const ada = rec(ref, "", "Ada.png"), bram = rec(lib, "Kept", "Bram.png"), cora = rec(lib, "", "Cora.png");
+    const refused = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message; } };
+    V.setFolderRolesNow({});
+
+    t.ok(/Reference folder/.test(await refused(() => V.saveCardToFile(ada, null, null, [ref]))), "Save to card refuses a card in a Reference folder");
+    t.ok(/Reference folder/.test(await refused(() => V.deleteCardFile(ada, ref))) && !!refFs.get("Ada.png"), "so does deleting it, and the file stays");
+    t.ok(/Reference folder/.test(await refused(() => V.moveCardTo(ada, ref, lib, ""))) && !!refFs.get("Ada.png") && !libFs.get("Ada.png"),
+      "and moving it out (the trash is a move), with nothing copied");
+    t.ok(/Reference folder/.test(await refused(() => V.moveCardTo(cora, lib, ref, ""))) && !!libFs.get("Cora.png") && !refFs.get("Cora.png"),
+      "nothing is moved in either");
+    t.ok(/Reference folder/.test(await refused(() => V.copyIntoRoot(ref, [], "New.png", new Blob([card("New")]), "s"))) && !refFs.get("New.png"),
+      "or copied in");
+
+    // A folder labelled Reference inside a Library counts too; the rest of the Library doesn't.
+    V.setFolderRolesNow({ "lib::Kept": "reference" });
+    t.ok(/"Lib\/Kept" is a Reference folder/.test(await refused(() => V.deleteCardFile(bram, lib))) && !!libFs.get("Kept/Bram.png"),
+      "a subfolder labelled Reference is protected the same way");
+    t.ok(/Reference folder/.test(await refused(() => V.moveCardTo(cora, lib, lib, "Kept/Deeper"))), "and so is any folder inside it");
+    const ok = await V.moveCardTo(cora, lib, lib, "Other");
+    t.ok(!ok.skipped && !!libFs.get("Other/Cora.png"), "while the rest of the Library works as before");
+    t.eq([V.cardFileLock(bram, [lib]), V.cardFileLock(ada, [ref]), V.cardFileLock(cora, [lib]),
+      V.cardFileLock({ rootId: "imp", dir: "" }, [{ id: "imp", name: "x", mode: "import" }])],
+      ["reference", "reference", "", "imported"], "the vault knows up front which cards are locked, and why");
+    t.eq(V.referenceFolderError(lib, "Kept", {}), "", "with the folder labels it's given, not only the current ones");
+    t.eq(V.agentFolderList([Object.assign({ dirs: ["Kept", "Other"] }, lib), ref]).map((f) => f.path + ":" + f.writable).join(", "),
+      "Lib:true, Lib/Kept:false, Lib/Other:true, Ref:false", "the agent is told the same: which folders it can write to");
+    V.setFolderRolesNow({});
+  }
+
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");
   {
     const png = PNG_1PX;
@@ -382,6 +422,25 @@ async function main() {
     t.eq(out.extensions, { st_world: "keep me" }, "and keeps the book's own extensions");
     t.eq(V.lorebookPatch({ lorebook: null }, V.cleanLorebook({ entries: [{ content: "First." }] })).lorebook.entries[0].content, "First.",
       "a card without a lorebook can be given one");
+  }
+
+  console.log("\ngreeting edits in the vault");
+  {
+    const body = { alternate_greetings: ["Hello.", "Hi."] };
+    t.eq(V.greetingsPatch(body, ["Hello.", "Hi there."]), { greetings: ["Hello.", "Hi there."] }, "a changed greeting is an edit");
+    t.eq(V.greetingsPatch(body, ["Hello.", "Hi."]), { greetings: null }, "greetings typed back to the file's are no edit at all");
+
+    // Lorebook keys: split at commas, but a regex key with a comma in it is one key.
+    t.eq(V.splitKeyList("gull, tern ,, seabird "), ["gull", "tern", "seabird"], "keys are split at commas and trimmed");
+    t.eq(V.splitKeyList("/\\b(gulls?|terns?){1,2}\\b/i, seabird"), ["/\\b(gulls?|terns?){1,2}\\b/i", "seabird"], "a regex key keeps its comma");
+    t.eq(V.splitKeyList("sea, /a{1,2}/gi,/b[,/]c/ , d"), ["sea", "/a{1,2}/gi", "/b[,/]c/", "d"], "anywhere in the list, with a slash or comma in a [class]");
+    t.eq(V.splitKeyList("/a\\/b,c/i"), ["/a\\/b,c/i"], "and with an escaped slash");
+    t.eq(V.splitKeyList("/unclosed, x"), ["/unclosed", "x"], "a slash that never closes is plain text");
+    t.eq(V.splitKeyList("/a,b/ then, c"), ["/a", "b/ then", "c"], "and so is something that isn't only a regex");
+    t.eq(V.splitKeyList(""), [], "an empty box is no keys");
+    t.eq(V.greetingsPatch(body, ["Hi.", "Hello."]), { greetings: ["Hi.", "Hello."] }, "a new order is an edit");
+    t.eq(V.greetingsPatch({ alternate_greetings: [] }, []), { greetings: null }, "none added to none is no edit");
+    t.eq(V.greetingsPatch(body, []), { greetings: [] }, "removing them all is an edit");
   }
 
   console.log("\nnew cards");
