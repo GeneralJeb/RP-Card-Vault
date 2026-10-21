@@ -15457,7 +15457,8 @@ function App() {
 
   // Vault data put back (Import vault data, and Restore from archive). `moreIds`
   // maps folder ids in the data to folders linked since, when names can't.
-  const applyVaultData = useCallback(async (p, moreIds) => {
+  // `lead` ({ text, color }) is what the restore did, said in the same notice.
+  const applyVaultData = useCallback(async (p, moreIds, lead) => {
     if (!p || !Array.isArray(p.edits)) throw new Error("Not a vault export");
     if (p.tagMeta) saveMeta(Object.assign({}, DEFAULT_TAGMETA, p.tagMeta));
     // Folder settings point at folder registrations, which have new ids
@@ -15487,10 +15488,10 @@ function App() {
     const answers = Array.isArray(p.aiAnswers) ? p.aiAnswers.filter((n) => n && n.id) : [];
     if (chats.length) await dbPutMany(STORE_AGENT, chats);
     if (answers.length) await dbPutMany(STORE_AINOTES, answers);
-    showToast("Imported " + fmtNum(p.edits.length) + " card records" +
+    showToast((lead ? lead.text + ", and brought back " : "Imported ") + fmtNum(p.edits.length) + " card records" +
       (chats.length ? ", " + fmtNum(chats.length) + " agent chats" : "") +
       (answers.length ? ", " + fmtNum(answers.length) + " saved AI answers" : "") +
-      (chats.length || answers.length ? ". Reloading to show them…" : ""), "green");
+      (chats.length || answers.length ? ". Reloading to show them…" : ""), lead ? lead.color : "green");
     if (lostPrivate) {
       showToast(countWord(lostPrivate, "folder") + " kept private from the AI in that export " +
         (lostPrivate === 1 ? "isn't" : "aren't") + " linked here. Add " + (lostPrivate === 1 ? "it" : "them") +
@@ -15677,18 +15678,21 @@ function App() {
       logProblem("Restore", countWord(failed.length + refused, "file") + " from the archive weren't restored",
         failed.concat(info.plan.refused.map((n) => n + " (not a safe path in a listed folder)")).join("\n"), "warn");
     }
-    showToast("Restored " + countWord(written, "file") + " into " + intoName + " and linked " + countWord(added.length, "folder") +
-      (failed.length || refused ? ". " + countWord(failed.length + refused, "file") + " weren't restored (see the problem log)" : ""),
-      failed.length || refused ? "warm" : "green");
     await runScanRef.current(added, false, { quiet: true });
-    if (withData && info.data) {
-      try {
-        const p = JSON.parse(new TextDecoder().decode(await readZipEntry(info.read, info.file.size, info.data, password)));
-        const ids = {};
-        info.manifest.roots.forEach((r, i) => { if (r.id) ids[r.id] = { id: added[i].id, prefix: "" }; });
-        await applyVaultData(p, ids);
-      } catch (e) { showToast("The folders are back, but the vault data couldn't be: " + e.message, "red"); }
-    }
+    // One notice for the whole restore, once it's all done.
+    const missed = failed.length + refused;
+    const lead = {
+      text: "Restored " + countWord(written, "file") + " into " + intoName + " and linked " + countWord(added.length, "folder") +
+        (missed ? " (" + countWord(missed, "file") + " weren't restored: see the problem log)" : ""),
+      color: missed ? "warm" : "green",
+    };
+    if (!(withData && info.data)) { showToast(lead.text, lead.color); return true; }
+    try {
+      const p = JSON.parse(new TextDecoder().decode(await readZipEntry(info.read, info.file.size, info.data, password)));
+      const ids = {};
+      info.manifest.roots.forEach((r, i) => { if (r.id) ids[r.id] = { id: added[i].id, prefix: "" }; });
+      await applyVaultData(p, ids, lead);
+    } catch (e) { showToast(lead.text + ", but the vault data couldn't be brought back: " + e.message, "red"); }
     return true;
   }, [scan.running, roots, applyVaultData, showToast]);
 

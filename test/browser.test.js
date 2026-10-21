@@ -511,11 +511,11 @@ async function main() {
       await page.evaluate(() => { window.__pickFolder = "Restored"; });
       const adas = await page.locator(".cardTile").filter({ hasText: "Ada Clockmaker" }).count();
       await page.getByRole("button", { name: "Choose where to restore…" }).click();
-      await toast(/^Restored \d+ files? into vault and linked \d+ folders?$/);
+      // One notice once it's all done: a quick scan mustn't swap it for another before you can read it.
+      await toast(/^Restored \d+ files? into vault and linked \d+ folders?, and brought back \d+ card records/);
+      t.ok(true, "one notice says what was restored and that the vault data is back");
       t.eq(Buffer.from(await readFile(page, "Restored", "vault/Cards/Ada Clockmaker.png")).toString("hex"),
         Buffer.from(await readFile(page, "Cards", "Ada Clockmaker.png")).toString("hex"), "the card is back on disk, in a new folder named after the archive");
-      await toast(/^Imported \d+ card records/);
-      t.ok(true, "and the vault data is put back");
       await page.waitForFunction((n) => document.querySelectorAll(".cardTile").length > 0 &&
         Array.from(document.querySelectorAll(".cardTile")).filter((e) => /Ada Clockmaker/.test(e.textContent)).length > n, adas);
       t.ok(true, "the restored folder is linked and scanned (its Ada Clockmaker is in the grid too)");
