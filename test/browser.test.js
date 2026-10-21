@@ -289,6 +289,14 @@ async function main() {
       await keys.press("Tab");
       t.eq(await keys.inputValue(), "/\\b(gulls?|terns?){1,2}\\b/i, seabird", "the keys are as the file has them");
       t.ok(await saved.isVisible(), "and there's nothing to save");
+      // Editing the keys keeps the regex whole too, and typing them back is no change.
+      await keys.fill("/\\b(gulls?|terns?){1,2}\\b/i, seabird, gannet");
+      await keys.press("Tab");
+      t.eq(await keys.inputValue(), "/\\b(gulls?|terns?){1,2}\\b/i, seabird, gannet", "editing the keys keeps the regex key whole");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).waitFor();
+      await keys.fill("/\\b(gulls?|terns?){1,2}\\b/i, seabird");
+      await keys.press("Tab");
+      t.ok(await saved.isVisible(), "and typing them back leaves nothing to save");
       // A greeting typed back to what it was is no change either, as a field is.
       await page.getByRole("tab", { name: /^Greetings/ }).click();
       const second = page.locator("xpath=//label[starts-with(normalize-space(), 'Alternate greetings')]/following::textarea[2]");
@@ -297,6 +305,53 @@ async function main() {
       await page.getByRole("button", { name: /Save to card \(1\)/ }).waitFor();
       await second.fill("A storm is coming.");
       t.ok(await saved.isVisible(), "typing it back leaves nothing to save");
+    });
+
+    await step("the Raw tab says when it hasn't read the card file, and asks before copying without it", async () => {
+      await tile("Ada Clockmaker").click();
+      await page.getByRole("tab", { name: /^Raw/ }).click();
+      await page.locator("pre").filter({ hasText: "chara_card_v3" }).first().waitFor();
+      await page.waitForFunction(() => !document.querySelector(".raw-warning"));
+      t.ok(true, "once the file is read there's no warning");
+      // A card whose file has gone since the last scan: the file can't be read.
+      await writeFiles(page, "Cards", [["Dora Vanishing.png", cardPng({ name: "Dora Vanishing", description: "Here and gone." }, [120, 40, 40])]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Dora Vanishing").waitFor();
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Dora Vanishing.png"));
+      await tile("Dora Vanishing").click();
+      await page.getByRole("tab", { name: /^Raw/ }).click();
+      const warn = page.locator(".raw-warning").filter({ hasText: "couldn't be read" });
+      await warn.waitFor();
+      t.ok(/couldn't be read/.test(await warn.innerText()) && /lorebook entry extensions/.test(await warn.innerText()), "a file that can't be read is said so, and what that leaves out", await warn.innerText());
+      const asked = [];
+      const seen = (d) => asked.push(d.message());
+      page.on("dialog", seen);
+      await page.getByRole("button", { name: "Copy V3 JSON" }).click();
+      await toast(/V3 JSON copied \(without the file's extra fields\)/);
+      page.off("dialog", seen);
+      t.ok(asked.length === 1 && /Copy it anyway\?/.test(asked[0]), "Copy asks first, and still copies when you say yes", asked);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Dora Vanishing/.test(e.textContent)));
+    });
+
+    await step("a card in a Reference folder can't be saved to its file", async () => {
+      const setRole = async (role) => {
+        await page.locator(".folder-tree, body").first().getByText("Cards", { exact: true }).first().click({ button: "right" });
+        await page.getByText(/^Role: /).hover();
+        await page.getByText(role, { exact: true }).last().click();
+      };
+      await setRole("Reference");
+      await tile("Cora Gardener").click();
+      await page.getByText("Fields", { exact: true }).click();
+      const desc = page.locator("xpath=//label[normalize-space()='Description']/following::textarea[1]");
+      await desc.fill("Grows roses and thorns.");
+      const save = page.locator("button", { hasText: "Save to card (1)" }).first();
+      await save.waitFor();
+      t.ok(await save.isDisabled(), "Save to card is off");
+      t.ok(/Reference folder, which is never written to/.test(await save.getAttribute("title")), "and says why", await save.getAttribute("title"));
+      await desc.fill("Grows roses.");
+      await setRole("Library");
+      t.ok(true, "the folder is a Library again");
     });
 
     await step("Shift-click selects the cards between, in the order shown now", async () => {
