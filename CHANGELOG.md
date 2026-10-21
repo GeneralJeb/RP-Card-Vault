@@ -12,6 +12,7 @@ If you skipped several releases, read every section down to the one you had.
 
 - **Clicking into a lorebook entry's keys and out again no longer changes them.** Leaving the keys box always split its text again at every comma, even when you hadn't typed anything. A regex key with a comma in it, like `/(gulls?|terns?){1,2}/i`, came out as `{1, 2}`, a different pattern, and the card showed a lorebook change waiting to be saved. The keys are now only read again when you change them.
 - **A greeting edited back to what it was is no longer a change to save.** A field typed back to the file's text stops counting as an edit, and so does a lorebook, but alternate greetings stayed "1 local edit" (and Save to card stayed on) until you pressed "revert all greetings". The same goes for adding a greeting and removing it again.
+- **New theme: Lantern (dark, low glare).** For using the vault in a dark room: like Vault, warm, but with darker, browner backgrounds and text about a fifth less bright. Its red, blue, pink and purple are lifted so they're easier to read as small text. Pick it in Settings → Theme.
 
 ## 1.6.1
 
