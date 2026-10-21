@@ -8,6 +8,14 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.0
+
+- **Vault archive: everything in one .zip.** Settings → Vault archive → Export archive saves your linked card folders, as they are on disk, together with your vault data (tags, notes, ratings, edits, settings and agent chats) in a single .zip. Keep it on another drive in case something goes wrong, or use it to move the vault to another computer. It's a plain zip, so any computer can open it and you can take a card out by hand.
+  - **Size:** card pictures are already compressed, so an archive comes out close to the size of your folders; the card text inside them is what shrinks. Big libraries are fine: the archive is written to disk one file at a time.
+  - **Optional password:** with one, every file in the archive is encrypted with AES-256, the same way WinZip and 7-Zip do it. The vault, 7-Zip and WinRAR open it; Windows' own zip viewer can't. File and folder names still show (zip keeps them in the clear). A forgotten password can't be recovered.
+  - **Left out unless you tick them:** folders you keep private from the AI, and the copies Save to card keeps in `_vault backups`.
+- **Restore from archive.** Pick an archive and the vault shows what's in it first (and checks the password). Then pick a folder: the archive's folders go into a new folder inside it, named after the archive, so nothing already there is touched. They're linked and scanned, and your vault data is put back on top. Every file is checked before it's written, and anything that doesn't check out, or isn't a safe file name, is skipped and listed in the problem log.
+
 ## 1.5.10
 
 - **Ctrl+F and Ctrl+S no longer act on the card you're looking at.** With a card open, the vault took Ctrl+F (the browser's Find) as its F key and favourited or unfavourited the card, and took Ctrl+S as its S key and started sending the card to your front end. The single-key shortcuts (F, S and the arrow keys) now only work on their own, and the browser's Ctrl, Alt and Cmd shortcuts are left to the browser.
