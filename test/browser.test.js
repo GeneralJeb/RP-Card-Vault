@@ -218,6 +218,24 @@ async function main() {
       t.ok(true, "clearing it brings the rest back");
     });
 
+    await step("Ctrl+F and Ctrl+S are the browser's, not the card's f and s", async () => {
+      const favourites = () => page.evaluate(() => new Promise((res) => {
+        const r = indexedDB.open("rpCardVault");
+        r.onsuccess = () => {
+          const q = r.result.transaction("edits", "readonly").objectStore("edits").getAll();
+          q.onsuccess = () => res(q.result.filter((e) => e.favorite).length);
+        };
+      }));
+      const before = await favourites();
+      await tile("Bram Lighthouse").click();
+      await page.keyboard.press("Control+f");
+      await page.keyboard.press("Control+s");
+      await page.waitForTimeout(500);
+      t.eq(await favourites(), before, "Ctrl+F doesn't favourite the card you're looking at");
+      t.eq(await page.getByText("Normalize tag case and separators").count(), 0, "and Ctrl+S doesn't start a send (which opens Settings with no destination)");
+      await page.keyboard.press("Escape");
+    });
+
     await step("an edit is saved into the card file, with a backup", async () => {
       await tile("Ada Clockmaker").click();
       await page.getByText("Fields", { exact: true }).click();
