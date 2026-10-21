@@ -513,11 +513,13 @@ async function main() {
   console.log("\na rescan only drops the cards whose files are really gone");
   {
     const cardJson = (n) => new TextEncoder().encode(JSON.stringify({ spec: "chara_card_v2", spec_version: "2.0", data: { name: n, description: "About " + n, first_mes: "Hi." } }));
-    // fail: { open: file name whose getFile() throws, list: folder name whose listing throws after one entry }
+    // fail: { open: file name whose getFile() throws, list: folder name whose listing throws after one entry,
+    //         extra: one more file at the top, missing: a file listed but "not found" when opened }
     const tree = (fail) => {
       fail = fail || {};
       const file = (name) => ({ kind: "file", name, async getFile() {
         if (fail.open === name) throw new Error("The file is in use");
+        if (fail.missing === name) throw Object.assign(new Error("A requested file or directory could not be found at the time an operation was processed."), { name: "NotFoundError" });
         return new File([cardJson(name)], name, { lastModified: 1 });
       } });
       const dir = (name, kids) => ({ kind: "directory", name,
@@ -529,7 +531,7 @@ async function main() {
           }
         } });
       return dir("Cards", [file("Ada.json"), file("Bram.json"), file("Cora.json"),
-        dir("Old", [file("Dain.json"), file("Edda.json")])]);
+        dir("Old", [file("Dain.json"), file("Edda.json")])].concat(fail.extra ? [file(fail.extra)] : []));
     };
     const root = (fail) => ({ id: "r1", name: "Cards", role: "library", handle: tree(fail) });
     const go = { stop: false };
@@ -548,6 +550,21 @@ async function main() {
     const locked = await V.scanRoot(root({ open: "Bram.json" }), known(), go, () => {});
     t.ok(locked.records.some((r) => r.rel === "Bram.json") && !locked.removed.length,
       "a card file that can't be opened just now keeps its record", locked.records.map((r) => r.rel).join());
+
+    // Chrome and Edge list a file whose full path is over Windows' 260 characters, then can't open it.
+    const long = "I Was Just Walking Home Through Gotham When Supergirl Landed in Front of Me, Said She Spotted Me From the Sky and Couldn't Focus on Anything Else.json";
+    const longScan = await V.scanRoot(root({ extra: long, missing: long }), known(), go, () => {});
+    const lr = longScan.records.find((r) => r.rel === long);
+    t.ok(lr && !lr.ok && lr.unopened, "a card file that's listed but can't be opened is indexed as unreadable, not left out", lr);
+    t.ok(lr && /260-character limit/.test(lr.err) && /file name alone is \d+ characters/.test(lr.err) && /Rename it/.test(lr.err),
+      "and says why, and what to do", lr && lr.err);
+    t.eq(longScan.unopened.map((r) => r.rel), [long], "the scan reports it, so the vault can say so");
+    const fresh = await V.scanRoot(root({ open: "Bram.json", extra: long, missing: long }), new Map(), go, () => {});
+    const fb = fresh.records.find((r) => r.rel === "Bram.json");
+    t.ok(fb && !fb.ok && /^Couldn't open the file: The file is in use/.test(fb.err), "one never read before that can't be opened says the error as it is", fb && fb.err);
+    t.ok(fb && lr && fb.fp !== fresh.records.find((r) => r.rel === long).fp, "two unopened cards aren't taken for duplicates of each other");
+    const later = await V.scanRoot(root(), new Map(longScan.records.map((r) => [r.id, r])), go, () => {});
+    t.ok(!later.records.some((r) => r.rel === long) && later.removed.includes(lr.id), "once it's renamed, the unreadable entry goes");
 
     let res, threw = null;
     try { res = await V.scanRoot(root({ list: "Old" }), known(), go, () => {}); } catch (e) { threw = e; }

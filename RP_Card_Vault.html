@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.6.1";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -2057,17 +2057,51 @@ function groupPickedFiles(fileList) {
  * handle-based scanner and the read-only import scanner so the two can never
  * drift apart.
  */
-async function processCardFile(root, info, file) {
-  const id = root.id + ":" + info.rel;
-  const rec = {
-    id, rootId: root.id, rel: info.rel, dir: info.dir, file: info.file, ext: info.ext,
-    size: file.size, mtime: file.lastModified, scanVersion: 1,
+/** An index record before the file's been read: what the listing told us. */
+function cardRecordBase(root, info, size, mtime) {
+  return {
+    id: root.id + ":" + info.rel, rootId: root.id, rel: info.rel, dir: info.dir, file: info.file, ext: info.ext,
+    size, mtime, scanVersion: 1,
     scannedAt: Date.now(), ok: false, err: "", spec: "none",
     name: baseName(info.file), creator: "", version: "",
     tags: [], tokensCore: 0, tokensAll: 0, tokensGreetings: 0, tokensLore: 0,
     altCount: 0, loreCount: 0, assetCount: 0, descPreview: "",
     sig: "", fp: "", lfp: "", hasThumb: false,
   };
+}
+
+/**
+ * Why a file that's in the folder couldn't be opened. Chrome and Edge list a
+ * file whose full path is over Windows' 260-character limit, then can't open
+ * it ("not found"); the vault can't see the folders above a linked one, so the
+ * name's length is the best clue it can give.
+ */
+function unopenedFileMessage(rel, e) {
+  if (e && e.name === "NotFoundError") {
+    const name = String(rel || "").split("/").pop();
+    return "Windows can't open this file. Its full path is most likely over Windows' 260-character limit" +
+      (name.length > 100 ? " (the file name alone is " + name.length + " characters)" : "") +
+      ". Rename it to something shorter, then rescan.";
+  }
+  return "Couldn't open the file: " + ((e && e.message) || "unknown error");
+}
+
+/**
+ * A card file the scan could list but not open, kept in the index as
+ * unreadable so it shows up (Filters → Unreadable) instead of quietly missing.
+ */
+function unopenedCardRecord(root, info, e) {
+  const rec = cardRecordBase(root, info, 0, 0);
+  rec.scanVersion = 0;   // never reused: the next scan tries again
+  rec.err = unopenedFileMessage(info.rel, e);
+  rec.unopened = true;
+  rec.fp = rec.lfp = "nofp:open:" + rec.id;   // its own, so two of them aren't "duplicates"
+  return rec;
+}
+
+async function processCardFile(root, info, file) {
+  const id = root.id + ":" + info.rel;
+  const rec = cardRecordBase(root, info, file.size, file.lastModified);
 
   try { rec.sig = await byteSignature(file); }
   catch (e) { /* non-fatal */ }
@@ -2156,7 +2190,7 @@ async function scanRoot(root, existing, ctl, onProgress) {
     return { error: "Couldn't read " + root.name + ": " + unread[0].err.message, records: [], bodies: [], thumbs: [], removed: [] };
   }
 
-  const records = [], bodies = [], thumbs = [];
+  const records = [], bodies = [], thumbs = [], unopened = [];
   const seenIds = new Set();
   let done = 0, stopped = false;
 
@@ -2172,7 +2206,15 @@ async function scanRoot(root, existing, ctl, onProgress) {
     const prev = existing.get(id);
     let file;
     try { file = await f.handle.getFile(); }
-    catch (e) { if (prev) records.push(prev); continue; }
+    catch (e) {
+      // A card read before keeps its record (the file may just be in use);
+      // one never read is indexed as unreadable, saying why.
+      if (prev && prev.ok) { records.push(prev); continue; }
+      const rec = unopenedCardRecord(root, f, e);
+      records.push(rec);
+      unopened.push(rec);
+      continue;
+    }
 
     if (reusableRecord(prev, file)) { records.push(prev); continue; }
 
@@ -2193,7 +2235,7 @@ async function scanRoot(root, existing, ctl, onProgress) {
   }
   for (const d of root.dirs || []) if (inUnread(d) && dirList.indexOf(d) < 0) dirList.push(d);
 
-  return { records, bodies, thumbs, removed, error: null, count: files.length, dirs: dirList.sort() };
+  return { records, bodies, thumbs, removed, error: null, count: files.length, dirs: dirList.sort(), unopened };
 }
 
 /** Read-only scan over files handed to us by a directory <input>. */
@@ -15198,6 +15240,7 @@ function App() {
     setScan({ running: true, done: 0, total: 0, label: "Starting…", rootName: "" });
 
     let working = cards.slice();
+    const unopened = [];
     for (const root of list) {
       if (stopRef.current.stop) break;
       const existing = new Map();
@@ -15217,6 +15260,7 @@ function App() {
       // while this scan ran. Then nothing of it is written back: no records,
       // and no folder record either.
       if (!(await dbHas(STORE_ROOTS, root.id))) continue;
+      for (const r of res.unopened || []) unopened.push(root.name + "/" + r.rel + "\n  " + r.err);
       // Short ids: kept by path, carried over by the vault's own moves and by renames.
       {
         const prevById = new Map(working.map((c) => [c.id, c]));
@@ -15251,7 +15295,12 @@ function App() {
       }
     }
     setScan(SCAN_IDLE);
-    if (!quiet) showToast("Scan complete — " + fmtNum(working.length) + " cards indexed", "green");
+    if (unopened.length) logProblem("Scan", countWord(unopened.length, "card file") + " couldn't be opened", unopened.join("\n"), "warn");
+    if (!quiet) {
+      showToast("Scan complete — " + fmtNum(working.length) + " cards indexed" +
+        (unopened.length ? ". " + countWord(unopened.length, "file") + " couldn't be opened: Filters → Unreadable shows why" : ""),
+        unopened.length ? "warm" : "green");
+    }
     // A scan means folder access is granted: a good moment for a due backup.
     setTimeout(() => { if (backupRef.current) backupRef.current(false); }, 1500);
     return working;
@@ -15580,7 +15629,7 @@ function App() {
           file = await it.get();
           if (file.size > ARCHIVE_ENTRY_MAX) throw new Error("over " + fmtBytes(ARCHIVE_ENTRY_MAX));
           data = new Uint8Array(await file.arrayBuffer());
-        } catch (e) { unread.push(it.folder + "/" + it.rel + " (" + e.message + ")"); continue; }
+        } catch (e) { unread.push(it.folder + "/" + it.rel + " (" + unopenedFileMessage(it.rel, e) + ")"); continue; }
         await zw.add(ARCHIVE_CARDS_DIR + "/" + it.folder + "/" + it.rel, data, file.lastModified);
         bytes += data.length; files++;
       }
