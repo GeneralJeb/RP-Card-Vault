@@ -8,6 +8,11 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.2
+
+- **Clicking into a lorebook entry's keys and out again no longer changes them.** Leaving the keys box always split its text again at every comma, even when you hadn't typed anything. A regex key with a comma in it, like `/(gulls?|terns?){1,2}/i`, came out as `{1, 2}`, a different pattern, and the card showed a lorebook change waiting to be saved. The keys are now only read again when you change them.
+- **A greeting edited back to what it was is no longer a change to save.** A field typed back to the file's text stops counting as an edit, and so does a lorebook, but alternate greetings stayed "1 local edit" (and Save to card stayed on) until you pressed "revert all greetings". The same goes for adding a greeting and removing it again.
+
 ## 1.6.1
 
 - **A card file the vault can't open now shows up, saying why.** Chrome and Edge can see a file whose full path is longer than Windows' 260-character limit, but can't open it, and the scan used to leave such a card out without a word: it was in your folder but not in the vault. It's now indexed as unreadable (Filters → Unreadable), with what to do: rename it to something shorter, then rescan. The scan's notice says how many couldn't be opened, and the problem log lists them. An archive that can't read a file says the same.
