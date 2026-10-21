@@ -280,6 +280,41 @@ else {
   }
 }
 
+console.log("\nthe .vbs opens your default browser when it can run the vault (run for real on Windows)");
+{
+  const vbs = read("RP Card Vault.vbs");
+  const text = vbs ? vbs.toString("latin1") : "";
+  const fn = (n) => (text.match(new RegExp("Function " + n + "[\\s\\S]*?End Function")) || [""])[0];
+  t.ok(!vbs || (fn("DefaultChromium") && /UrlAssociations\\http\\UserChoice\\ProgId/.test(text) && /found = DefaultChromium\(\)/.test(text)),
+    "it asks Windows for the default browser before trying its own list");
+  if (!vbs || process.platform !== "win32") t.skip("running the .vbs browser choice", vbs ? "not on Windows" : "not in this folder");
+  else {
+    const os = require("os");
+    const { execFileSync } = require("child_process");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-browser-"));
+    try {
+      const cases = [
+        ['"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" --single-argument %1', "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe", true],
+        ['"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" --single-argument %1', "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", true],
+        ["C:\\Apps\\Vivaldi\\vivaldi.exe -- %1", "C:\\Apps\\Vivaldi\\vivaldi.exe", true],
+        ['"C:\\Program Files\\Mozilla Firefox\\firefox.exe" -osint -url "%1"', "C:\\Program Files\\Mozilla Firefox\\firefox.exe", false],
+        ["", "", false],
+      ];
+      const vbq = (x) => '"' + x.replace(/"/g, '""') + '"';
+      fs.writeFileSync(path.join(dir, "probe.vbs"), "Option Explicit\r\nDim fso\r\nSet fso = CreateObject(\"Scripting.FileSystemObject\")\r\n" +
+        fn("ExeFromCommand") + "\r\n" + fn("IsChromium") + "\r\n" +
+        cases.map((c) => "WScript.Echo ExeFromCommand(" + vbq(c[0]) + ") & \"|\" & IsChromium(ExeFromCommand(" + vbq(c[0]) + "))").join("\r\n") + "\r\n");
+      const got = execFileSync("cscript.exe", ["//nologo", path.join(dir, "probe.vbs")], { encoding: "latin1", windowsHide: true, timeout: 30000 }).trim().split(/\r?\n/);
+      t.eq(got, cases.map((c) => c[1] + "|" + (c[2] ? "True" : "False")),
+        "it reads the program from the browser's command line, and takes Chrome, Edge, Brave or Vivaldi but not Firefox");
+    } catch (e) {
+      t.ok(false, "running the .vbs browser choice", String(e && e.message || e).slice(0, 200));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}
+
 {
   const html = read("RP_Card_Vault.html");
   if (!html) t.skip("the app's port references", "not in this folder");
