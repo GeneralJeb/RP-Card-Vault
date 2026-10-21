@@ -348,6 +348,15 @@ async function main() {
       ["ABC", "CBA", "BCA", "ACB", "ABC", "ABC"], "sortCards orders like the grid for each sort");
     t.eq(names("random").split("").sort().join(""), "ABC", "random keeps every card");
     t.eq(cards.map((c) => c.name).join(""), "BAC", "and the original list is left alone");
+    // Random with a seed: one shuffle that stays put while cards change.
+    const many = "ABCDEFGHIJKLMNOP".split("").map((n) => ({ id: "r:" + n + ".png", name: n, tags: [] }));
+    const shuffled = (list, seed) => V.sortCards(list, "random", seed).map((c) => c.name).join("");
+    const first = shuffled(many, 0.42);
+    const favourited = many.map((c, i) => (i === 3 ? Object.assign({}, c, { favorite: true }) : c));
+    t.eq(shuffled(favourited, 0.42), first, "the same shuffle keeps its order when a card changes (it used to deal again)");
+    t.eq(shuffled(many.slice().reverse(), 0.42), first, "or when the cards come in another order");
+    t.eq(shuffled(many.slice(2), 0.42), first.replace(/[AB]/g, ""), "a card leaving takes only its own place");
+    t.ok(shuffled(many, 0.43) !== first, "a new seed is a new shuffle");
     t.ok(V.AGENT_WAITING_PHRASES.length >= 16 && V.AGENT_THINKING_PHRASES.length >= 12 && V.AGENT_LOADERS.length >= 5,
       "there's a good spread of loading phrases and animations");
   }

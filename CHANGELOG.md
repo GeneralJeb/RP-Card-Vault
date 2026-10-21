@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.5.10
+
+- **Ctrl+F and Ctrl+S no longer act on the card you're looking at.** With a card open, the vault took Ctrl+F (the browser's Find) as its F key and favourited or unfavourited the card, and took Ctrl+S as its S key and started sending the card to your front end. The single-key shortcuts (F, S and the arrow keys) now only work on their own, and the browser's Ctrl, Alt and Cmd shortcuts are left to the browser.
+- **Random order stays put while you work.** With the grid sorted Random, favouriting a card, typing a note or any other change dealt the whole grid again, so the card you'd just changed jumped somewhere else. Random now shuffles once each time you choose it, and new or removed cards don't reshuffle the rest. The agent chat's card list uses the same shuffle as the grid, as it does for the other sorts.
+- **Tag search works with "Normalize tag case and separators" off.** The tag filter box in the sidebar, the Tag manager's search and the tag suggestions under a card's tag box found almost nothing with that setting off: typing "sci" or "Sci-Fi" didn't find "Sci-Fi", and "NSFW" didn't find "NSFW". They now find the tags as they're written, in any case.
+
 ## 1.5.9
 
 - **Shift-click selects the cards you see between your two clicks.** The vault remembered where in the grid you last clicked, not which card, so after a re-sort, a search or a rescan, Shift-click started from whatever card had moved into that spot. That could select cards you never meant to, ready for the next Move, Trash or Delete. It now starts from the card you clicked. If that card is no longer shown, Shift-click picks just the card you click.
