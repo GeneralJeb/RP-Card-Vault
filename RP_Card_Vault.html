@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.4";
+const APP_VERSION = "1.6.5";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -4648,8 +4648,11 @@ function parseTagSuggestions(text, existing, cap) {
   let list;
   if (data && Array.isArray(data.tags)) list = data.tags;
   else {
+    // JSON in another shape, or cut off, isn't a list either: its pieces
+    // would be tags like {"tags": ["fantasy
+    if (data) return null;
     const pieces = String(text == null ? "" : text).split(/[,\n]/).map((p) => p.trim()).filter(Boolean);
-    if (!pieces.length || pieces.some((p) => !aiCleanTag(p))) return null;
+    if (!pieces.length || pieces.some((p) => !aiCleanTag(p) || /[{}[\]`]/.test(p))) return null;
     list = pieces;
   }
   const have = new Set((existing || []).map((t) => normTagName(t)));
@@ -4685,10 +4688,14 @@ function aiMacrosIn(text) {
  */
 function parseRewrite(text, original) {
   const s = String(text == null ? "" : text);
-  const open = s.search(/<rewrite>/i);
-  if (open < 0) {
+  const first = s.search(/<rewrite>/i);
+  if (first < 0) {
     return { ok: false, error: "The model didn't answer with a <rewrite> block, so there's nothing safe to propose. Its reply is below." };
   }
+  // The block is the one the closing tag ends: a reply that names the tag
+  // first ("here is the <rewrite> block:") starts at its last opening tag.
+  const end = s.slice(first).search(/<\/rewrite>/i);
+  const open = end < 0 ? first : first + s.slice(first, first + end).toLowerCase().lastIndexOf("<rewrite>");
   const rest = s.slice(open + "<rewrite>".length);
   const close = rest.search(/<\/rewrite>/i);
   if (close < 0) {
