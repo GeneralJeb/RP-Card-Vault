@@ -203,6 +203,9 @@ console.log("\nTighten replies are checked before they can be proposed");
   t.ok(out.proposal.meta.warnings.some((w) => /\{\{char\}\}/.test(w) && /\{\{user\}\}/.test(w) && /<START>/.test(w)), "with a warning naming every macro it dropped");
   t.eq(out.proposal.meta.base, orig, "and the text it was made from");
   t.eq(out.proposal.meta.notes, "Cut repetition.", "and its note");
+  out = V.interpretAiResult(done("Here is the <rewrite> block:\n<rewrite>\nMira runs the tavern and distrusts you.\n</rewrite>"), ctx);
+  t.eq(out.proposal && out.proposal.value.description, "Mira runs the tavern and distrusts you.",
+    "a reply that names the <rewrite> tag before the block proposes only the block");
   t.eq(V.aiMacrosIn("{{Char}} and {{ user }} <START>"), ["{{char}}", "{{user}}", "<START>"], "macros are matched loosely");
 }
 
@@ -222,6 +225,12 @@ console.log("\ncritique and tags");
   t.eq(out.proposal.value, ["tavern", "slow burn", "found family"], "a bare list is accepted");
   out = V.interpretAiResult(done("This card is about a tavern keeper, and it would suit tags like cosy or slice of life."), { kind: "tags", existingTags: [] });
   t.ok(out.ok && !out.proposal, "a paragraph isn't split into fake tags");
+  out = V.interpretAiResult(done('{"tags": ["tavern", "cosy"', { finish: "length" }), { kind: "tags", existingTags: [], maxTokens: 800 });
+  t.ok(!out.ok, "tags JSON cut off at the budget is a failure, not split into tags");
+  for (const reply of ['{"tags": ["tavern", "cosy"', '{"tags":"tavern, cosy"}', '{"suggested":["tavern","cosy"]}', '["tavern", "cosy"]', '```json\n{"tags": ["tavern",\n```']) {
+    out = V.interpretAiResult(done(reply), { kind: "tags", existingTags: [] });
+    t.ok(out.ok && out.offFormat && !out.proposal, "JSON that isn't the shape asked for is shown, not split into tags: " + reply.split("\n")[0]);
+  }
   out = V.interpretAiResult(done('{"tags":["tavern","cosy"]}'), { kind: "tags", existingTags: [], tagTarget: "card" });
   t.eq([out.proposal.bucket, out.proposal.value], ["cardTags", { add: ["tavern", "cosy"], remove: [] }],
     "with the switch on the card's own tags, the same answer is suggested as card tags");
