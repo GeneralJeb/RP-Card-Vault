@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.6
+
+- **A forked chat keeps working.** Forking at a reply that had also called tools ("Let me search." followed by a search) copied the reply but not the tools' results. With native tool calling, the endpoint then refused every message sent in the fork, because a call was left unanswered. The fork now brings that reply's tool results with it.
+- **A chat closed mid-turn can carry on.** If the vault was closed or reloaded while the agent waited for you to approve a change, the chat was saved with that call unanswered, and every later message failed the same way. The agent is now told that call never ran, and the chat goes on.
+- **The text-only tool fallback reads a call whole.** For a model without tool calling, a call whose own text held `</tool>` or `<tool_result>`, such as a note about how tools are called, was cut short or thrown away, and a piece of it showed up in the reply. Those tags inside a call's arguments are now just text.
+
 ## 1.6.5
 
 - **Suggest tags no longer turns a broken answer into junk tags.** When the model's JSON was cut off at Max tokens out, or came back in another shape (the tags as one string, a bare list in brackets, a different key), the vault split the raw text on commas and suggested tags like `{"tags": ["fantasy`. With "Add vault-only tags automatically" on, those went straight onto the card. Now a cut-off answer is reported as cut off, and any other JSON is shown as an answer that wasn't in the format asked for, with nothing proposed.

@@ -1679,6 +1679,69 @@ async function privateTests() {
     const note = V.agentPinnedNote(recs[1]);
     t.ok(/private from the AI/.test(note) && note.indexOf("Brass Golem") < 0, "a pinned private card is described without its name");
   }
+
+  console.log("\nevery tool call the model is sent has its result");
+  {
+    // Each call must be answered before the next turn, or the endpoint refuses the whole request.
+    const unanswered = (msgs) => {
+      const open = new Set();
+      const bad = [];
+      for (const m of msgs) {
+        if (m.role === "tool") { if (!open.delete(m.tool_call_id)) bad.push("orphan " + m.tool_call_id); continue; }
+        for (const id of open) bad.push(id);
+        open.clear();
+        for (const c of m.tool_calls || []) open.add(c.id);
+      }
+      return bad.concat(Array.from(open));
+    };
+    const s = V.newAgentSession("s", 1);
+    s.messages = [
+      { role: "user", text: "Find the tea cards." },
+      { role: "assistant", text: "Let me search.", calls: [{ id: "c1", name: "grep_cards", args: "{\"pattern\":\"tea\"}" }] },
+      { role: "tool", id: "c1", name: "grep_cards", args: "{\"pattern\":\"tea\"}", result: "2 cards match.", ok: true },
+      { role: "assistant", text: "Two of them." },
+    ];
+    const f = V.agentForkSession(s, 1, "f", 2).session;
+    t.eq(f.messages.map((m) => m.role), ["user", "assistant", "tool"], "forking at a reply that called tools brings that reply's results with it");
+    f.messages.push({ role: "user", text: "Go on." });
+    t.eq(unanswered(V.agentModelMessages(f, {}, {})), [], "so the fork's next request is one the endpoint takes");
+
+    // The page was closed while a call waited for your approval: the call was saved, its result never was.
+    const cut = V.newAgentSession("c", 1);
+    cut.messages = [
+      { role: "user", text: "Tidy agent.md." },
+      { role: "assistant", text: "", calls: [{ id: "a", name: "fs_read", args: "{}" }, { id: "b", name: "fs_write", args: "{}" }] },
+      { role: "tool", id: "a", name: "fs_read", args: "{}", result: "notes", ok: true },
+      { role: "user", text: "Are you there?" },
+    ];
+    let msgs = V.agentModelMessages(cut, {}, {});
+    t.eq(unanswered(msgs), [], "a call left without a result (the page closed mid-turn) is answered for it");
+    t.ok(/not run/i.test(msgs.filter((m) => m.tool_call_id === "b")[0].content), "with a result saying it never ran");
+    t.ok(msgs.map((m) => m.role).join() === "system,user,assistant,tool,tool,user", "right after the call's other results");
+    msgs = V.agentModelMessages(Object.assign({}, cut, { textMode: true }), {}, {});
+    t.ok(/<tool_result name="fs_write">\s*Not run/i.test(msgs[3].content) && /name="fs_read"/.test(msgs[3].content),
+      "and the same as text, for a model without tool calling");
+    t.eq(unanswered(V.agentModelMessages(Object.assign({}, cut, { messages: cut.messages.slice(0, 2) }), {}, {})), [],
+      "even when the call is the last thing in the chat");
+  }
+
+  console.log("\nthe text fallback reads a block's own arguments whole");
+  {
+    // A note about tools, written in text mode, holds the very tags the blocks use.
+    const note = "Call it like <tool name=\"x\">{}</tool>; results come back in <tool_result> blocks.";
+    const reply = "Saving it.\n<tool name=\"fs_write\">" + JSON.stringify({ path: "notes/tools.md", text: note }) + "</tool>";
+    const p = V.parseTextToolCalls(reply);
+    t.eq([p.text, p.calls.length], ["Saving it.", 1], "a </tool> inside the arguments doesn't end the block");
+    t.eq(JSON.parse(p.calls[0].args).text, note, "and the arguments arrive intact");
+    const acc = V.aiStreamStep(V.aiStreamStep(V.aiEmptyStream(), { t: "text", v: reply }), { t: "done" });
+    const step = V.interpretAgentStep(acc, true);
+    t.ok(step.ok && step.text === "Saving it." && step.calls.length === 1 && JSON.parse(step.calls[0].args).text === note,
+      "nor does a <tool_result> inside them count as a result the model made up");
+    t.eq(V.parseTextToolCalls("<tool name=\"a\">{\"x\":1</tool>\n<tool name=\"b\">{}</tool>").calls.map((c) => [c.name, c.args]),
+      [["a", "{\"x\":1"], ["b", "{}"]], "broken arguments still end at the first </tool>, and the next block is its own call");
+    t.eq(V.dropModelResults("<tool name=\"a\">{}</tool>\n<tool_result>made up</tool_result>"), "<tool name=\"a\">{}</tool>",
+      "a made-up result after a block is still cut");
+  }
 }
 
 main().catch((e) => { console.error("harness error:", e && e.stack || e); process.exit(1); });
