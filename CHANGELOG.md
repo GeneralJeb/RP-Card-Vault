@@ -8,6 +8,24 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.6
+
+- **A forked chat keeps working.** Forking at a reply that had also called tools ("Let me search." followed by a search) copied the reply but not the tools' results. With native tool calling, the endpoint then refused every message sent in the fork, because a call was left unanswered. The fork now brings that reply's tool results with it.
+- **A chat closed mid-turn can carry on.** If the vault was closed or reloaded while the agent waited for you to approve a change, the chat was saved with that call unanswered, and every later message failed the same way. The agent is now told that call never ran, and the chat goes on.
+- **The text-only tool fallback reads a call whole.** For a model without tool calling, a call whose own text held `</tool>` or `<tool_result>`, such as a note about how tools are called, was cut short or thrown away, and a piece of it showed up in the reply. Those tags inside a call's arguments are now just text.
+
+## 1.6.5
+
+- **Suggest tags no longer turns a broken answer into junk tags.** When the model's JSON was cut off at Max tokens out, or came back in another shape (the tags as one string, a bare list in brackets, a different key), the vault split the raw text on commas and suggested tags like `{"tags": ["fantasy`. With "Add vault-only tags automatically" on, those went straight onto the card. Now a cut-off answer is reported as cut off, and any other JSON is shown as an answer that wasn't in the format asked for, with nothing proposed.
+- **Tighten proposes only the rewrite.** A reply that mentioned the `<rewrite>` tag before writing its block ("Here is the <rewrite> block:") had that sentence and a stray `<rewrite>` proposed as the start of the new field text. The rewrite is now the text inside the block the closing tag ends.
+
+## 1.6.4
+
+- **The shortcuts open your default browser.** RP Card Vault.vbs, which the desktop and Start Menu shortcuts run, always looked for Chrome first, then Edge, then Brave, whatever your default browser was. It now asks Windows for your default browser and uses it whenever it's one the vault runs in: Chrome, Edge, Brave or Vivaldi. Only when it isn't (Firefox, say) does it fall back to that list. Brave ships with the File System Access API the vault needs switched off; the vault explains how to turn it on.
+- **HOW TO RUN says that closing the vault doesn't stop its server.** It keeps running in the background, so the vault opens straight away next time; Stop RP Card Vault.bat turns it off.
+
+**Updating:** this release changes RP Card Vault.vbs and HOW TO RUN.txt as well as the usual files. Your shortcuts don't need making again.
+
 ## 1.6.3
 
 - **Reference folders are never written to, as they say.** Creating, copying and moving cards into a Reference folder was already refused, but Save to card, Delete, Move to trash and moving cards out of one weren't. Now nothing changes a card file in a Reference folder, or puts one there, whichever part of the vault asks (the agent included). That goes for a folder you've labelled Reference inside another folder too. The inspector's Save to card button is off for those cards and says why. To change cards there, give the folder another role (right-click it in the folder tree).
