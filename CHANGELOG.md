@@ -8,6 +8,11 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.7
+
+- **The local server no longer follows a redirect to another server.** If an address you saved (an AI endpoint, or a front end under Destinations) answered by sending the request on somewhere else, the server followed it, re-sending everything: the prompt with your card's text, a sign-in's password, an importer's token header. That happened even with Local models only on. Now a redirect is only followed on the same server. A redirect anywhere else is refused, and the error names where it pointed, so you can save that address instead if it's the right one.
+- **Test connection can't hang.** An AI endpoint that sent the start of its answer and then went quiet left Test connection spinning for good, and did the same to a chat when the stalled answer was an error. Both now give up after their usual time limit and say so.
+
 ## 1.6.6
 
 - **A forked chat keeps working.** Forking at a reply that had also called tools ("Let me search." followed by a search) copied the reply but not the tools' results. With native tool calling, the endpoint then refused every message sent in the fork, because a call was left unanswered. The fork now brings that reply's tool results with it.

@@ -33,7 +33,8 @@ function freePort() {
 /* ── fake endpoints ─────────────────────────────────────────────────────── */
 
 const seen = { auth: [], bodies: [], closedEarly: 0 };
-let mode = "sse";          // sse | json | think | html | slow | silent | fail503 | maxc | bad | tools | toolsjson | notools
+let mode = "sse";          // sse | json | think | html | slow | silent | fail503 | maxc | bad | tools | toolsjson | notools | away | hop | stallbody
+let awayTo = "";          // where mode "away" sends requests on to
 let fail503 = 0;
 
 const CHALLENGE = '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Enable JavaScript and cookies to continue</body></html>';
@@ -47,6 +48,15 @@ function upstream() {
     if (body) seen.bodies.push(body);
     const json = (code, o) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
 
+    if (mode === "away") { res.writeHead(307, { Location: awayTo + req.url.replace(/^\/v1/, "") }); return res.end(); }
+    if (mode === "hop" && !/\?hop$/.test(req.url)) { res.writeHead(307, { Location: req.url + "?hop" }); return res.end(); }
+    req.url = req.url.replace(/\?hop$/, "");
+    if (mode === "stallbody") {
+      // Headers, a little of the body, then nothing.
+      res.writeHead(req.url === "/v1/models" ? 200 : 500, { "Content-Type": "application/json" });
+      res.write("{\"data\":");
+      return setTimeout(() => res.destroy(), 15000);
+    }
     if (mode === "html") { res.writeHead(403, { "Content-Type": "text/html" }); return res.end(CHALLENGE); }
     if (req.headers.authorization !== "Bearer " + KEY) return json(401, { error: { message: "Incorrect API key provided: " + req.headers.authorization } });
     if (req.url === "/v1/models") return json(200, { data: [{ id: "mock-b" }, { id: "mock-a" }] });
@@ -137,8 +147,11 @@ function send(method, p, body, headers, opts) {
 }
 const PAGE = () => ({ "Content-Type": "application/json", "X-Vault": "1", Origin: "http://127.0.0.1:" + PORT });
 const post = (p, body) => send("POST", p, body, PAGE());
+const originOfUrl = (u) => new URL(u).origin;
 const json = (r) => { try { return JSON.parse(r.text); } catch (e) { return {}; } };
 const events = (r) => r.text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+const chat = (extra, opts) => send("POST", "/__vault/ai/chat",
+  Object.assign({ messages: [{ role: "system", content: "s" }, { role: "user", content: "hi" }] }, extra || {}), PAGE(), opts);
 
 async function main() {
   const up = upstream();
@@ -154,7 +167,7 @@ async function main() {
   const WS = path.join(scratch, "agent-workspace");
   process.on("exit", () => { try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) {} });
   const srv = spawn(process.execPath, ["serve.js", String(PORT), "--no-open"],
-    { cwd: ROOT, stdio: "ignore", env: Object.assign({}, process.env, { VAULT_WORKSPACE: WS }) });
+    { cwd: ROOT, stdio: "ignore", env: Object.assign({}, process.env, { VAULT_WORKSPACE: WS, VAULT_AI_TEST_TIMEOUT_MS: "3000" }) });
   children.push(srv);
   for (let i = 0; i < 50; i++) { await wait(100); if ((await send("GET", "/__vault/status")).status === 200) break; }
 
@@ -206,6 +219,25 @@ async function main() {
     r = await post("/__vault/ai/config", { apiKey: "" });
     t.eq(json(r).hasKey, false, "apiKey \"\" forgets the key");
     await post("/__vault/ai/config", { apiKey: KEY });
+
+    // A saved address that redirects elsewhere: fetch would follow it, prompt and all.
+    mode = "away"; awayTo = EVIL;
+    const before = stolen.length;
+    r = await post("/__vault/ai/test", {});
+    t.ok(r.status === 400 && (json(r).error || "").indexOf(originOfUrl(EVIL)) >= 0, "an endpoint that redirects to another server is refused, naming it", r.text.slice(0, 200));
+    r = await chat();
+    t.ok(r.status === 400 && (json(r).error || "").indexOf(originOfUrl(EVIL)) >= 0, "for chat too", r.text.slice(0, 200));
+    await post("/__vault/ai/config", { localOnly: true });
+    r = await chat();
+    t.eq(r.status, 400, "even with Local models only on");
+    await post("/__vault/ai/config", { localOnly: false });
+    t.eq(stolen.length, before, "so the other server never sees the request, the prompt or the key");
+    mode = "hop";
+    seen.auth.length = 0;
+    t.eq(json(await post("/__vault/ai/test", {})).ok, true, "a redirect on the same server is still followed");
+    t.eq(events(await chat()).filter((e) => e.t === "text").map((e) => e.v).join(""), "Hello", "for chat too, with the request body re-sent");
+    t.ok(seen.auth.length >= 4 && seen.auth.every((a) => a === "Bearer " + KEY), "and the key along with it");
+    mode = "sse";
   }
 
   console.log("\nTest connection");
@@ -223,9 +255,6 @@ async function main() {
     t.ok(r.text.indexOf("sk-wrong-key-0000000000000") < 0, "and the key the endpoint echoed back is scrubbed", json(r).error);
     await post("/__vault/ai/config", { apiKey: KEY });
   }
-
-  const chat = (extra, opts) => send("POST", "/__vault/ai/chat",
-    Object.assign({ messages: [{ role: "system", content: "s" }, { role: "user", content: "hi" }] }, extra || {}), PAGE(), opts);
 
   console.log("\nchat streams NDJSON");
   {
@@ -275,6 +304,13 @@ async function main() {
     mode = "silent";
     let r = await chat({ timeoutMs: 5000 });
     t.ok(r.status >= 400 && /5s/.test(json(r).error || ""), "an endpoint that never answers is dropped after the timeout", r.text.slice(0, 200));
+    mode = "stallbody";
+    let t0 = Date.now();
+    r = await post("/__vault/ai/test", {});
+    t.ok(r.status === 400 && /within/.test(json(r).error || "") && Date.now() - t0 < 10000, "Test connection gives up on an endpoint that stops halfway through its answer", r.text.slice(0, 200));
+    t0 = Date.now();
+    r = await chat({ timeoutMs: 5000 });
+    t.ok(r.status === 400 && /within/.test(json(r).error || "") && Date.now() - t0 < 12000, "so does chat, when the stalled answer is an error", r.text.slice(0, 200));
     mode = "stall";
     r = await chat({ timeoutMs: 5000 });
     const ev = events(r);
