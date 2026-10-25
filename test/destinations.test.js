@@ -214,6 +214,32 @@ async function main() {
     t.ok(r.status === 400 && /didn't answer within/.test(r.body.error) && Date.now() - t0 < 10000,
       "a front end that never answers gives up after the deadline, with a sentence", r.body.error);
     hang.closeAllConnections(); hang.close();
+    // One that sends the request on to another server: the token header and
+    // the sign-in must not follow it there.
+    const caught = [];
+    const other = http.createServer(async (req, res) => { caught.push(req.headers["x-api-key"] || await bodyOf(req)); res.writeHead(200, { "Content-Type": "application/json" }); res.end('{"token":"t"}'); });
+    await new Promise((res) => other.listen(0, "127.0.0.1", res));
+    const OTHER = "http://127.0.0.1:" + other.address().port;
+    const away = http.createServer((req, res) => { req.resume(); res.writeHead(307, { Location: OTHER + req.url }); res.end(); });
+    await new Promise((res) => away.listen(0, "127.0.0.1", res));
+    const AWAY = "http://127.0.0.1:" + away.address().port;
+    r = await call("POST", "/__vault/dest/connect", { id: "away", type: "http", baseUrl: AWAY + "/api/import", header: "X-Api-Key", token: "secret" });
+    r = await send("away", "Ada.png", card());
+    t.ok(r.status === 400 && r.body.error.indexOf(OTHER) >= 0, "an importer that redirects to another server is refused, naming it", JSON.stringify(r.body));
+    r = await call("POST", "/__vault/dest/connect", { id: "away2", type: "lumiverse", baseUrl: AWAY, username: "ann", password: "pw" });
+    t.ok(r.status === 400 && r.body.error.indexOf(OTHER) >= 0, "so is a sign-in", JSON.stringify(r.body));
+    t.eq(caught, [], "and that server never sees the token or the password");
+    const same = http.createServer((req, res) => {
+      if (req.url === "/old") { req.resume(); res.writeHead(308, { Location: "/api/import" }); return res.end(); }
+      gen.server.emit("request", req, res);
+    });
+    await new Promise((res) => same.listen(0, "127.0.0.1", res));
+    r = await call("POST", "/__vault/dest/connect", { id: "same", type: "http", baseUrl: "http://127.0.0.1:" + same.address().port + "/old", header: "X-Api-Key", token: "secret" });
+    const before = gen.got.length;
+    r = await send("same", "Ada.png", card());
+    t.ok(r.status === 200 && gen.got.length === before + 1 && gen.got[before].path === "/api/import" && gen.got[before].hasCard,
+      "while a redirect on the same server is still followed", JSON.stringify(r.body));
+    for (const s of [other, away, same]) { s.closeAllConnections(); s.close(); }
     r = await call("POST", "/__vault/dest/connect", { id: "x", type: "ftp", baseUrl: "http://a" });
     t.ok(r.status === 400 && /Unknown destination type/.test(r.body.error), "unknown kinds are refused");
   }
