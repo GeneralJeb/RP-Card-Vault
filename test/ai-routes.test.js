@@ -48,8 +48,10 @@ function upstream() {
     if (body) seen.bodies.push(body);
     const json = (code, o) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
 
-    if (mode === "away") { res.writeHead(307, { Location: awayTo + req.url.replace(/^\/v1/, "") }); return res.end(); }
-    if (mode === "hop" && !/\?hop$/.test(req.url)) { res.writeHead(307, { Location: req.url + "?hop" }); return res.end(); }
+    // Fixed targets, never built from the request.
+    const route = req.url === "/v1/models" ? "/models" : req.url === "/v1/chat/completions" ? "/chat/completions" : "";
+    if (mode === "away") { res.writeHead(307, { Location: awayTo + route }); return res.end(); }
+    if (mode === "hop" && route) { res.writeHead(307, { Location: "/v1" + route + "?hop" }); return res.end(); }
     req.url = req.url.replace(/\?hop$/, "");
     if (mode === "stallbody") {
       // Headers, a little of the body, then nothing.
