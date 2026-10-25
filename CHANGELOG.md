@@ -8,6 +8,11 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.8
+
+- **Sending a card that's already in your front end's folder no longer files it away out of there.** With "File cards away after sending them" on, sending a card that lives in the folder destination itself counted it as "already there", then moved it into the filing folder, so it left the front end it had just been sent to. Such a card now stays where it is; only cards that came from somewhere else are filed away.
+- **A card with a very long file name keeps its file type when it's uploaded.** Names longer than 200 characters were cut short, extension and all, so a `.json` card went to SillyTavern as a PNG and its import failed. The name is now shortened before its extension.
+
 ## 1.6.7
 
 - **The local server no longer follows a redirect to another server.** If an address you saved (an AI endpoint, or a front end under Destinations) answered by sending the request on somewhere else, the server followed it, re-sending everything: the prompt with your card's text, a sign-in's password, an importer's token header. That happened even with Local models only on. Now a redirect is only followed on the same server. A redirect anywhere else is refused, and the error names where it pointed, so you can save that address instead if it's the right one.

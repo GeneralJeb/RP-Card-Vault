@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.7";
+const APP_VERSION = "1.6.8";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -16753,7 +16753,11 @@ function App() {
         const { bytes } = await readOriginalBytes(rec, roots);
         const out = await copyIntoRoot(root, dir ? dir.split("/") : [], rec.file, new Blob([bytes]), rec.sig);
         if (out.skipped) already++; else sent++;
-        okIds.push(rec.id);
+        // "Already there" can be the card's own file, when it lives in the
+        // destination folder. It's the front end's copy, so it isn't filed away.
+        let own = false;
+        if (out.skipped) { try { own = await out.fh.isSameEntry(await getFileHandleFor(rec, roots)); } catch (e) { /* imported: not a file in this folder */ } }
+        if (!own) okIds.push(rec.id);
       } catch (e) { failed++; errs.push(rec.file + ": " + ((e && e.message) || String(e))); }
     }
     setScan(SCAN_IDLE);
