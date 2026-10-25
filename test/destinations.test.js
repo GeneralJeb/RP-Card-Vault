@@ -164,6 +164,8 @@ async function main() {
     t.ok(r.status === 400 && /couldn't import/.test(r.body.error), "SillyTavern's 200 {error:true} is reported as a failure");
     r = await send("st", "x.txt", Buffer.from("hi"));
     t.ok(r.status === 400 && /can't import \.txt/.test(r.body.error), "files it can't import are refused here");
+    r = await send("st", "Long ".repeat(45) + "name.json", Buffer.from("{\"CARD-BYTES\":1}"));
+    t.ok(r.status === 200 && st.got[st.got.length - 1].type === "json", "a .json card with a very long file name still goes as json", JSON.stringify(r.body));
 
     r = await call("POST", "/__vault/dest/connect", { id: "acc", type: "sillytavern", baseUrl: "http://127.0.0.1:" + ports.stAcc, username: "ann", password: "wrong" });
     t.ok(r.status === 401 && /Sign-in failed/.test(r.body.error), "with accounts on, a wrong password is refused");
