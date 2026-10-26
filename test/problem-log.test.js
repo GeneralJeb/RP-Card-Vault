@@ -67,8 +67,24 @@ console.log("\nscrubbing");
     ["Invalid API key gsk_ABCDEF1234567890abcdef", "Invalid API key [key]", "a Groq key"],
     ["bad key xai-ABCDEF1234567890abcdefgh", "bad key [key]", "an xAI key"],
     ["model x-ai/grok-4 and xai-short", "model x-ai/grok-4 and xai-short", "a model name isn't taken for a key"],
+    ["C:\\Users\\Jeb Smith\\Documents\\a.png", "C:\\Users\\[you]\\Documents\\a.png", "a Windows user name with a space in it"],
+    ["open 'C:\\\\Users\\\\Jeb van Dyke\\\\x'", "open 'C:\\\\Users\\\\[you]\\\\x'", "and in an escaped path"],
+    ["/Users/Jeb Smith/cards", "/Users/[you]/cards", "and in a macOS path"],
+    ["C:\\Users\\Jeb and D:\\Cards", "C:\\Users\\[you] and D:\\Cards", "but the words after a user folder that ends the path stay"],
+    ['{"password":"a \\"quoted\\" pass","user":"x"}', '{"password":[hidden],"user":"x"}', "a password with an escaped quote in it"],
+    ["POST /__vault/dest/send?id=d1&name=Secret%20Lover.png → HTTP 502", "POST /__vault/dest/send?[…] → HTTP 502",
+      "the query on a local server route, which carries an encoded file name"],
   ];
   for (const [input, want, label] of cases) t.eq(s(input), want, label);
+
+  // A full log of long letter runs with no @ in them (base64 in an error, say)
+  // is rebuilt on every new problem while Settings is open.
+  V.clearProblemLog();
+  for (let i = 0; i < V.PROBLEM_LOG_MAX; i++) V.logProblem("Page", "Bad data " + i + " " + "QUFB".repeat(1000), "at " + "QkJC".repeat(1000));
+  const t0 = Date.now();
+  V.formatProblemLog(V.PROBLEM_LOG, ["h"], []);
+  t.ok(Date.now() - t0 < 500, "a full log of long runs is scrubbed quickly (" + (Date.now() - t0) + " ms)");
+  V.clearProblemLog();
 }
 
 console.log("\nnames");
@@ -91,6 +107,8 @@ console.log("\nnames");
     "a folder called Users can't stop the user name being taken out: the fixed rules go first");
   t.eq(V.scrubLogText("Invalid sk-abcdefgh12345678 for Key", [{ name: "Key", as: "[card]" }]), "Invalid [key] for [card]",
     "a name isn't looked for inside a placeholder already put in");
+  t.eq(V.scrubLogText("Couldn't save İpek.png", [{ name: "İpek.png", as: "[card file]" }]), "Couldn't save [card file]",
+    "a name with a letter whose lower case is longer (Turkish İ) is still found as written");
   const dupes = [];
   for (let i = 0; i < 30000; i++) dupes.push({ name: "Fantasy", as: "[folder]" });
   const t1 = Date.now();
@@ -127,6 +145,11 @@ console.log("\nthe copied text");
   t.ok(/Agent chat: \[card\]: empty reply\n {10}model: x · key \[key\]/.test(out), "details are indented, and everything is scrubbed");
   t.ok(!/Ramia|sk-abc/.test(out), "nothing hidden is left");
   t.ok(/no problems logged/.test(V.formatProblemLog([], ["h"], [])), "an empty log says so");
+  V.clearProblemLog();
+  // vaultFetch logs a failed send with its route, whose query names the file
+  V.logProblem("Local server", "POST /__vault/dest/send?id=d1&name=" + encodeURIComponent("Café Noir.png") + " → HTTP 502: refused");
+  const sent = V.formatProblemLog(V.PROBLEM_LOG, ["h"], [{ name: "Café Noir.png", as: "[private card] file" }]);
+  t.ok(!/Caf|Noir/.test(sent), "a private card's file name doesn't get through a failed send's route", sent);
   V.clearProblemLog();
 }
 

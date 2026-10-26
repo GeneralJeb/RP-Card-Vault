@@ -8,6 +8,14 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.9
+
+- **The problem log hides private cards' file names when a send fails.** A failed upload to a front end was logged with the request it made, and that request carries the card's file name in web-address form (`Secret%20Lover.png`), so a private card's name with a space or an accent in it got through into the text you copy. That part of the line is now taken out.
+- **A Windows user name with a space in it is fully taken out of the problem log.** In `C:\Users\Jeb Smith\...` only the first word was hidden, which left "Smith" in the copied text. The whole name goes now, and the same for macOS paths.
+- **A password with a quote mark in it is fully hidden.** In a line like `"password": "a \"quoted\" word"`, everything after the first escaped quote was left showing.
+- **Names spelt with a Turkish dotted İ are hidden.** A card or folder called "İpek" stayed visible in the problem log.
+- **Settings no longer freezes for seconds over a log full of long errors.** A problem log of long runs of letters with no @ in them (base64 in an error message, say) took about three seconds to scrub, every time a new problem came in while Settings was open, and every time it was copied. It now takes a few milliseconds.
+
 ## 1.6.8
 
 - **Sending a card that's already in your front end's folder no longer files it away out of there.** With "File cards away after sending them" on, sending a card that lives in the folder destination itself counted it as "already there", then moved it into the filing folder, so it left the front end it had just been sent to. Such a card now stays where it is; only cards that came from somewhere else are filed away.
