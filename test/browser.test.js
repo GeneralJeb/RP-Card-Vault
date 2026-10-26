@@ -472,10 +472,15 @@ async function main() {
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByText("File cards away after sending them").click();
       await page.getByRole("button", { name: "Close", exact: true }).click();
+      // The Bram in Cards, not the copy already in Frontend (which stays where it is).
+      await page.getByText("Cards", { exact: true }).first().click();
+      await page.waitForFunction(() => /\b2 shown\b/.test(document.body.innerText));
       await tile("Bram Lighthouse").click({ button: "right" });
       await page.getByText("Send to front end", { exact: true }).click();
       await toast(/not filed away: no folder is chosen/);
       t.ok(true, "with filing on but no folder, the send says it didn't file the card away");
+      await page.getByText("Cards", { exact: true }).first().click();
+      await page.waitForFunction(() => /\b3 shown\b/.test(document.body.innerText));
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByText("File cards away after sending them").click();
       await page.getByRole("button", { name: "Close", exact: true }).click();
@@ -489,6 +494,27 @@ async function main() {
       await page.getByRole("button", { name: "Rescan", exact: true }).click();
       await page.waitForFunction(() => !/\b2 selected\b/.test(document.body.innerText), null, { timeout: 15000 });
       t.ok(true, "the renamed card drops out of the selection, so Send can't act on it");
+    });
+
+    await step("a card already in the front end's folder stays there when sends are filed away", async () => {
+      await writeFiles(page, "Frontend", [["Dina Diver.png", cardPng({ name: "Dina Diver", description: "Dives for pearls.", tags: [] }, [30, 60, 150])]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Dina Diver").waitFor({ timeout: 15000 });
+      // Filing on, into Cards' top level.
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("File cards away after sending them").click();
+      const pick = page.locator("select").filter({ has: page.locator("option", { hasText: "Pick a folder…" }) }).last();
+      await pick.selectOption(await pick.evaluate((s) => Array.from(s.options).filter((o) => o.parentElement.label === "Cards" && o.textContent === "(top level)")[0].value));
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await tile("Dina Diver").click({ button: "right" });
+      await page.getByText("Send to front end", { exact: true }).click();
+      await toast(/already there/);
+      await page.waitForTimeout(500);
+      t.ok(Object.keys(await listFiles(page, "Frontend")).indexOf("Dina Diver.png") >= 0, "Dina Diver is still in the front end's folder");
+      t.ok(!Object.keys(await listFiles(page, "Cards")).some((f) => /Dina Diver/.test(f)), "and wasn't filed away out of it");
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("File cards away after sending them").click();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
     });
 
     await step("Settings and the AI panel open without errors", async () => {

@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.6";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.6.9";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -174,6 +174,35 @@ async function readUpstream(r) {
   return { text, data };
 }
 
+/**
+ * fetch, following redirects only on the same server. fetch itself would
+ * follow one anywhere, re-sending the request's body (a prompt, a card, a
+ * sign-in) and any custom header (an importer's token) to a server nobody
+ * chose, and past Local models only. A redirect elsewhere is refused, naming
+ * where it pointed, so the right address can be saved instead.
+ */
+async function fetchSameOrigin(url, opts) {
+  let u = url;
+  let o = Object.assign({}, opts, { redirect: "manual" });
+  for (let hops = 0; ; hops++) {
+    const r = await fetch(u, o);
+    const loc = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
+    if (!loc) return r;
+    if (r.body) r.body.cancel().catch(() => {});
+    let next = "";
+    try { next = new URL(loc, u).href; } catch (e) { throw userError(originOf(url) + " sent a redirect that isn't an address."); }
+    if (originOf(next) !== originOf(url)) {
+      throw userError(originOf(url) + " redirects to " + originOf(next) + ". If that's the right server, use its address instead.");
+    }
+    if (hops >= 5) throw userError(originOf(url) + " redirects too many times.");
+    // As fetch does: a 303, or a 301/302 after a POST, carries on as a GET with no body.
+    if (r.status === 303 || ((r.status === 301 || r.status === 302) && String(o.method || "GET").toUpperCase() === "POST")) {
+      o = Object.assign({}, o, { method: "GET", body: undefined });
+    }
+    u = next;
+  }
+}
+
 const DEST_TIMEOUT_MS = Number(process.env.VAULT_DEST_TIMEOUT_MS) || 60000;   // the tests use a short one
 
 /**
@@ -185,7 +214,7 @@ async function destFetch(url, opts) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), DEST_TIMEOUT_MS);
   try {
-    const r = await fetch(url, Object.assign({}, opts, { signal: ac.signal }));
+    const r = await fetchSameOrigin(url, Object.assign({}, opts, { signal: ac.signal }));
     return { r, u: await readUpstream(r) };
   } catch (e) {
     if (ac.signal.aborted) throw userError(originOf(url) + " didn't answer within " + DEST_TIMEOUT_MS / 1000 + "s. Is it busy, or stuck?");
@@ -607,8 +636,9 @@ async function upstreamFetch(url, opts, timeoutMs, ac) {
   const ctl = ac || new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    return await fetch(url, Object.assign({}, opts, { signal: ctl.signal }));
+    return await fetchSameOrigin(url, Object.assign({}, opts, { signal: ctl.signal }));
   } catch (e) {
+    if (e && e.status) throw e;   // a redirect elsewhere, already a sentence
     if (ctl.signal.aborted) throw userError(url + " didn't answer within " + Math.round(timeoutMs / 1000) + "s.");
     const code = e && e.cause && e.cause.code ? " (" + e.cause.code + ")" : "";
     throw userError("Couldn't reach " + url + code + ". Is the server running?");
@@ -617,13 +647,33 @@ async function upstreamFetch(url, opts, timeoutMs, ac) {
   }
 }
 
+/**
+ * A response's body, with a deadline of its own: an endpoint that sends its
+ * headers and then goes quiet mustn't leave the request hanging. `ac` is the
+ * controller the fetch was made with.
+ */
+async function upstreamText(r, url, timeoutMs, ac) {
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    return await r.text();
+  } catch (e) {
+    if (ac.signal.aborted) throw userError(url + " didn't finish answering within " + Math.round(timeoutMs / 1000) + "s.");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const AI_TEST_TIMEOUT_MS = Number(process.env.VAULT_AI_TEST_TIMEOUT_MS) || 20000;   // the tests use a short one
+
 /** Check the SAVED connection. Takes nothing from the request. */
 async function aiTest() {
   if (!ai.baseUrl) throw userError("Save an endpoint address first.");
   checkLocalOnly(ai.baseUrl);
   const url = ai.baseUrl + "/models";
-  const r = await upstreamFetch(url, { method: "GET", headers: upstreamHeaders() }, 20000);
-  const text = await r.text();
+  const ac = new AbortController();
+  const r = await upstreamFetch(url, { method: "GET", headers: upstreamHeaders() }, AI_TEST_TIMEOUT_MS, ac);
+  const text = await upstreamText(r, url, AI_TEST_TIMEOUT_MS, ac);
   const ctype = r.headers.get("content-type");
   if (looksLikeHtml(text, ctype)) throw userError(describeHtmlBody(text, url));
   if (r.status === 401 || r.status === 403) throw userError(upstreamMessage(r.status, text, ctype, url), 401);
@@ -642,11 +692,12 @@ async function aiTest() {
   // vault actually makes, with a one-token budget.
   if (ai.model && (r.status === 404 || r.status === 405)) {
     const chatUrl = ai.baseUrl + "/chat/completions";
+    const cac = new AbortController();
     const c = await upstreamFetch(chatUrl, {
       method: "POST", headers: upstreamHeaders(),
       body: JSON.stringify({ model: ai.model, messages: [{ role: "user", content: "ping" }], max_tokens: 1, stream: false }),
-    }, 30000);
-    const ct = await c.text();
+    }, AI_TEST_TIMEOUT_MS + 10000, cac);
+    const ct = await upstreamText(c, chatUrl, AI_TEST_TIMEOUT_MS + 10000, cac);
     const cty = c.headers.get("content-type");
     if (looksLikeHtml(ct, cty)) throw userError(describeHtmlBody(ct, chatUrl));
     if (c.ok) return { ok: true, models: [ai.model], via: "chat" };
@@ -782,7 +833,7 @@ async function aiChat(req, res, body) {
       body: JSON.stringify(payload),
     }, timeoutMs, ac);
     if (r.ok) break;
-    const text = await r.text();
+    const text = await upstreamText(r, url, timeoutMs, ac);
     lastMsg = upstreamMessage(r.status, text, r.headers.get("content-type"), url);
     // The page tells you plainly and keeps your message.
     const hasImages = messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"));
@@ -1221,7 +1272,10 @@ async function handleDest(req, res, route, url) {
   }
   if (route === "send" && req.method === "POST") {
     const id = url.searchParams.get("id") || "";
-    const name = (url.searchParams.get("name") || "card.png").replace(/[\\/]/g, "_").slice(0, 200);
+    const full = (url.searchParams.get("name") || "card.png").replace(/[\\/]/g, "_");
+    // A long name is shortened before its extension, which says what kind of card it is.
+    const ext = (full.match(/\.[a-z0-9]{1,10}$/i) || [""])[0];
+    const name = full.length > 200 ? full.slice(0, 200 - ext.length) + ext : full;
     const buf = await readBody(req, 64 * 1024 * 1024);
     if (!buf.length) throw userError("The card file was empty.");
     const d = destinations.get(id);
