@@ -8,15 +8,22 @@ rem To run a second copy side by side, give it its own port in a file named
 rem vault.local next to this one (see HOW TO RUN.txt), e.g.  port=8791
 set VAULT_PORT=8790
 set VAULT_LABEL=
+rem Spaces around a name or value are dropped and a port that isn't a number
+rem means 8790, the same as in RP Card Vault.vbs, so every launcher agrees.
 if exist "%~dp0vault.local" (
   for /f "usebackq tokens=1,* delims==" %%a in ("%~dp0vault.local") do (
-    if /i "%%a"=="port" set VAULT_PORT=%%b
-    if /i "%%a"=="label" set VAULT_LABEL=%%b
+    for /f "tokens=1,2" %%k in ("%%a") do if "%%l"=="" (
+      if /i "%%k"=="port" for /f "tokens=1" %%v in ("%%b") do set VAULT_PORT=%%v
+      if /i "%%k"=="label" for /f "tokens=*" %%v in ("%%b") do set VAULT_LABEL=%%v
+    )
   )
 )
+for /f "delims=0123456789" %%x in ("%VAULT_PORT%") do set VAULT_PORT=8790
 rem Brackets inside an if block need ^ before them, or cmd ends the block there.
+rem The label goes in by a for variable, read after the line is parsed, so its
+rem own brackets or & are just text.
 if defined VAULT_LABEL (
-  title RP Card Vault ^(%VAULT_LABEL%, port %VAULT_PORT%^)
+  for /f "delims=" %%t in ("%VAULT_LABEL%") do title RP Card Vault ^(%%t, port %VAULT_PORT%^)
 ) else (
   title RP Card Vault ^(port %VAULT_PORT%^)
 )
