@@ -33,6 +33,8 @@ if (Test-Path $local) {
       if ($name -eq "label") { $label = $value }
     }
   }
+  # As in the launchers: a port that is not a number means 8790.
+  if ($port -notmatch "^[0-9]+$") { $port = "8790" }
 }
 
 function New-VaultShortcut($path, $mode, $desc) {

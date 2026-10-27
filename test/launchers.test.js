@@ -243,35 +243,51 @@ console.log("\nvault.local is read the same way by every launcher (run for real 
 if (process.platform !== "win32") t.skip("running the launchers' vault.local code", "not on Windows");
 else {
   const os = require("os");
-  const { execFileSync } = require("child_process");
+  const { execFileSync, spawnSync } = require("child_process");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-local-"));
   const run = (exe, args) => execFileSync(exe, args, { cwd: dir, encoding: "latin1", windowsHide: true, timeout: 30000 }).trim();
+  // A .bat that hits a syntax error says so on stderr and stops, so that is part of its answer.
+  const runBat = (file) => {
+    const r = spawnSync("cmd.exe", ["/d", "/c", file], { cwd: dir, encoding: "latin1", windowsHide: true, timeout: 30000 });
+    return (r.stdout + (r.stderr ? "ERROR " + r.stderr : "")).trim();
+  };
   try {
     const start = read("Start RP Card Vault.bat");
+    const stop = read("Stop RP Card Vault.bat");
     const vbs = read("RP Card Vault.vbs");
     const ps1 = read("Create Shortcut.ps1");
-    const batPart = start && start.toString("latin1").match(/set VAULT_PORT=\d+\r\nset VAULT_LABEL=\r\n[\s\S]*?\r\n\s*\)\r\n\)\r\n/);
+    // Start's part runs on through the window title, which shows the label.
+    const batPart = start && start.toString("latin1").match(/set VAULT_PORT=\d+\r\nset VAULT_LABEL=\r\n[\s\S]*?\r\nif defined VAULT_LABEL \([\s\S]*?\r\n\)\r\n/);
+    const stopPart = stop && stop.toString("latin1").match(/set VAULT_PORT=\d+\r\n[\s\S]*?(?=set FOUND=0\r\n)/);
     const vbsFn = vbs && vbs.toString("latin1").match(/Function LocalSetting[\s\S]*?End Function/);
     const vbsPort = vbs && vbs.toString("latin1").match(/PORT = LocalSetting[^\r\n]*\r\nIf Not IsNumeric[^\r\n]*/);
     const psPart = ps1 && ps1.toString("latin1").match(/\$port\s+=\s+"8790"[\s\S]*?\r\n}\r\n/);
-    t.ok(!!(batPart && vbsFn && vbsPort && psPart), "each launcher's vault.local code was found");
+    t.ok(!!(batPart && stopPart && vbsFn && vbsPort && psPart), "each launcher's vault.local code was found");
     const probe = (local) => {
       const f = path.join(dir, "vault.local");
       if (local == null) { if (fs.existsSync(f)) fs.unlinkSync(f); } else fs.writeFileSync(f, local);
-      fs.writeFileSync(path.join(dir, "probe.bat"), "@echo off\r\n" + batPart[0].replace(/%~dp0/g, dir + "\\") + "echo %VAULT_PORT%^|%VAULT_LABEL%\r\n");
+      fs.writeFileSync(path.join(dir, "probe.bat"), "@echo off\r\n" + batPart[0].replace(/%~dp0/g, dir + "\\") + "for /f \"delims=\" %%x in (\"%VAULT_PORT%|%VAULT_LABEL%\") do echo %%x\r\n");
+      fs.writeFileSync(path.join(dir, "stop.bat"), "@echo off\r\nsetlocal enabledelayedexpansion\r\n" + stopPart[0].replace(/%~dp0/g, dir + "\\") + "echo %VAULT_PORT%\r\n");
       fs.writeFileSync(path.join(dir, "probe.vbs"), "Option Explicit\r\nDim fso, base, PORT\r\nSet fso = CreateObject(\"Scripting.FileSystemObject\")\r\nbase = \"" + dir + "\"\r\n" +
         vbsFn[0] + "\r\n" + vbsPort[0] + "\r\nWScript.Echo PORT & \"|\" & LocalSetting(\"label\", \"\")\r\n");
       fs.writeFileSync(path.join(dir, "probe.ps1"), "$base = \"" + dir + "\"\r\n" + psPart[0] + "Write-Output \"$port|$label\"\r\n");
       return [
-        run("cmd.exe", ["/d", "/c", path.join(dir, "probe.bat")]),
+        runBat(path.join(dir, "probe.bat")),
         run("cscript.exe", ["//nologo", path.join(dir, "probe.vbs")]),
         run("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(dir, "probe.ps1")]),
+        runBat(path.join(dir, "stop.bat")) + " (Stop)",
       ];
     };
-    if (batPart && vbsFn && vbsPort && psPart) {
-      t.eq(probe(null), ["8790|", "8790|", "8790|"], "with no vault.local: port 8790 and no label, in the .bat, the .vbs and the shortcut script");
-      t.eq(probe("port=8791\r\nlabel=test\r\n"), ["8791|test", "8791|test", "8791|test"], "with one: its port and label, in all three");
-      t.eq(probe("label=only\n"), ["8790|only", "8790|only", "8790|only"], "a vault.local without a port keeps " + DEFAULT_PORT);
+    if (batPart && stopPart && vbsFn && vbsPort && psPart) {
+      t.eq(probe(null), ["8790|", "8790|", "8790|", "8790 (Stop)"], "with no vault.local: port 8790 and no label, in Start, the .vbs, the shortcut script and Stop");
+      t.eq(probe("port=8791\r\nlabel=test\r\n"), ["8791|test", "8791|test", "8791|test", "8791 (Stop)"], "with one: its port and label, in all four");
+      t.eq(probe("label=only\n"), ["8790|only", "8790|only", "8790|only", "8790 (Stop)"], "a vault.local without a port keeps " + DEFAULT_PORT);
+      t.eq(probe("port = 8791\r\nlabel = test\r\n"), ["8791|test", "8791|test", "8791|test", "8791 (Stop)"], "spaces around the = are allowed, in all four");
+      t.eq(probe("  port=8791 \r\n"), ["8791|", "8791|", "8791|", "8791 (Stop)"], "and spaces before or after a line");
+      t.eq(probe("port=8791\r\nlabel=old (backup) & more\r\n"),
+        ["8791|old (backup) & more", "8791|old (backup) & more", "8791|old (backup) & more", "8791 (Stop)"],
+        "a label with brackets or an & in it is only a label: Start's window title survives it");
+      t.eq(probe("port=abc\r\n"), ["8790|", "8790|", "8790|", "8790 (Stop)"], "a port that isn't a number means " + DEFAULT_PORT + ", in all four");
     }
   } catch (e) {
     t.ok(false, "running the probes", String(e && e.message || e).slice(0, 200));

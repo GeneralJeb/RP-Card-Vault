@@ -22,7 +22,8 @@ License 1.1; each one's license, with its copyright line, is in
 
 To change a version of a library, replace the file, put its new hash in both of its
 `integrity` attributes in `RP_Card_Vault.html` (the local tag and the cdnjs
-fallback), and update this table.
+fallback), update this table, and put the new `LIB_HASH` in `sw.js` (`npm test`
+prints it), so offline copies fetch the new file.
 
 ## Copyright notices
 

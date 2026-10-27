@@ -18,11 +18,16 @@ rem and it is stopped by PID. Never by image name - that would take SillyTavern
 rem and every other node process with it.
 
 set VAULT_PORT=8790
+rem Spaces around a name or value are dropped and a port that isn't a number
+rem means 8790, the same as in Start RP Card Vault.bat, so every launcher agrees.
 if exist "%~dp0vault.local" (
   for /f "usebackq tokens=1,* delims==" %%a in ("%~dp0vault.local") do (
-    if /i "%%a"=="port" set VAULT_PORT=%%b
+    for /f "tokens=1,2" %%k in ("%%a") do if "%%l"=="" (
+      if /i "%%k"=="port" for /f "tokens=1" %%v in ("%%b") do set VAULT_PORT=%%v
+    )
   )
 )
+for /f "delims=0123456789" %%x in ("%VAULT_PORT%") do set VAULT_PORT=8790
 set FOUND=0
 set QUIET=0
 if /i "%~1"=="/quiet" set QUIET=1

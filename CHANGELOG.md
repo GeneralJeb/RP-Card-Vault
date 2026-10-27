@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.10
+
+- **Spaces in vault.local no longer make the launchers disagree.** A line written `port = 8791` (or with a space before or after it) was read by the shortcuts but not by `Start RP Card Vault.bat` or `Stop RP Card Vault.bat`, so Start opened the 8790 vault, with the other copy's folder permissions and data, and Stop couldn't find the server it was meant to stop. All the launchers read it the same way now.
+- **A label with brackets or an & in it no longer breaks Start.** `label=test (old)` stopped `Start RP Card Vault.bat` with "was unexpected at this time" before it started anything, and a label like `old & more` ran the words after the & as a command. A label is now only ever text in the window title.
+- **A port in vault.local that isn't a number means 8790 everywhere.** The shortcuts and the server already did that, but Stop looked for a server on the bad port and found nothing.
+
 ## 1.6.9
 
 - **The problem log hides private cards' file names when a send fails.** A failed upload to a front end was logged with the request it made, and that request carries the card's file name in web-address form (`Secret%20Lover.png`), so a private card's name with a space or an accent in it got through into the text you copy. That part of the line is now taken out.
