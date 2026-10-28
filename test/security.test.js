@@ -108,6 +108,8 @@ async function main() {
       "/README.md", "/Start%20RP%20Card%20Vault.bat", "/.gitignore",
     ];
     for (const p of secret) t.eq((await raw(port, "GET", p)).status, 404, "doesn't serve " + p);
+    t.eq((await raw(port, "GET", "/RP_Card_Vault.html", { Host: "evil.example:" + port })).status, 403,
+      "the page itself isn't served to a rebound Host either (DNS rebinding)");
     for (const p of ["/..%2fserve.js", "/%2e%2e/%2e%2e/Windows/win.ini", "/..\\serve.js", "/RP_Card_Vault.html/../serve.js", "/%5c..%5cserve.js", "/RP_Card_Vault.html%00.png"]) {
       const r = await raw(port, "GET", p);
       t.ok(r.status === 404 || r.status === 400 || r.status === 403, "path tricks get nothing: " + p, r.status);
@@ -176,6 +178,8 @@ async function main() {
     t.ok(r.status === 400 && /Local models only is on/.test(r.body), "a remote address is refused while it's on");
     r = await post("/__vault/ai/config", { baseUrl: "http://127.0.0.1:" + upPort + "/v1", model: "m" });
     t.eq(r.status, 200, "an address on this computer is fine");
+    r = await post("/__vault/ai/config", { baseUrl: "https://127.example.com/v1" });
+    t.ok(r.status === 400 && /Local models only is on/.test(r.body), "and a name that only starts with 127 isn't on this computer");
     await post("/__vault/ai/config", { localOnly: false });
     await post("/__vault/ai/config", { baseUrl: "http://192.168.1.250:9/v1", model: "m" });
     await post("/__vault/ai/config", { localOnly: true });

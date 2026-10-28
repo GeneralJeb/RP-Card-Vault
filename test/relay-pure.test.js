@@ -21,6 +21,10 @@ console.log("\naddresses");
   t.eq(S.addressHint("https://openrouter.ai/api/v1"), "", "and the right address gets no hint");
   t.ok(/\/v1/.test(S.addressHint("http://127.0.0.1:11434")), "an unknown host without /vN is told about /v1");
   t.eq(S.addressHint("http://127.0.0.1:11434/v1"), "", "one with /v1 is left alone");
+  t.eq(["http://127.0.0.1:11434/v1", "http://127.1/v1", "http://localhost:1234/v1", "http://tool.localhost/v1", "http://[::1]:5001/v1"].map(S.isLoopbackUrl).join(),
+    "true,true,true,true,true", "Local models only counts this computer's own addresses as local");
+  t.eq(["http://127.evil.example/v1", "http://127.0.0.1.example.com/v1", "http://localhost.example.com/v1", "http://192.168.1.20/v1", "not a url"].map(S.isLoopbackUrl).join(),
+    "false,false,false,false,false", "but not a name that only starts with 127 or localhost, or another machine");
 }
 
 console.log("\nerror messages");

@@ -243,6 +243,11 @@ async function main() {
     V.setFolderRolesNow({});
 
     t.ok(/Reference folder/.test(await refused(() => V.saveCardToFile(ada, null, null, [ref]))), "Save to card refuses a card in a Reference folder");
+    const adaBefore = Buffer.from(refFs.get("Ada.png"));
+    const adaBody = (await V.parseCardBytes(refFs.get("Ada.png"), "Ada.png")).data;
+    t.ok(/Reference folder/.test(await refused(() => V.saveCardToFile(ada, adaBody, { fields: { description: "Changed." } }, [ref], { backup: false })))
+      && Buffer.compare(Buffer.from(refFs.get("Ada.png")), adaBefore) === 0,
+      "with backups off too (no backup copy to refuse first), and the file is unchanged");
     t.ok(/Reference folder/.test(await refused(() => V.deleteCardFile(ada, ref))) && !!refFs.get("Ada.png"), "so does deleting it, and the file stays");
     t.ok(/Reference folder/.test(await refused(() => V.moveCardTo(ada, ref, lib, ""))) && !!refFs.get("Ada.png") && !libFs.get("Ada.png"),
       "and moving it out (the trash is a move), with nothing copied");
@@ -296,6 +301,40 @@ async function main() {
     t.ok(/_vault backups\/A\/Bram /.test(a1.backupPath), "a card's backup goes in a copy of its own folder path (" + a1.backupPath + ")");
     t.eq([fsys.list("_vault backups/A").length, fsys.list("_vault backups/B").length], [1, 1],
       "saving one card never removes the backups of another with the same file name");
+  }
+
+  console.log("\na move whose copy doesn't land intact leaves the original where it was");
+  {
+    const v3 = V.newCardPayload({ name: "Dora" });
+    const bytes = V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3));
+    const spoilers = [
+      ["lands short", (a) => a.subarray(0, a.length - 1)],
+      ["lands changed", (a) => { const c = a.slice(); c[c.length - 1] ^= 1; return c; }],
+    ];
+    for (const [label, spoil] of spoilers) {
+      const src = memFs("Src"), dest = memFs("Dest");
+      src.put("Dora.png", bytes);
+      // The destination disk spoils whatever is written to it.
+      const getFileHandle = dest.handle.getFileHandle.bind(dest.handle);
+      dest.handle.getFileHandle = async (n, o) => {
+        const fh = await getFileHandle(n, o);
+        const open = fh.createWritable.bind(fh);
+        fh.createWritable = async () => {
+          const w = await open();
+          const write = w.write.bind(w);
+          w.write = async (b) => write(spoil(new Uint8Array(await new Blob([b]).arrayBuffer())));
+          return w;
+        };
+        return fh;
+      };
+      const rec = { id: "s:Dora.png", rootId: "s", rel: "Dora.png", dir: "", file: "Dora.png", ext: "png", name: "Dora" };
+      let err = "";
+      try {
+        await V.moveCardTo(rec, { id: "s", name: "Src", role: "library", handle: src.handle }, { id: "d", name: "Dest", role: "library", handle: dest.handle }, "");
+      } catch (e) { err = e.message; }
+      t.ok(/Copy verification failed/.test(err) && !!src.get("Dora.png") && Buffer.compare(Buffer.from(src.get("Dora.png")), Buffer.from(bytes)) === 0,
+        "a copy that " + label + " stops the move, and the original is still there (" + (err || "no error") + ")");
+    }
   }
 
   console.log("\na big card that only looks like the one already there is never lost");
@@ -659,6 +698,10 @@ async function main() {
     const gone = V.backupsToPrune(names, "Ada.png", 3);
     t.eq(gone.sort().join(" | "), "Ada 20260901-120000.png | Ada 20261001-090000.png",
       "keeping 3, the two oldest of Ada.png's own backups go (a same-second \" (2)\" counts as newer)");
+    t.eq(V.backupsToPrune(names, "Ada.png", 2).sort().join(" | "), "Ada 20260901-120000.png | Ada 20261001-090000.png | Ada 20261002-090000.png",
+      "keeping 2, the \" (2)\" is kept over the first copy from that same second");
+    t.eq(V.backupsToPrune(["ada 20260101-000000.PNG", "ADA 20260102-000000.png"], "Ada.png", 1).join(), "ada 20260101-000000.PNG",
+      "a card renamed only in case still prunes its old backups");
     t.eq(V.backupsToPrune(names, "Ada.png", 0).length, 0, "keep 0 means keep every backup");
     t.eq(V.backupsToPrune(names, "Ada.png", 10).length, 0, "fewer than the limit: nothing goes");
     t.eq(V.backupsToPrune(names, "Ada 2.png", 0).length + V.backupsToPrune(names, "Ada 2.png", 1).length, 0, "\"Ada 2\" has only one");

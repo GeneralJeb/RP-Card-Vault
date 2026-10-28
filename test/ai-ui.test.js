@@ -34,7 +34,8 @@ const fakeIdb = need("fake-indexeddb");
 if (!jsdomMod || !babel || !fakeIdb || !have("react") || !have("react-dom/client")) {
   console.log("\nskipped — install the dev dependencies to run this one:");
   console.log("  npm install --no-save jsdom react@18 react-dom@18 fake-indexeddb @babel/standalone@7.23.9\n");
-  process.exit(0);
+  t.skip("the AI panel tests", "the dev dependencies aren't installed");
+  t.done();
 }
 
 /* ── the fake local server ─────────────────────────────────────────────── */

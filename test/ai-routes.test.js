@@ -443,6 +443,18 @@ async function main() {
       r = await ws("read", { path: "link/secret.txt" });
       t.ok(r.status === 400 && !/outside/.test(r.text), "a link that leads outside the workspace is refused");
     }
+    // A folder beside the workspace whose name starts the same way isn't inside it.
+    const sibling = WS + "-old";
+    fs.mkdirSync(sibling, { recursive: true });
+    fs.writeFileSync(path.join(sibling, "secret.txt"), "outside");
+    let linkedSibling = false;
+    try { fs.symlinkSync(sibling, path.join(WS, "old"), "junction"); linkedSibling = true; } catch (e) { /* no link support here */ }
+    if (linkedSibling) {
+      r = await ws("read", { path: "old/secret.txt" });
+      t.ok(r.status === 400 && !/outside/.test(r.text), "nor one into a folder beside it whose name starts the same (" + path.basename(sibling) + ")");
+    }
+    r = await ws("read", { path: "agent.md:hidden" });
+    t.ok(r.status === 400 && /isn't allowed/.test(r.text), "a hidden data stream (agent.md:hidden) is refused");
 
     r = await ws("write", { path: "big.txt", text: "x".repeat(1024 * 1024 + 1), ver: null });
     t.eq(r.status, 413, "a file over 1 MB is refused");

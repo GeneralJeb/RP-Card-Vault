@@ -447,6 +447,9 @@ console.log("\nunencrypted AI addresses");
     "this computer's own addresses are recognised");
   t.ok(!V.isLoopbackAddress("http://192.168.1.20:11434/v1") && !V.isLoopbackAddress("http://evil.localhost.example.com/v1"),
     "other machines aren't, even with localhost in the name");
+  t.ok(!V.isLoopbackAddress("http://127.evil.example/v1") && !V.isLoopbackAddress("http://127.0.0.1.example.com/v1"),
+    "nor are names that only start with 127");
+  t.ok(V.isLoopbackAddress("http://127.1:5001/v1"), "a short 127 address still is");
   t.eq(V.aiAddressWarning("http://127.0.0.1:11434/v1"), "", "a local model over http is fine");
   t.eq(V.aiAddressWarning("https://openrouter.ai/api/v1"), "", "an https service is fine");
   t.ok(/isn't encrypted/.test(V.aiAddressWarning("http://192.168.1.20:11434/v1")) && /public or shared Wi-Fi/.test(V.aiAddressWarning("http://api.example.com/v1/chat/completions")),
