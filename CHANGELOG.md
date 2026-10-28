@@ -8,6 +8,11 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.11
+
+- **"Local models only" no longer lets through names that only start with 127.** An address like `http://127.example.com/v1` counted as "this computer", so with Local models only on, the relay would still send your cards and key to that remote server, and the AI panel didn't warn that it was unencrypted. Only real 127 addresses (and localhost and ::1) count as local now.
+- **The tests can no longer pass by stopping early.** A test file that got stuck waiting on something that never happened used to end quietly and be counted as passed, with the rest of its checks never run. It now fails and says it stopped before it finished. More checks were added where flipping a safety check in the code went unnoticed: a move whose copy lands damaged, Save to card in a Reference folder with backups off, backup pruning, links out of the agent workspace, hidden data streams and DNS rebinding of the page itself.
+
 ## 1.6.10
 
 - **Spaces in vault.local no longer make the launchers disagree.** A line written `port = 8791` (or with a space before or after it) was read by the shortcuts but not by `Start RP Card Vault.bat` or `Stop RP Card Vault.bat`, so Start opened the 8790 vault, with the other copy's folder permissions and data, and Stop couldn't find the server it was meant to stop. All the launchers read it the same way now.

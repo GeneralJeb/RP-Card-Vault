@@ -22,7 +22,8 @@ try { fakeIdb = require("fake-indexeddb"); } catch (e) { /* optional */ }
 if (!fakeIdb) {
   console.log("\nskipped — install the dev dependency to run this one:");
   console.log("  npm install --no-save fake-indexeddb\n");
-  process.exit(0);
+  t.skip("the AI notes tests", "fake-indexeddb isn't installed");
+  t.done();
 }
 
 const { mod: V } = loadPureRegion([

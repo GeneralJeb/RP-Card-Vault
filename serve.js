@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.10";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.6.11";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -401,7 +401,7 @@ const ai = { baseUrl: "", model: "", key: "", localOnly: false, noTrain: true };
 function isLoopbackUrl(u) {
   let h = "";
   try { h = new URL(u).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch (e) { return false; }
-  return h === "localhost" || /\.localhost$/.test(h) || /^127\./.test(h) || h === "::1";
+  return h === "localhost" || /\.localhost$/.test(h) || /^127(\.\d{1,3}){1,3}$/.test(h) || h === "::1";
 }
 
 /** Refuse a remote address while Local models only is on. */

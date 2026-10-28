@@ -17,6 +17,16 @@
 
 let pass = 0;
 const failures = [];
+let finished = false;
+
+// A suite that never reaches done() didn't finish: say so and fail. Without
+// this, one left waiting on a promise that never settles exits 0 once Node
+// has nothing left to do, and run-all counts it as passed.
+process.on("exit", (code) => {
+  if (finished || code !== 0) return;
+  console.log("\n  ✗ the suite stopped before it finished (done() was never reached)");
+  process.exitCode = 1;
+});
 
 function ok(cond, label, extra) {
   if (cond) { pass++; console.log("  ✓ " + label); return true; }
@@ -36,6 +46,7 @@ function skip(label, why) {
 }
 
 function done() {
+  finished = true;
   console.log("\n" + "-".repeat(60));
   if (failures.length) {
     console.log(pass + " passed, " + failures.length + " FAILED:");
