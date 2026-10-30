@@ -436,6 +436,62 @@ async function main() {
       await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Animated Ada/.test(e.textContent)));
     });
 
+    await step("a card's picture opens full size, and its Gallery shows the pictures it embeds", async () => {
+      const pic = (rgb) => V.solidPng(30, 40, rgb);
+      const b64 = (x) => Buffer.from(x).toString("base64");
+      const v3 = V.newCardPayload({ name: "Gallery Gwen", description: "Has pictures." });
+      v3.data.assets = [
+        { type: "icon", uri: "ccdefault:", name: "main", ext: "png" },
+        { type: "emotion", uri: "__asset:0", name: "happy", ext: "png" },
+        { type: "background", uri: "data:image/png;base64," + b64(pic([0, 120, 0])), name: "meadow", ext: "png" },
+      ];
+      let card = Buffer.from(V.writeCardIntoPng(pic([160, 30, 30]), v3, V.buildV2Payload(v3)));
+      const chunk = Buffer.from(V.makeChunk("tEXt", new Uint8Array(Buffer.concat([Buffer.from("chara-ext-asset_:0"), Buffer.from([0]), Buffer.from(b64(pic([30, 30, 160])))]))));
+      card = Buffer.concat([card.subarray(0, card.length - 12), chunk, card.subarray(card.length - 12)]);
+      await writeFiles(page, "Cards", [["Gallery Gwen.png", card]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Gallery Gwen").click();
+
+      const viewer = page.locator(".picture-viewer");
+      const caption = viewer.locator(".picture-caption");
+      await page.locator(".inspector-picture").click();
+      await viewer.waitFor();
+      await page.waitForFunction(() => /30 × 40/.test((document.querySelector(".picture-caption") || {}).textContent || ""));
+      t.ok(/^Card picture · 30 × 40 · 1 of 3$/.test((await caption.innerText()).trim()), "clicking the card's picture opens it full size, at its real size", await caption.innerText());
+      await page.keyboard.press("ArrowRight");
+      await page.waitForFunction(() => /happy/.test(document.querySelector(".picture-caption").textContent));
+      t.ok(/^happy · emotion/.test((await caption.innerText()).trim()), "→ steps to the next picture the card holds", await caption.innerText());
+      await page.keyboard.press("Escape");
+      await viewer.waitFor({ state: "detached" });
+      t.ok(await page.locator(".inspector-picture").isVisible(), "Escape closes the picture, and the card stays open");
+
+      await page.getByRole("tab", { name: /^Gallery/ }).click();
+      const items = page.locator(".card-gallery .gallery-item");
+      await items.first().waitFor();
+      t.eq(await items.count(), 3, "the Gallery tab shows the card's own picture and the two it embeds");
+      await items.nth(2).click();
+      await viewer.waitFor();
+      t.ok(/^meadow · background/.test((await caption.innerText()).trim()), "clicking one opens that one", await caption.innerText());
+      await viewer.click({ position: { x: 5, y: 5 } });
+      await viewer.waitFor({ state: "detached" });
+      t.ok(true, "a click outside the picture closes it");
+
+      // With Never play, pictures are drawn still.
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByLabel("Animated card pictures").selectOption({ label: "Never play" });
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await items.first().click();
+      await viewer.locator("canvas").waitFor();
+      t.eq(await viewer.locator("img").count(), 0, "with Never play the full-size picture is a still");
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByLabel("Animated card pictures").selectOption({ label: "Play when you point at them" });
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Gallery Gwen.png"));
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Gallery Gwen/.test(e.textContent)));
+    });
+
     await step("Shift-click selects the cards between, in the order shown now", async () => {
       const sort = page.locator("select").filter({ has: page.locator("option[value='nameDesc']") }).first();
       const was = await sort.inputValue();

@@ -10,6 +10,8 @@ If you skipped several releases, read every section down to the one you had.
 
 ## 1.6.15
 
+- **A card's picture opens full size.** Click the picture in the card panel and it opens centred over the vault, as large as fits the window (never larger than it is), with its size shown. ← and → step through the card's other pictures; Escape, ✕ or a click outside closes it, and the card stays open.
+- **New Gallery tab: the pictures a card embeds.** Some cards carry extra pictures (expressions, backgrounds and the like) inside the file. The card panel's Gallery tab shows them all, next to the card's own picture: the ones RisuAI-style PNG cards hold, the pictures packed inside a .charx, and any written into the card's asset list. Click one to see it full size. Assets that aren't pictures, or are only a web address rather than inside the file, are counted but not shown, and the vault never fetches them. With Animated card pictures set to Never play, these are shown still too.
 - **The header buttons have their colours back.** Since 1.5.0 they were all the same quiet grey, with colour only for something that needed you. Each now has its own colour again, as before: Rescan cyan, Ingest warm, Dupes red, Tags purple, Folders green, AI blue, Log and Settings muted. Kept from 1.5.0: the AI button turns warm with ⚠ when the AI is on but not ready, Folders is lit up while you have none, and Dupes shows its count.
 
 ## 1.6.14
