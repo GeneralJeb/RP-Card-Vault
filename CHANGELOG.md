@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.12
+
+- **A card whose lorebook has an odd scan depth no longer blanks the vault.** If a card file's lorebook gave its scan depth as something other than a number (a list of settings, for example), opening the card's Lorebook tab emptied the whole page until you reloaded it. The scan depth is now shown as the file has it, and the page carries on.
+
 ## 1.6.11
 
 - **"Local models only" no longer lets through names that only start with 127.** An address like `http://127.example.com/v1` counted as "this computer", so with Local models only on, the relay would still send your cards and key to that remote server, and the AI panel didn't warn that it was unencrypted. Only real 127 addresses (and localhost and ::1) count as local now.
