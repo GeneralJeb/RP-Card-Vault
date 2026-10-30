@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.14";
+const APP_VERSION = "1.6.15";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -2203,6 +2203,90 @@ function animateModeOf(settings) {
   const v = settings && settings.animateCards;
   if (v === false) return "off";
   return ANIMATE_MODES.indexOf(v) >= 0 ? v : "hover";
+}
+
+/** The picture type of some bytes, from their first few ("" when they aren't a picture the page shows). */
+function pictureMime(b) {
+  if (!b || b.length < 12) return "";
+  if (isPng(b)) return "image/png";
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return "image/gif";
+  const at = (i, n) => String.fromCharCode.apply(null, b.subarray(i, i + n));
+  if (at(0, 4) === "RIFF" && at(8, 4) === "WEBP") return "image/webp";
+  if (at(4, 4) === "ftyp" && /^avi[fs]$/.test(at(8, 4))) return "image/avif";
+  return "";
+}
+
+/** Base64 text as bytes, or null when it isn't base64. */
+function b64Bytes(text) {
+  try {
+    const bin = atob(String(text).replace(/\s+/g, ""));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch (e) { return null; }
+}
+
+const CARD_ASSET_MAX = 64 * 1048576;   // one embedded picture, unpacked
+
+/**
+ * The pictures a card file holds, for its gallery: a PNG card's own picture
+ * first, then each asset in its list that's a picture kept in the file. Those
+ * are PNG chunks named chara-ext-asset_N (as RisuAI writes them, "__asset:N"
+ * in the list), files inside a .charx ("embeded://path", the spec's own
+ * spelling), and data: addresses. Each is { key, name, type, mime, bytes }.
+ * `others` counts assets that aren't pictures, or aren't in the file at all
+ * (a web address, which the vault doesn't fetch).
+ */
+async function cardPictures(bytes, filename) {
+  const ext = extOf(filename || "");
+  const pictures = [], usedChunks = new Set();
+  let others = 0;
+  const add = (b, key, name, type) => {
+    const mime = pictureMime(b);
+    if (!mime) { others++; return; }
+    pictures.push({ key, name, type, mime, bytes: b });
+  };
+  if ((ext === "png" || ext === "apng") && isPng(bytes)) add(bytes, "card", "Card picture", "card");
+
+  const chunks = new Map();
+  if (isPng(bytes)) {
+    for (const c of readPngChunks(bytes, { stopAtIDAT: false }).chunks) {
+      if (c.type !== "tEXt" || !c.data) continue;
+      const nul = c.data.indexOf(0);
+      if (nul < 1) continue;
+      const m = /^chara-ext-asset_:?(\d+)$/.exec(bytesToLatin1(c.data.subarray(0, nul)));
+      if (m) chunks.set(m[1], c.data.subarray(nul + 1));
+    }
+  }
+  let parsed = null;
+  try { parsed = await parseCardBytes(bytes, filename); } catch (e) { parsed = null; }
+  const raw = parsed && parsed.ok ? parsed.raw : null;
+  const src = raw && raw.data && typeof raw.data === "object" ? raw.data : raw;
+  const assets = src && Array.isArray(src.assets) ? src.assets : [];
+  let zip = null;
+  if (ext === "charx" && typeof JSZip !== "undefined") { try { zip = await JSZip.loadAsync(bytes); } catch (e) { zip = null; } }
+
+  for (const a of assets) {
+    const uri = a && typeof a.uri === "string" ? a.uri.trim() : "";
+    if (/^ccdefault:/i.test(uri)) continue;   // the card's own picture, already first
+    const name = String((a && (a.name || a.type)) || "asset");
+    const type = String((a && a.type) || "");
+    let b = null, m;
+    try {
+      if ((m = /^__asset:(\d+)$/.exec(uri)) && chunks.has(m[1])) { usedChunks.add(m[1]); b = b64Bytes(bytesToLatin1(chunks.get(m[1]))); }
+      else if ((m = /^embed+ed:\/\/(.+)$/i.exec(uri)) && zip) { const f = zip.file(m[1]); if (f) b = await unzipEntryLimited(f, CARD_ASSET_MAX); }
+      else if ((m = /^data:[^,]*;base64,(.*)$/i.exec(uri))) b = b64Bytes(m[1]);
+    } catch (e) { b = null; }
+    if (b && b.length <= CARD_ASSET_MAX) add(b, uri, name, type); else others++;
+  }
+  // Asset chunks the list doesn't name are still pictures in the file.
+  for (const [n, v] of chunks) {
+    if (usedChunks.has(n)) continue;
+    const b = b64Bytes(bytesToLatin1(v));
+    if (b) add(b, "__asset:" + n, "Asset " + n, ""); else others++;
+  }
+  return { pictures, others };
 }
 
 /** A reused index record, told whether it's animated if it was indexed before the vault looked. */
@@ -8599,7 +8683,7 @@ async function saveAgentSettings(s) {
 const ACCENT_VAR = {
   warm: "--accent-warm", red: "--accent-red", green: "--accent-green",
   blue: "--accent-blue", pink: "--accent-pink", cyan: "--accent-cyan",
-  purple: "--accent-purple", muted: "--text-muted", plain: "--text-secondary",
+  purple: "--accent-purple", muted: "--text-muted",
 };
 
 /** The scanning bar with nothing running. */
@@ -9052,6 +9136,128 @@ function MovingThumb({ rec, load, alt, radius }) {
     width: "100%", height: "100%", objectFit: "cover",
     borderRadius: radius || 0, display: "block", background: "var(--bg-tertiary)",
   }} />;
+}
+
+/**
+ * A picture full size, centred over the vault: as large as fits the window
+ * and never larger than it is. ← and → step through the others; Escape, ✕ or
+ * a click outside the picture closes it. `still` shows each as a still
+ * (Animated card pictures: Never play). Items: { name, type, url, blob }.
+ */
+function PictureViewer({ items, start, still, onClose }) {
+  const [i, setI] = useState(Math.min(Math.max(0, start || 0), items.length - 1));
+  const [size, setSize] = useState(null);
+  const n = items.length, it = items[i];
+  const step = (d) => setI((x) => (x + d + n) % n);
+  useEffect(() => {
+    // Ahead of the vault's own keys, which would close the card or move to the next.
+    const h = (e) => {
+      if (e.key === "Escape") onClose();
+      else if (e.key === "ArrowRight" && n > 1) step(1);
+      else if (e.key === "ArrowLeft" && n > 1) step(-1);
+      else return;
+      e.preventDefault(); e.stopImmediatePropagation();
+    };
+    window.addEventListener("keydown", h, true);
+    return () => window.removeEventListener("keydown", h, true);
+  }, [n, onClose]);
+  useEffect(() => { setSize(null); }, [i]);
+  const keep = (e) => e.stopPropagation();
+  const picStyle = { maxWidth: "100%", maxHeight: "calc(100% - 48px)", objectFit: "contain", borderRadius: 6,
+    boxShadow: "0 24px 64px rgba(0,0,0,0.6)", background: "var(--bg-tertiary)", display: "block", minHeight: 0 };
+  return ReactDOM.createPortal(
+    <div className="picture-viewer fadeIn" role="dialog" aria-label={"Picture: " + it.name} onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 3000, background: "rgba(0,0,0,0.82)", padding: "3vh 2vw",
+      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10,
+    }}>
+      {still ? <StillPicture key={it.url} blob={it.blob} alt={it.name} style={picStyle} onClick={keep} onSize={setSize} />
+        : <img key={it.url} src={it.url} alt={it.name} onClick={keep} style={picStyle}
+            onLoad={(e) => setSize([e.currentTarget.naturalWidth, e.currentTarget.naturalHeight])} />}
+      <div onClick={keep} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: "var(--radius-sm)",
+        background: "var(--bg-secondary)", border: "1px solid var(--border-subtle)", maxWidth: "100%" }}>
+        {n > 1 ? <SmallBtn color="muted" onClick={() => step(-1)} title="Previous (←)">‹</SmallBtn> : null}
+        <span className="picture-caption" style={{ fontSize: 12, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {it.name}{it.type && it.type !== "card" && it.type !== it.name ? " · " + it.type : ""}
+          {size ? " · " + size[0] + " × " + size[1] : ""}{n > 1 ? " · " + (i + 1) + " of " + n : ""}
+        </span>
+        {n > 1 ? <SmallBtn color="muted" onClick={() => step(1)} title="Next (→)">›</SmallBtn> : null}
+        <SmallBtn color="muted" onClick={onClose} title="Close (Escape)">✕</SmallBtn>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+/** The first frame of a picture, drawn still. */
+function StillPicture({ blob, alt, style, onClick, onSize }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    let dead = false;
+    createImageBitmap(blob).then((bmp) => {
+      const c = ref.current;
+      if (dead || !c) { bmp.close && bmp.close(); return; }
+      c.width = bmp.width; c.height = bmp.height;
+      c.getContext("2d").drawImage(bmp, 0, 0);
+      if (onSize) onSize([bmp.width, bmp.height]);
+      bmp.close && bmp.close();
+    }).catch(() => {});
+    return () => { dead = true; };
+  }, [blob]);
+  return <canvas ref={ref} role="img" aria-label={alt} onClick={onClick} style={style} />;
+}
+
+/** A card's pictures as viewer items, each with an address of its own (let go with dropPictureItems). */
+async function loadPictureItems(rec, roots) {
+  const { bytes } = await readOriginalBytes(rec, roots);
+  const found = await cardPictures(bytes, rec.file);
+  return {
+    others: found.others,
+    items: found.pictures.map((p) => {
+      const blob = new Blob([p.bytes], { type: p.mime });
+      return { key: p.key, name: p.name, type: p.type, blob, url: URL.createObjectURL(blob) };
+    }),
+  };
+}
+function dropPictureItems(items) {
+  for (const it of items || []) { try { URL.revokeObjectURL(it.url); } catch (e) { /* gone */ } }
+}
+
+/** The inspector's Gallery tab: every picture the card holds; click one to see it full size. */
+function CardGallery({ rec, roots, still, onView }) {
+  const [state, setState] = useState({ loading: true, items: [], others: 0, err: "" });
+  useEffect(() => {
+    let dead = false, got = null;
+    setState({ loading: true, items: [], others: 0, err: "" });
+    loadPictureItems(rec, roots).then((r) => {
+      got = r.items;
+      if (dead) { dropPictureItems(got); return; }
+      setState({ loading: false, items: r.items, others: r.others, err: "" });
+    }).catch((e) => { if (!dead) setState({ loading: false, items: [], others: 0, err: e.message }); });
+    return () => { dead = true; dropPictureItems(got); };
+  }, [rec.id, rec.fp]);
+  if (state.loading) return <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Reading the card file…</div>;
+  if (state.err) return <div style={{ fontSize: 12, color: "var(--accent-red)" }}>Couldn't read the card file: {state.err}</div>;
+  const extra = state.items.filter((it) => it.key !== "card").length;
+  return (
+    <Fragment>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 10 }}>
+        {extra ? countWord(extra, "embedded picture") + (state.items.length > extra ? ", besides the card's own" : "") + ". Click one to see it full size; ← and → step through them."
+          : state.items.length ? "No embedded pictures besides the card's own. Click it to see it full size." : "This card holds no pictures."}
+        {state.others ? " " + countWord(state.others, "other asset") + " in its list " + (state.others === 1 ? "isn't a picture kept in the file" : "aren't pictures kept in the file") + " (a web address, say), so " + (state.others === 1 ? "it isn't" : "they aren't") + " shown." : ""}
+      </div>
+      <div className="card-gallery" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 8 }}>
+        {state.items.map((it, i) => (
+          <button key={it.key + i} className="gallery-item" onClick={() => onView(state.items, i)} title={it.name + (it.type && it.type !== "card" ? " · " + it.type : "")}
+            style={{ padding: 0, border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", background: "var(--bg-tertiary)",
+              cursor: "zoom-in", overflow: "hidden", textAlign: "left", fontFamily: "inherit" }}>
+            {still ? <StillPicture blob={it.blob} alt={it.name} style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", display: "block" }} />
+              : <img src={it.url} alt={it.name} draggable={false} style={{ width: "100%", aspectRatio: "3 / 4", objectFit: "cover", display: "block" }} />}
+            <div style={{ fontSize: 10.5, color: "var(--text-secondary)", padding: "4px 6px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.name}</div>
+          </button>
+        ))}
+      </div>
+    </Fragment>
+  );
 }
 
 /** Window-based virtualization for a fixed-size grid. */
@@ -11173,6 +11379,7 @@ const TABS = [
   { key: "lore",     label: "Lorebook" },
   { key: "tags",     label: "Tags & Notes" },
   { key: "ai",       label: "✦ AI" },
+  { key: "gallery",  label: "Gallery" },
   { key: "raw",      label: "Raw" },
 ];
 
@@ -12128,6 +12335,26 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
 
   useEffect(() => { setTab("overview"); }, [rec.id]);
 
+  // The full-size picture: the card's own, with its embedded ones a step away.
+  // `owned` items were loaded for the viewer and go when it closes.
+  const [viewer, setViewer] = useState(null);
+  const viewerRef = useRef(null);
+  viewerRef.current = viewer;
+  const closeViewer = useCallback(() => {
+    const v = viewerRef.current;
+    if (v && v.owned) dropPictureItems(v.items);
+    setViewer(null);
+  }, []);
+  useEffect(() => closeViewer, [rec.id]);
+  const openPicture = async () => {
+    if (!rec.hasThumb) return;
+    try {
+      const got = await loadPictureItems(rec, roots);
+      if (!got.items.length) { onToast("No picture could be read from this card's file", "warm"); return; }
+      setViewer({ items: got.items, start: 0, owned: true });
+    } catch (e) { onToast("Couldn't read the card file: " + e.message, "red"); }
+  };
+
   // The Raw tab shows what a save would write, so it needs the file's own card too.
   // rawState: "reading", "read", or why the file couldn't be read. Until it's
   // read, the JSON leaves out what the vault doesn't keep itself.
@@ -12210,9 +12437,12 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
       {/* header */}
       <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-tertiary)" }}>
         <div style={{ display: "flex", gap: 10 }}>
-          <div style={{ width: 62, height: 84, flexShrink: 0, borderRadius: "var(--radius-sm)", overflow: "hidden", border: "1px solid var(--border-subtle)" }}>
+          <div className="inspector-picture" onClick={openPicture} title={rec.hasThumb ? "See the picture full size" : undefined}
+            style={{ width: 62, height: 84, flexShrink: 0, borderRadius: "var(--radius-sm)", overflow: "hidden", border: "1px solid var(--border-subtle)",
+              cursor: rec.hasThumb ? "zoom-in" : "default" }}>
             {onPlay && rec.animated ? <MovingThumb rec={rec} load={onPlay} /> : <Thumb id={rec.id} hasThumb={rec.hasThumb} />}
           </div>
+          {viewer ? <PictureViewer items={viewer.items} start={viewer.start} still={!onPlay} onClose={closeViewer} /> : null}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
               <div style={{
@@ -12272,6 +12502,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             : t.key === "greet" ? (greetings.length + (body && body.first_mes ? 1 : 0))
             : t.key === "tags" ? tags.length + vaultTags.length + flags.length
             : t.key === "ai" ? proposalCount(edit && edit.aiProposal)
+            : t.key === "gallery" ? rec.assetCount
             : 0;
           return (
             <div key={t.key} onClick={() => setTab(t.key)} className="no-sel inspector-tab" role="tab" aria-selected={on} tabIndex={0}
@@ -12509,6 +12740,10 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
                 style={Object.assign({}, inputBase, { fontFamily: "'Outfit', sans-serif", lineHeight: 1.6 })} />
             </Field>
           </Fragment>
+        ) : null}
+
+        {tab === "gallery" ? (
+          <CardGallery rec={rec} roots={roots} still={!onPlay} onView={(items, start) => setViewer({ items, start, owned: false })} />
         ) : null}
 
         {!loading && body && tab === "raw" ? (
@@ -17318,25 +17553,25 @@ function App() {
               if (aiBulkCtrl.current) aiBulkCtrl.current.abort();
             }}>Stop</SmallBtn>
           ) : (
-            <SmallBtn color="plain" onClick={() => runScan(null, false)} disabled={!roots.length}>Rescan</SmallBtn>
+            <SmallBtn color="cyan" onClick={() => runScan(null, false)} disabled={!roots.length}>Rescan</SmallBtn>
           )}
-          {/* One quiet style: colour is kept for what needs you (a count of
-              duplicates, the AI not ready) and for Folders while there are none. */}
-          <SmallBtn color="plain" onClick={() => setModal("ingest")} disabled={!roots.length || scan.running}>Ingest</SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("dupes")} disabled={!cards.length}
+          {/* Each button keeps its own colour, so it's found at a glance. The AI turns
+              warm when it's on but not ready; Folders lights up while there are none. */}
+          <SmallBtn color="warm" onClick={() => setModal("ingest")} disabled={!roots.length || scan.running}>Ingest</SmallBtn>
+          <SmallBtn color="red" onClick={() => setModal("dupes")} disabled={!cards.length}
             title={dupes.exact.length ? countWord(dupes.exact.length, "group") + " of identical files" : "Find duplicates"}>
             Dupes{dupes.exact.length ? <span style={{ color: "var(--accent-red)", fontWeight: 600 }}>{" " + dupes.exact.length}</span> : null}
           </SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("tags")} disabled={!cards.length}>Tags</SmallBtn>
-          <SmallBtn color={roots.length ? "plain" : "green"} active={!roots.length} onClick={() => setModal("roots")}>Folders</SmallBtn>
-          <SmallBtn color={aiNotReady ? "warm" : aiSettings.enabled ? "blue" : "plain"}
+          <SmallBtn color="purple" onClick={() => setModal("tags")} disabled={!cards.length}>Tags</SmallBtn>
+          <SmallBtn color="green" active={!roots.length} onClick={() => setModal("roots")}>Folders</SmallBtn>
+          <SmallBtn color={aiNotReady ? "warm" : "blue"}
             onClick={() => setModal("ai")} active={aiSettings.enabled}
             title={aiNotReady ? "The AI features are on but not ready — open to see why"
               : aiSettings.enabled ? "AI settings · " + (aiSettings.model || "no model") : "AI settings (the AI features are off)"}>
             ✦ AI{aiNotReady ? " ⚠" : ""}
           </SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("log")}>Log</SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("settings")} title="Settings">⚙</SmallBtn>
+          <SmallBtn color="muted" onClick={() => setModal("log")}>Log</SmallBtn>
+          <SmallBtn color="muted" onClick={() => setModal("settings")} title="Settings">⚙</SmallBtn>
         </div>
       </div>
 

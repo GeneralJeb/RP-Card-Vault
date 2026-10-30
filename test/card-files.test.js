@@ -16,7 +16,7 @@ const { mod: V } = loadPureRegion([
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
-  "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf",
+  "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -329,6 +329,48 @@ async function main() {
     t.ok((await V.withAnimated({ ext: "json" }, asFile(saved))).animated === undefined, "a .json card isn't looked at");
     t.eq([undefined, "hover", "always", "off", true, false, "nonsense"].map((v) => V.animateModeOf({ animateCards: v })),
       ["hover", "hover", "always", "off", "hover", "off", "hover"], "the play setting: pointing by default; always and never when chosen; the old on/off carried over");
+  }
+
+  console.log("\na card's pictures, for its gallery");
+  {
+    const pic = (rgb) => V.solidPng(8, 8, rgb);
+    const b64 = (b) => Buffer.from(b).toString("base64");
+    const v3 = V.newCardPayload({ name: "Gallery Gwen" });
+    v3.data.assets = [
+      { type: "icon", uri: "ccdefault:", name: "main", ext: "png" },
+      { type: "emotion", uri: "__asset:0", name: "happy", ext: "png" },
+      { type: "background", uri: "data:image/png;base64," + b64(pic([0, 90, 0])), name: "meadow", ext: "png" },
+      { type: "background", uri: "https://example.com/sky.png", name: "sky", ext: "png" },
+      { type: "voice", uri: "data:audio/mpeg;base64," + b64(Buffer.from("ID3 not a picture at all")), name: "hello", ext: "mp3" },
+      { type: "emotion", uri: "__asset:9", name: "missing", ext: "png" },
+    ];
+    let card = Buffer.from(V.writeCardIntoPng(pic([200, 0, 0]), v3, V.buildV2Payload(v3)));
+    // RisuAI-style asset chunks, put before IEND: one the list names, one it doesn't.
+    const tEXt = (k, v) => Buffer.from(V.makeChunk("tEXt", new Uint8Array(Buffer.concat([Buffer.from(k, "latin1"), Buffer.from([0]), Buffer.from(v, "latin1")]))));
+    card = Buffer.concat([card.subarray(0, card.length - 12), tEXt("chara-ext-asset_:0", b64(pic([0, 0, 200]))), tEXt("chara-ext-asset_7", b64(pic([200, 200, 0]))), card.subarray(card.length - 12)]);
+
+    const got = await V.cardPictures(new Uint8Array(card), "Gallery Gwen.png");
+    t.eq(got.pictures.map((p) => p.name + ":" + p.type + ":" + p.mime).join(", "),
+      "Card picture:card:image/png, happy:emotion:image/png, meadow:background:image/png, Asset 7::image/png",
+      "a PNG card: its own picture, then the pictures it embeds (chunks named in its list or not, data: addresses)");
+    t.eq(got.others, 3, "a web address, a sound and a listed chunk that isn't there are counted, not shown");
+    t.eq(Buffer.from(got.pictures[1].bytes).toString("hex"), Buffer.from(pic([0, 0, 200])).toString("hex"), "an embedded picture comes out byte for byte");
+
+    global.JSZip = require("../lib/jszip.min.js");
+    const zip = new JSZip();
+    const cx = V.newCardPayload({ name: "Charx Cora" });
+    cx.data.assets = [{ type: "icon", uri: "embeded://assets/icon/images/main.png", name: "main", ext: "png" },
+      { type: "emotion", uri: "embedded://assets/emotion/sad.png", name: "sad", ext: "png" }];
+    zip.file("card.json", JSON.stringify(cx));
+    zip.file("assets/icon/images/main.png", pic([10, 10, 10]));
+    zip.file("assets/emotion/sad.png", pic([20, 20, 20]));
+    const charx = await V.cardPictures(await zip.generateAsync({ type: "uint8array" }), "Charx Cora.charx");
+    t.eq(charx.pictures.map((p) => p.name + ":" + p.type).join(", "), "main:icon, sad:emotion", "a .charx card: the pictures packed inside it (either spelling of embedded)");
+
+    const plain = await V.cardPictures(new Uint8Array(Buffer.from(JSON.stringify(V.newCardPayload({ name: "Json Jo" })))), "Json Jo.json");
+    t.eq([plain.pictures.length, plain.others], [0, 0], "a .json card with no assets has none");
+    t.eq([[0xff, 0xd8, 0xff, 0xe0], [0x47, 0x49, 0x46, 0x38, 0x39, 0x61], [...Buffer.from("RIFF0000WEBPVP8 ")], [...Buffer.from("plain text here")]]
+      .map((b) => V.pictureMime(new Uint8Array(b.concat(Array(12).fill(0))))), ["image/jpeg", "image/gif", "image/webp", ""], "JPEG, GIF and WebP are known by their first bytes; text isn't a picture");
   }
 
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");
