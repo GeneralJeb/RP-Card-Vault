@@ -15,8 +15,8 @@ const HTML = path.join(__dirname, "..", "RP_Card_Vault.html");
 const SENTINEL = "/*__PURE_JS_END__*/";
 
 /**
- * @param {string[]} names  top-level declarations to re-export. A typo shows up
- *                          as `undefined` in the tests rather than an error.
+ * @param {string[]} names  top-level declarations to re-export. A typo throws a
+ *                          ReferenceError naming it.
  * @param {object}  [opts]  { indexedDB, IDBKeyRange } to inject a fake database.
  */
 function loadPureRegion(names, opts) {
@@ -59,11 +59,13 @@ function loadPureRegion(names, opts) {
   m.__range = opts.IDBKeyRange;
   m.filename = tmp;
   m.paths = Module._nodeModulePaths(path.dirname(tmp));
-  m._compile(fs.readFileSync(tmp, "utf8"), tmp);
-
-  // Clean up the temp file and directory now that the module is compiled.
-  try { fs.unlinkSync(tmp); } catch (e) {}
-  try { fs.rmdirSync(tmpDir); } catch (e) {}
+  try {
+    m._compile(fs.readFileSync(tmp, "utf8"), tmp);
+  } finally {
+    // Clean up the temp file and directory, whether or not it compiled.
+    try { fs.unlinkSync(tmp); } catch (e) {}
+    try { fs.rmdirSync(tmpDir); } catch (e) {}
+  }
 
   return { mod: m.exports, source: region };
 }

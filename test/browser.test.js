@@ -32,7 +32,7 @@ const t = require("./harness");
 const ROOT = path.join(__dirname, "..");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry"]);
+const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk"]);
 const cardPng = (o, rgb, more) => {
   const v3 = V.newCardPayload(o);
   Object.assign(v3.data, more || {});
@@ -307,6 +307,24 @@ async function main() {
       t.ok(await saved.isVisible(), "typing it back leaves nothing to save");
     });
 
+    await step("a lorebook whose scan depth isn't a number still opens", async () => {
+      // The file's own value is shown as text; React can't draw an object, and
+      // one used to take the whole page down.
+      await writeFiles(page, "Cards", [["Eli Oddbook.png", cardPng({ name: "Eli Oddbook", description: "Odd book." }, [120, 120, 40], {
+        character_book: { name: "Odd", scan_depth: { depth: 4 }, token_budget: "lots", entries: [{ keys: ["odd"], content: "Odd." }] },
+      })]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Eli Oddbook").click();
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      const row = page.locator("div").filter({ has: page.getByText("Scan depth", { exact: true }) }).last();
+      await row.waitFor();
+      t.eq(await row.innerText(), "Scan depth\n{\"depth\":4}", "the scan depth is shown as the file has it");
+      t.ok(await tile("Eli Oddbook").isVisible(), "and the page is still there");
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Eli Oddbook.png"));
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Eli Oddbook/.test(e.textContent)));
+    });
+
     await step("the Raw tab says when it hasn't read the card file, and asks before copying without it", async () => {
       await tile("Ada Clockmaker").click();
       await page.getByRole("tab", { name: /^Raw/ }).click();
@@ -352,6 +370,126 @@ async function main() {
       await desc.fill("Grows roses.");
       await setRole("Library");
       t.ok(true, "the folder is a Library again");
+    });
+
+    await step("an animated card is marked, filtered, and plays only while you point at it", async () => {
+      // A two-frame APNG (red, then blue) made into a card the way Save to card does.
+      const zlib = require("zlib");
+      const be = (n) => { const x = Buffer.alloc(4); x.writeUInt32BE(n); return x; };
+      const chunk = (type, data) => Buffer.from(V.makeChunk(type, new Uint8Array(data)));
+      const pix = (r, g, bl) => zlib.deflateSync(Buffer.concat([0, 1].map(() => Buffer.from([0].concat(Array(2).fill([r, g, bl, 255]).flat())))));
+      const fctl = (seq) => Buffer.concat([be(seq), be(2), be(2), be(0), be(0), Buffer.from([0, 50, 0, 100, 0, 0])]);
+      const apng = Buffer.concat([
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        chunk("IHDR", Buffer.concat([be(2), be(2), Buffer.from([8, 6, 0, 0, 0])])),
+        chunk("acTL", Buffer.concat([be(2), be(0)])), chunk("fcTL", fctl(0)), chunk("IDAT", pix(200, 40, 40)),
+        chunk("fcTL", fctl(1)), chunk("fdAT", Buffer.concat([be(2), pix(40, 40, 200)])), chunk("IEND", Buffer.alloc(0)),
+      ]);
+      const v3 = V.newCardPayload({ name: "Animated Ada", description: "Moves." });
+      await writeFiles(page, "Cards", [["Animated Ada.png", Buffer.from(V.writeCardIntoPng(new Uint8Array(apng), v3, V.buildV2Payload(v3)))]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      const anim = tile("Animated Ada");
+      await anim.waitFor();
+      t.ok(await anim.getByTitle("Animated picture").isVisible(), "its tile has the ▶ badge");
+      t.eq(await tile("Ada Clockmaker").getByTitle("Animated picture").count(), 0, "a still card doesn't");
+      await page.getByText("Animated", { exact: true }).first().click();
+      await page.waitForFunction(() => /\b1 shown\b/.test(document.body.innerText));
+      t.ok(true, "the Animated filter shows just that card");
+      await page.getByText("Animated", { exact: true }).first().click();
+      await page.mouse.move(2, 2);
+      t.eq(await page.locator(".card-moving").count(), 0, "nothing plays while nothing is pointed at");
+      await anim.hover();
+      const moving = anim.locator("img.card-moving");
+      await moving.waitFor();
+      t.ok(/^blob:/.test(await moving.getAttribute("src")), "pointing at it plays the card's own file");
+      await page.mouse.move(2, 2);
+      await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
+      t.ok(true, "and it stops when you move away");
+      await anim.click();
+      await page.mouse.move(2, 2);
+      await page.locator(".card-moving").first().waitFor();
+      t.eq(await page.locator(".cardTile .card-moving").count(), 0, "the card panel plays it, the grid doesn't");
+      const setMode = async (label) => {
+        await page.getByRole("button", { name: "⚙" }).first().click();
+        const sel = page.getByLabel("Animated card pictures");
+        const was = await sel.inputValue();
+        await sel.selectOption({ label });
+        await page.getByRole("button", { name: "Close", exact: true }).click();
+        return was;
+      };
+      // Never play: neither the grid nor the card panel.
+      t.eq(await setMode("Never play"), "hover", "Settings starts at Play when you point at them");
+      await anim.hover();
+      await page.waitForTimeout(800);
+      t.eq(await page.locator(".card-moving").count(), 0, "with Never play, neither plays");
+      // Always play: it plays with nothing pointed at, and still cards stay still.
+      await setMode("Always play");
+      await page.mouse.move(2, 2);
+      await anim.locator("img.card-moving").waitFor();
+      t.ok(true, "with Always play, the tile plays without being pointed at");
+      t.eq(await page.locator(".cardTile .card-moving").count(), 1, "and only the animated card does");
+      await setMode("Play when you point at them");
+      await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
+      t.ok(true, "back to pointing, it stops");
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Animated Ada.png"));
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Animated Ada/.test(e.textContent)));
+    });
+
+    await step("a card's picture opens full size, and its Gallery shows the pictures it embeds", async () => {
+      const pic = (rgb) => V.solidPng(30, 40, rgb);
+      const b64 = (x) => Buffer.from(x).toString("base64");
+      const v3 = V.newCardPayload({ name: "Gallery Gwen", description: "Has pictures." });
+      v3.data.assets = [
+        { type: "icon", uri: "ccdefault:", name: "main", ext: "png" },
+        { type: "emotion", uri: "__asset:0", name: "happy", ext: "png" },
+        { type: "background", uri: "data:image/png;base64," + b64(pic([0, 120, 0])), name: "meadow", ext: "png" },
+      ];
+      let card = Buffer.from(V.writeCardIntoPng(pic([160, 30, 30]), v3, V.buildV2Payload(v3)));
+      const chunk = Buffer.from(V.makeChunk("tEXt", new Uint8Array(Buffer.concat([Buffer.from("chara-ext-asset_:0"), Buffer.from([0]), Buffer.from(b64(pic([30, 30, 160])))]))));
+      card = Buffer.concat([card.subarray(0, card.length - 12), chunk, card.subarray(card.length - 12)]);
+      await writeFiles(page, "Cards", [["Gallery Gwen.png", card]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Gallery Gwen").click();
+
+      const viewer = page.locator(".picture-viewer");
+      const caption = viewer.locator(".picture-caption");
+      await page.locator(".inspector-picture").click();
+      await viewer.waitFor();
+      await page.waitForFunction(() => /30 × 40/.test((document.querySelector(".picture-caption") || {}).textContent || ""));
+      t.ok(/^Card picture · 30 × 40 · 1 of 3$/.test((await caption.innerText()).trim()), "clicking the card's picture opens it full size, at its real size", await caption.innerText());
+      await page.keyboard.press("ArrowRight");
+      await page.waitForFunction(() => /happy/.test(document.querySelector(".picture-caption").textContent));
+      t.ok(/^happy · emotion/.test((await caption.innerText()).trim()), "→ steps to the next picture the card holds", await caption.innerText());
+      await page.keyboard.press("Escape");
+      await viewer.waitFor({ state: "detached" });
+      t.ok(await page.locator(".inspector-picture").isVisible(), "Escape closes the picture, and the card stays open");
+
+      await page.getByRole("tab", { name: /^Gallery/ }).click();
+      const items = page.locator(".card-gallery .gallery-item");
+      await items.first().waitFor();
+      t.eq(await items.count(), 3, "the Gallery tab shows the card's own picture and the two it embeds");
+      await items.nth(2).click();
+      await viewer.waitFor();
+      t.ok(/^meadow · background/.test((await caption.innerText()).trim()), "clicking one opens that one", await caption.innerText());
+      await viewer.click({ position: { x: 5, y: 5 } });
+      await viewer.waitFor({ state: "detached" });
+      t.ok(true, "a click outside the picture closes it");
+
+      // With Never play, pictures are drawn still.
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByLabel("Animated card pictures").selectOption({ label: "Never play" });
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await items.first().click();
+      await viewer.locator("canvas").waitFor();
+      t.eq(await viewer.locator("img").count(), 0, "with Never play the full-size picture is a still");
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByLabel("Animated card pictures").selectOption({ label: "Play when you point at them" });
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Gallery Gwen.png"));
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Gallery Gwen/.test(e.textContent)));
     });
 
     await step("Shift-click selects the cards between, in the order shown now", async () => {

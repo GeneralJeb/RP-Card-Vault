@@ -16,6 +16,7 @@ const { mod: V } = loadPureRegion([
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
+  "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -226,6 +227,21 @@ async function main() {
     catch (e) { err = e.message; }
     t.ok(/put back/.test(err), "the save fails (" + (err || "no error") + ")");
     t.ok(Buffer.compare(Buffer.from(fsys.get("ada.png")), Buffer.from(orig)) === 0, "and the file on disk is the original again");
+
+    // And when putting it back fails too, with backups off: there's no backup to point to.
+    writes = 0;
+    const open2 = fsys.handle.getFileHandle;
+    fsys.handle.getFileHandle = async (n, o) => {
+      const fh = await open2(n, o);
+      const create = fh.createWritable;
+      fh.createWritable = async () => { if (writes > 0) throw new Error("disk gone"); return create(); };
+      return fh;
+    };
+    err = "";
+    try { await V.saveCardToFile(rec, parsed.data, { fields: { personality: "Punctual." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false }); }
+    catch (e) { err = e.message; }
+    t.ok(/Restore failed/.test(err) && /backups are off/i.test(err) && !/recover from/.test(err),
+      "a failed restore with backups off doesn't send you looking for a backup (" + (err || "no error") + ")");
   }
 
   console.log("\nReference folders are never written to");
@@ -243,6 +259,11 @@ async function main() {
     V.setFolderRolesNow({});
 
     t.ok(/Reference folder/.test(await refused(() => V.saveCardToFile(ada, null, null, [ref]))), "Save to card refuses a card in a Reference folder");
+    const adaBefore = Buffer.from(refFs.get("Ada.png"));
+    const adaBody = (await V.parseCardBytes(refFs.get("Ada.png"), "Ada.png")).data;
+    t.ok(/Reference folder/.test(await refused(() => V.saveCardToFile(ada, adaBody, { fields: { description: "Changed." } }, [ref], { backup: false })))
+      && Buffer.compare(Buffer.from(refFs.get("Ada.png")), adaBefore) === 0,
+      "with backups off too (no backup copy to refuse first), and the file is unchanged");
     t.ok(/Reference folder/.test(await refused(() => V.deleteCardFile(ada, ref))) && !!refFs.get("Ada.png"), "so does deleting it, and the file stays");
     t.ok(/Reference folder/.test(await refused(() => V.moveCardTo(ada, ref, lib, ""))) && !!refFs.get("Ada.png") && !libFs.get("Ada.png"),
       "and moving it out (the trash is a move), with nothing copied");
@@ -265,6 +286,91 @@ async function main() {
     t.eq(V.agentFolderList([Object.assign({ dirs: ["Kept", "Other"] }, lib), ref]).map((f) => f.path + ":" + f.writable).join(", "),
       "Lib:true, Lib/Kept:false, Lib/Other:true, Ref:false", "the agent is told the same: which folders it can write to");
     V.setFolderRolesNow({});
+  }
+
+  console.log("\nanimated (APNG) cards");
+  {
+    const zlib = require("zlib");
+    const be = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+    const chunk = (type, data) => Buffer.from(V.makeChunk(type, new Uint8Array(data)));
+    const pix = (r, g, b) => zlib.deflateSync(Buffer.from([0, r, g, b, 255]));
+    const fctl = (seq) => Buffer.concat([be(seq), be(1), be(1), be(0), be(0), Buffer.from([0, 50, 0, 100, 0, 0])]);
+    // A 1x1 picture; with frames > 1 it has a second frame, in blue.
+    const apng = (frames) => Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      chunk("IHDR", Buffer.concat([be(1), be(1), Buffer.from([8, 6, 0, 0, 0])])),
+    ].concat(frames ? [chunk("acTL", Buffer.concat([be(frames), be(0)])), chunk("fcTL", fctl(0))] : [])
+      .concat([chunk("IDAT", pix(255, 0, 0))])
+      .concat(frames > 1 ? [chunk("fcTL", fctl(1)), chunk("fdAT", Buffer.concat([be(2), pix(0, 0, 255)]))] : [])
+      .concat([chunk("IEND", Buffer.alloc(0))]));
+    const asFile = (b, n) => new File([b], n || "x.png");
+    const v3 = V.newCardPayload({ name: "Animated Ada", description: "x".repeat(200000) });
+    const saved = V.writeCardIntoPng(new Uint8Array(apng(2)), v3, V.buildV2Payload(v3));
+
+    t.ok(await V.pngIsAnimated(asFile(apng(2))), "a PNG with two frames is animated");
+    t.ok(!(await V.pngIsAnimated(asFile(apng(0)))), "a plain PNG isn't");
+    t.ok(!(await V.pngIsAnimated(asFile(apng(1)))), "nor an APNG of a single frame");
+    t.ok(await V.pngIsAnimated(asFile(saved)), "and one is still found when hundreds of KB of card text come before the animation");
+    t.ok(!(await V.pngIsAnimated(asFile(apng(2).subarray(0, 40)))) && !(await V.pngIsAnimated(asFile(Buffer.from("not a png at all")))),
+      "a cut-off file or one that isn't a PNG is just not animated");
+
+    const types = V.readPngChunks(saved, { stopAtIDAT: false }).chunks.map((c) => c.type);
+    t.eq(types.join(" "), "IHDR tEXt tEXt acTL fcTL IDAT fcTL fdAT IEND",
+      "Save to card keeps every animation chunk, in order, with the card text before them (as APNG allows)");
+    const back = await V.parseCardBytes(saved, "Animated Ada.png");
+    t.ok(back.ok && back.data.name === "Animated Ada", "and the card reads back");
+
+    const root = { id: "r", name: "Cards", role: "library" };
+    const info = { rel: "Ada.png", dir: "", file: "Ada.png", ext: "png" };
+    t.eq((await V.processCardFile(root, info, asFile(saved, "Ada.png"))).rec.animated, true, "the scan marks an animated card");
+    t.eq((await V.processCardFile(root, info, asFile(apng(0), "Ada.png"))).rec.animated, false, "and a still one as still");
+    const old = { id: "r:Ada.png", ext: "png", name: "Ada" };
+    t.eq((await V.withAnimated(old, asFile(saved))).animated, true, "a card indexed before this is checked on the next scan, without being read again");
+    t.ok((await V.withAnimated({ ext: "json" }, asFile(saved))).animated === undefined, "a .json card isn't looked at");
+    t.eq([undefined, "hover", "always", "off", true, false, "nonsense"].map((v) => V.animateModeOf({ animateCards: v })),
+      ["hover", "hover", "always", "off", "hover", "off", "hover"], "the play setting: pointing by default; always and never when chosen; the old on/off carried over");
+  }
+
+  console.log("\na card's pictures, for its gallery");
+  {
+    const pic = (rgb) => V.solidPng(8, 8, rgb);
+    const b64 = (b) => Buffer.from(b).toString("base64");
+    const v3 = V.newCardPayload({ name: "Gallery Gwen" });
+    v3.data.assets = [
+      { type: "icon", uri: "ccdefault:", name: "main", ext: "png" },
+      { type: "emotion", uri: "__asset:0", name: "happy", ext: "png" },
+      { type: "background", uri: "data:image/png;base64," + b64(pic([0, 90, 0])), name: "meadow", ext: "png" },
+      { type: "background", uri: "https://example.com/sky.png", name: "sky", ext: "png" },
+      { type: "voice", uri: "data:audio/mpeg;base64," + b64(Buffer.from("ID3 not a picture at all")), name: "hello", ext: "mp3" },
+      { type: "emotion", uri: "__asset:9", name: "missing", ext: "png" },
+    ];
+    let card = Buffer.from(V.writeCardIntoPng(pic([200, 0, 0]), v3, V.buildV2Payload(v3)));
+    // RisuAI-style asset chunks, put before IEND: one the list names, one it doesn't.
+    const tEXt = (k, v) => Buffer.from(V.makeChunk("tEXt", new Uint8Array(Buffer.concat([Buffer.from(k, "latin1"), Buffer.from([0]), Buffer.from(v, "latin1")]))));
+    card = Buffer.concat([card.subarray(0, card.length - 12), tEXt("chara-ext-asset_:0", b64(pic([0, 0, 200]))), tEXt("chara-ext-asset_7", b64(pic([200, 200, 0]))), card.subarray(card.length - 12)]);
+
+    const got = await V.cardPictures(new Uint8Array(card), "Gallery Gwen.png");
+    t.eq(got.pictures.map((p) => p.name + ":" + p.type + ":" + p.mime).join(", "),
+      "Card picture:card:image/png, happy:emotion:image/png, meadow:background:image/png, Asset 7::image/png",
+      "a PNG card: its own picture, then the pictures it embeds (chunks named in its list or not, data: addresses)");
+    t.eq(got.others, 3, "a web address, a sound and a listed chunk that isn't there are counted, not shown");
+    t.eq(Buffer.from(got.pictures[1].bytes).toString("hex"), Buffer.from(pic([0, 0, 200])).toString("hex"), "an embedded picture comes out byte for byte");
+
+    global.JSZip = require("../lib/jszip.min.js");
+    const zip = new JSZip();
+    const cx = V.newCardPayload({ name: "Charx Cora" });
+    cx.data.assets = [{ type: "icon", uri: "embeded://assets/icon/images/main.png", name: "main", ext: "png" },
+      { type: "emotion", uri: "embedded://assets/emotion/sad.png", name: "sad", ext: "png" }];
+    zip.file("card.json", JSON.stringify(cx));
+    zip.file("assets/icon/images/main.png", pic([10, 10, 10]));
+    zip.file("assets/emotion/sad.png", pic([20, 20, 20]));
+    const charx = await V.cardPictures(await zip.generateAsync({ type: "uint8array" }), "Charx Cora.charx");
+    t.eq(charx.pictures.map((p) => p.name + ":" + p.type).join(", "), "main:icon, sad:emotion", "a .charx card: the pictures packed inside it (either spelling of embedded)");
+
+    const plain = await V.cardPictures(new Uint8Array(Buffer.from(JSON.stringify(V.newCardPayload({ name: "Json Jo" })))), "Json Jo.json");
+    t.eq([plain.pictures.length, plain.others], [0, 0], "a .json card with no assets has none");
+    t.eq([[0xff, 0xd8, 0xff, 0xe0], [0x47, 0x49, 0x46, 0x38, 0x39, 0x61], [...Buffer.from("RIFF0000WEBPVP8 ")], [...Buffer.from("plain text here")]]
+      .map((b) => V.pictureMime(new Uint8Array(b.concat(Array(12).fill(0))))), ["image/jpeg", "image/gif", "image/webp", ""], "JPEG, GIF and WebP are known by their first bytes; text isn't a picture");
   }
 
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");
@@ -298,6 +404,40 @@ async function main() {
       "saving one card never removes the backups of another with the same file name");
   }
 
+  console.log("\na move whose copy doesn't land intact leaves the original where it was");
+  {
+    const v3 = V.newCardPayload({ name: "Dora" });
+    const bytes = V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3));
+    const spoilers = [
+      ["lands short", (a) => a.subarray(0, a.length - 1)],
+      ["lands changed", (a) => { const c = a.slice(); c[c.length - 1] ^= 1; return c; }],
+    ];
+    for (const [label, spoil] of spoilers) {
+      const src = memFs("Src"), dest = memFs("Dest");
+      src.put("Dora.png", bytes);
+      // The destination disk spoils whatever is written to it.
+      const getFileHandle = dest.handle.getFileHandle.bind(dest.handle);
+      dest.handle.getFileHandle = async (n, o) => {
+        const fh = await getFileHandle(n, o);
+        const open = fh.createWritable.bind(fh);
+        fh.createWritable = async () => {
+          const w = await open();
+          const write = w.write.bind(w);
+          w.write = async (b) => write(spoil(new Uint8Array(await new Blob([b]).arrayBuffer())));
+          return w;
+        };
+        return fh;
+      };
+      const rec = { id: "s:Dora.png", rootId: "s", rel: "Dora.png", dir: "", file: "Dora.png", ext: "png", name: "Dora" };
+      let err = "";
+      try {
+        await V.moveCardTo(rec, { id: "s", name: "Src", role: "library", handle: src.handle }, { id: "d", name: "Dest", role: "library", handle: dest.handle }, "");
+      } catch (e) { err = e.message; }
+      t.ok(/Copy verification failed/.test(err) && !!src.get("Dora.png") && Buffer.compare(Buffer.from(src.get("Dora.png")), Buffer.from(bytes)) === 0,
+        "a copy that " + label + " stops the move, and the original is still there (" + (err || "no error") + ")");
+    }
+  }
+
   console.log("\na big card that only looks like the one already there is never lost");
   {
     // Two versions of a big-lorebook JSON card, the same size, differing by one
@@ -328,6 +468,16 @@ async function main() {
     same.put("Lib/Bram.json", A);
     const out = await V.copyIntoRoot({ id: "c", name: "Copy", handle: same.handle }, ["Lib"], "Bram.json", new Blob([A]), await sig(A));
     t.ok(out.skipped && same.list("Lib").length === 1, "a truly identical file is still recognised, and not copied twice");
+
+    // Every numbered name taken: the last one tried must not be overwritten.
+    const full = memFs("Full");
+    full.put("D/x.png", new Uint8Array([1]));
+    for (let i = 2; i <= 51; i++) full.put("D/x (" + i + ").png", new Uint8Array([i]));
+    let fullErr = "";
+    try { await V.copyIntoRoot({ id: "f", name: "Full", handle: full.handle }, ["D"], "x.png", new Blob([B]), await sig(B)); }
+    catch (e) { fullErr = e.message; }
+    t.ok(!!fullErr && Array.from(full.get("D/x (51).png")).join() === "51" && full.list("D").length === 51,
+      "with x.png to x (51).png all taken, the copy is refused and none of them is overwritten (" + (fullErr || "no error") + ")");
 
     // The duplicate finder's clean-up only removes copies proven to be the keeper's bytes.
     const files = { keep: A, twin: A.slice(), other: B };
@@ -659,11 +809,37 @@ async function main() {
     const gone = V.backupsToPrune(names, "Ada.png", 3);
     t.eq(gone.sort().join(" | "), "Ada 20260901-120000.png | Ada 20261001-090000.png",
       "keeping 3, the two oldest of Ada.png's own backups go (a same-second \" (2)\" counts as newer)");
+    t.eq(V.backupsToPrune(names, "Ada.png", 2).sort().join(" | "), "Ada 20260901-120000.png | Ada 20261001-090000.png | Ada 20261002-090000.png",
+      "keeping 2, the \" (2)\" is kept over the first copy from that same second");
+    t.eq(V.backupsToPrune(["ada 20260101-000000.PNG", "ADA 20260102-000000.png"], "Ada.png", 1).join(), "ada 20260101-000000.PNG",
+      "a card renamed only in case still prunes its old backups");
     t.eq(V.backupsToPrune(names, "Ada.png", 0).length, 0, "keep 0 means keep every backup");
     t.eq(V.backupsToPrune(names, "Ada.png", 10).length, 0, "fewer than the limit: nothing goes");
     t.eq(V.backupsToPrune(names, "Ada 2.png", 0).length + V.backupsToPrune(names, "Ada 2.png", 1).length, 0, "\"Ada 2\" has only one");
     t.eq(V.backupsToPrune(["C++ (v2) 20260101-000000.json", "C++ (v2) 20260102-000000.json"], "C++ (v2).json", 1).join(),
       "C++ (v2) 20260101-000000.json", "names with regex characters work");
+    t.eq(V.backupsToPrune(names, "Ada.png", 1, "Ada 20260901-120000.png").sort().join(" | "),
+      "Ada 20261001-090000.png | Ada 20261002-090000 (2).png | Ada 20261002-090000.png | Ada 20261003-080000.png",
+      "the backup named as the newest is kept, whatever its stamp says");
+  }
+
+  console.log("\nthe backup a save has just made is never the one pruned");
+  {
+    // After the clock goes back (the autumn hour change, or a fast clock put
+    // right), older backups can carry later stamps than the one just made.
+    const fsys = memFs("Cards");
+    const root = { id: "r", name: "Cards", handle: fsys.handle };
+    const v3 = V.newCardPayload({ name: "Ada" });
+    const bytes = V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3));
+    fsys.put("Ada.png", bytes);
+    for (const s of ["20991101-015000", "20991101-015500", "20991101-015800"]) fsys.put("_vault backups/Ada " + s + ".png", new Uint8Array([1]));
+    const parsed = await V.parseCardBytes(bytes, "Ada.png");
+    const rec = { id: "r:Ada.png", rootId: "r", rel: "Ada.png", dir: "", file: "Ada.png", ext: "png", sig: "s" };
+    const res = await V.saveCardToFile(rec, parsed.data, { fields: { description: "Edited." } }, [root], { keep: 3 });
+    const made = res.backupPath.split("/").pop();
+    const kept = fsys.list("_vault backups");
+    t.ok(kept.length === 3 && kept.includes(made) && V.sameBytes(fsys.get("_vault backups/" + made), bytes),
+      "keeping 3, the new backup (" + made + ") stays and one of the later-stamped ones goes", kept);
   }
 
   t.done();

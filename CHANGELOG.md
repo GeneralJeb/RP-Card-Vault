@@ -8,6 +8,34 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.15
+
+- **A card's picture opens full size.** Click the picture in the card panel and it opens centred over the vault, as large as fits the window (never larger than it is), with its size shown. ← and → step through the card's other pictures; Escape, ✕ or a click outside closes it, and the card stays open.
+- **New Gallery tab: the pictures a card embeds.** Some cards carry extra pictures (expressions, backgrounds and the like) inside the file. The card panel's Gallery tab shows them all, next to the card's own picture: the ones RisuAI-style PNG cards hold, the pictures packed inside a .charx, and any written into the card's asset list. Click one to see it full size. Assets that aren't pictures, or are only a web address rather than inside the file, are counted but not shown, and the vault never fetches them. With Animated card pictures set to Never play, these are shown still too.
+- **The header buttons have their colours back.** Since 1.5.0 they were all the same quiet grey, with colour only for something that needed you. Each now has its own colour again, as before: Rescan cyan, Ingest warm, Dupes red, Tags purple, Folders green, AI blue, Log and Settings muted. Kept from 1.5.0: the AI button turns warm with ⚠ when the AI is on but not ready, Folders is lit up while you have none, and Dupes shows its count.
+
+## 1.6.14
+
+- **Animated (APNG) cards are marked, and play.** A card whose picture is an animated PNG now has a ▶ badge on its tile, and the new **Animated** filter in the sidebar shows just those (the agent can find them too). The vault notices them on your next scan without reading every card again.
+  - **Playing:** an animated picture plays while you point at its card, and in the card panel when you open it. Never the whole grid at once: animated cards can be large, and thousands playing together would slow everything down.
+  - **Your choice:** Settings → Animated card pictures: Play when you point at them (the default), Always play (every animated card on screen plays, which can slow the vault down when many are showing) or Never play. Turning off Windows' animation effects stops them too.
+- **Save to card keeps the animation.** It always did, and now a test makes sure it stays that way: every animation chunk is kept, in order, with the card text before them as the APNG format allows.
+
+## 1.6.13
+
+- **Save to card no longer deletes the backup it has just made.** After your computer's clock goes back (the autumn hour change, or a clock that ran fast being put right), the backups made earlier carry later times in their names than the new one. Pruning kept the newest-looking ones, so the copy of the file from just before this save was the one deleted. The backup a save makes is now always kept.
+- **Copying a card never overwrites a file.** When `card.png` and `card (2).png` to `card (51).png` were all already in the folder, a move, copy or backup wrote over `card (51).png`. It now stops with a message instead.
+- **A failed save with backups off no longer points you to a backup.** In the rare case where a save went wrong and the original couldn't be put back either, the message said to recover from "your backup", even with backups turned off. It now says there's no earlier copy.
+
+## 1.6.12
+
+- **A card whose lorebook has an odd scan depth no longer blanks the vault.** If a card file's lorebook gave its scan depth as something other than a number (a list of settings, for example), opening the card's Lorebook tab emptied the whole page until you reloaded it. The scan depth is now shown as the file has it, and the page carries on.
+
+## 1.6.11
+
+- **"Local models only" no longer lets through names that only start with 127.** An address like `http://127.example.com/v1` counted as "this computer", so with Local models only on, the relay would still send your cards and key to that remote server, and the AI panel didn't warn that it was unencrypted. Only real 127 addresses (and localhost and ::1) count as local now.
+- **The tests can no longer pass by stopping early.** A test file that got stuck waiting on something that never happened used to end quietly and be counted as passed, with the rest of its checks never run. It now fails and says it stopped before it finished. More checks were added where flipping a safety check in the code went unnoticed: a move whose copy lands damaged, Save to card in a Reference folder with backups off, backup pruning, links out of the agent workspace, hidden data streams and DNS rebinding of the page itself.
+
 ## 1.6.10
 
 - **Spaces in vault.local no longer make the launchers disagree.** A line written `port = 8791` (or with a space before or after it) was read by the shortcuts but not by `Start RP Card Vault.bat` or `Stop RP Card Vault.bat`, so Start opened the 8790 vault, with the other copy's folder permissions and data, and Stop couldn't find the server it was meant to stop. All the launchers read it the same way now.
