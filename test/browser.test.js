@@ -307,6 +307,24 @@ async function main() {
       t.ok(await saved.isVisible(), "typing it back leaves nothing to save");
     });
 
+    await step("a lorebook whose scan depth isn't a number still opens", async () => {
+      // The file's own value is shown as text; React can't draw an object, and
+      // one used to take the whole page down.
+      await writeFiles(page, "Cards", [["Eli Oddbook.png", cardPng({ name: "Eli Oddbook", description: "Odd book." }, [120, 120, 40], {
+        character_book: { name: "Odd", scan_depth: { depth: 4 }, token_budget: "lots", entries: [{ keys: ["odd"], content: "Odd." }] },
+      })]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Eli Oddbook").click();
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      const row = page.locator("div").filter({ has: page.getByText("Scan depth", { exact: true }) }).last();
+      await row.waitFor();
+      t.eq(await row.innerText(), "Scan depth\n{\"depth\":4}", "the scan depth is shown as the file has it");
+      t.ok(await tile("Eli Oddbook").isVisible(), "and the page is still there");
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Eli Oddbook.png"));
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Eli Oddbook/.test(e.textContent)));
+    });
+
     await step("the Raw tab says when it hasn't read the card file, and asks before copying without it", async () => {
       await tile("Ada Clockmaker").click();
       await page.getByRole("tab", { name: /^Raw/ }).click();

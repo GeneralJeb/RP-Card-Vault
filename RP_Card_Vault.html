@@ -12010,7 +12010,7 @@ function LorebookEditor({ body, edit, onPatchEdit }) {
           style={Object.assign({}, inputBase, { padding: "5px 8px", fontSize: 11.5, marginBottom: 8 })} />
         <StatRow k="Entries" v={fmtNum(lb.entries.length)} />
         <StatRow k="Total tokens" v={fmtTokens(lb.totalTokens || 0)} />
-        <StatRow k="Scan depth" v={lb.scanDepth === null || lb.scanDepth === undefined ? "—" : lb.scanDepth} />
+        <StatRow k="Scan depth" v={lb.scanDepth === null || lb.scanDepth === undefined ? "—" : asStr(lb.scanDepth)} />
         <StatRow k="Token budget" v={lb.tokenBudget === null || lb.tokenBudget === undefined ? "—" : fmtNum(lb.tokenBudget)} />
       </div>
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>

@@ -14,6 +14,10 @@ If you skipped several releases, read every section down to the one you had.
 - **Copying a card never overwrites a file.** When `card.png` and `card (2).png` to `card (51).png` were all already in the folder, a move, copy or backup wrote over `card (51).png`. It now stops with a message instead.
 - **A failed save with backups off no longer points you to a backup.** In the rare case where a save went wrong and the original couldn't be put back either, the message said to recover from "your backup", even with backups turned off. It now says there's no earlier copy.
 
+## 1.6.12
+
+- **A card whose lorebook has an odd scan depth no longer blanks the vault.** If a card file's lorebook gave its scan depth as something other than a number (a list of settings, for example), opening the card's Lorebook tab emptied the whole page until you reloaded it. The scan depth is now shown as the file has it, and the page carries on.
+
 ## 1.6.11
 
 - **"Local models only" no longer lets through names that only start with 127.** An address like `http://127.example.com/v1` counted as "this computer", so with Local models only on, the relay would still send your cards and key to that remote server, and the AI panel didn't warn that it was unencrypted. Only real 127 addresses (and localhost and ::1) count as local now.
