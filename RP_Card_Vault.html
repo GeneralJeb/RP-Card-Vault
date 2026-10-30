@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.11";
+const APP_VERSION = "1.6.13";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -2948,7 +2948,7 @@ async function copyIntoRoot(destRoot, subfolder, filename, blob, sig) {
   const dir = await getDirByPath(destRoot.handle, subfolder, true);
   let finalName = filename;
   // If a file with this name exists, check whether it's the same bytes.
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; ; attempt++) {
     let existing = null;
     try { existing = await dir.getFileHandle(finalName, { create: false }); }
     catch (e) { existing = null; }
@@ -2962,6 +2962,7 @@ async function copyIntoRoot(destRoot, subfolder, filename, blob, sig) {
         }
       }
     } catch (e) { /* fall through to rename */ }
+    if (attempt >= 49) throw new Error("\"" + filename + "\" and 49 numbered copies of it are already there");
     const b = baseName(filename), x = extOf(filename);
     finalName = b + " (" + (attempt + 2) + ")" + (x ? "." + x : "");
   }
@@ -3416,15 +3417,17 @@ const reEscape = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * The backups of one card file to remove so that the newest `keep` remain.
  * Only names in the vault's own backup pattern ("<name> <date-time>.<ext>",
  * maybe with " (2)") count, so nothing else in the folder is ever touched.
+ * `newest`, the backup a save has just made, counts as the newest whatever
+ * its stamp: after the clock goes back, older backups can have later stamps.
  */
-function backupsToPrune(names, file, keep) {
+function backupsToPrune(names, file, keep, newest) {
   if (!(keep > 0)) return [];
   const ext = extOf(file);
   const re = new RegExp("^" + reEscape(baseName(file)) + " (\\d{8}-\\d{6})(?: \\((\\d+)\\))?" + (ext ? "\\." + reEscape(ext) : "") + "$", "i");
   const mine = [];
   for (const n of names) {
     const m = re.exec(n);
-    if (m) mine.push({ n, k: m[1] + "." + String(m[2] || 1).padStart(4, "0") });
+    if (m) mine.push({ n, k: n === newest ? "~" : m[1] + "." + String(m[2] || 1).padStart(4, "0") });
   }
   mine.sort((a, b) => (a.k < b.k ? 1 : a.k > b.k ? -1 : 0));
   return mine.slice(keep).map((x) => x.n);
@@ -3524,14 +3527,17 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
     throw new Error("Don't know how to write this file type in place — use Download copy");
   }
 
-  let backupPath = "";
+  let backupPath = "", backupName = "";
   if (opts.backup !== false) {
     const bName = baseName(rec.file) + " " + stampNow() + (rec.ext ? "." + rec.ext : "");
     // In a copy of the card's own folder path, so two cards with the same file
     // name in different folders never share (or prune) each other's backups.
     const res = await copyIntoRoot(root, [BACKUP_FOLDER_NAME].concat(dirs), bName, new Blob([originalBytes]), rec.sig);
+    backupName = res.name;
     backupPath = [root.name, BACKUP_FOLDER_NAME].concat(dirs, [res.name]).join("/");
   }
+  const restoreFailed = backupPath ? "Restore failed — recover from " + backupPath + "."
+    : "Restore failed, and backups are off, so there's no earlier copy of the file.";
 
   const restore = async () => {
     try {
@@ -3569,7 +3575,7 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
     throw new Error(
       "The saved file didn't read back as a valid card" +
       (verified && verified.err ? " (" + verified.err + ")" : "") + ". " +
-      (ok ? "The original has been put back." : "Restore failed — recover from " + (backupPath || "your backup") + ".")
+      (ok ? "The original has been put back." : restoreFailed)
     );
   }
 
@@ -3592,7 +3598,7 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
     const ok = await restore();
     throw new Error(
       "The file read back doesn't match what was written (" + mismatch + "). " +
-      (ok ? "The original has been put back." : "Restore failed — recover from " + (backupPath || "your backup") + ".")
+      (ok ? "The original has been put back." : restoreFailed)
     );
   }
 
@@ -3609,7 +3615,7 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
       const bdir = await getDirByPath(root.handle, [BACKUP_FOLDER_NAME].concat(dirs), false);
       const names = [];
       for await (const [n, e] of bdir.entries()) if (e.kind === "file") names.push(n);
-      for (const n of backupsToPrune(names, rec.file, opts.keep)) {
+      for (const n of backupsToPrune(names, rec.file, opts.keep, backupName)) {
         try { await bdir.removeEntry(n); pruned++; } catch (e) { /* in use, say: next save tries again */ }
       }
     } catch (e) { /* no backup folder after all */ }

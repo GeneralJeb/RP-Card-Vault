@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.13
+
+- **Save to card no longer deletes the backup it has just made.** After your computer's clock goes back (the autumn hour change, or a clock that ran fast being put right), the backups made earlier carry later times in their names than the new one. Pruning kept the newest-looking ones, so the copy of the file from just before this save was the one deleted. The backup a save makes is now always kept.
+- **Copying a card never overwrites a file.** When `card.png` and `card (2).png` to `card (51).png` were all already in the folder, a move, copy or backup wrote over `card (51).png`. It now stops with a message instead.
+- **A failed save with backups off no longer points you to a backup.** In the rare case where a save went wrong and the original couldn't be put back either, the message said to recover from "your backup", even with backups turned off. It now says there's no earlier copy.
+
 ## 1.6.11
 
 - **"Local models only" no longer lets through names that only start with 127.** An address like `http://127.example.com/v1` counted as "this computer", so with Local models only on, the relay would still send your cards and key to that remote server, and the AI panel didn't warn that it was unencrypted. Only real 127 addresses (and localhost and ::1) count as local now.
