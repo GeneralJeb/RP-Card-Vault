@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.15
+
+- **The header buttons have their colours back.** Since 1.5.0 they were all the same quiet grey, with colour only for something that needed you. Each now has its own colour again, as before: Rescan cyan, Ingest warm, Dupes red, Tags purple, Folders green, AI blue, Log and Settings muted. Kept from 1.5.0: the AI button turns warm with ⚠ when the AI is on but not ready, Folders is lit up while you have none, and Dupes shows its count.
+
 ## 1.6.14
 
 - **Animated (APNG) cards are marked, and play.** A card whose picture is an animated PNG now has a ▶ badge on its tile, and the new **Animated** filter in the sidebar shows just those (the agent can find them too). The vault notices them on your next scan without reading every card again.

@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.14";
+const APP_VERSION = "1.6.15";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -8599,7 +8599,7 @@ async function saveAgentSettings(s) {
 const ACCENT_VAR = {
   warm: "--accent-warm", red: "--accent-red", green: "--accent-green",
   blue: "--accent-blue", pink: "--accent-pink", cyan: "--accent-cyan",
-  purple: "--accent-purple", muted: "--text-muted", plain: "--text-secondary",
+  purple: "--accent-purple", muted: "--text-muted",
 };
 
 /** The scanning bar with nothing running. */
@@ -17318,25 +17318,25 @@ function App() {
               if (aiBulkCtrl.current) aiBulkCtrl.current.abort();
             }}>Stop</SmallBtn>
           ) : (
-            <SmallBtn color="plain" onClick={() => runScan(null, false)} disabled={!roots.length}>Rescan</SmallBtn>
+            <SmallBtn color="cyan" onClick={() => runScan(null, false)} disabled={!roots.length}>Rescan</SmallBtn>
           )}
-          {/* One quiet style: colour is kept for what needs you (a count of
-              duplicates, the AI not ready) and for Folders while there are none. */}
-          <SmallBtn color="plain" onClick={() => setModal("ingest")} disabled={!roots.length || scan.running}>Ingest</SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("dupes")} disabled={!cards.length}
+          {/* Each button keeps its own colour, so it's found at a glance. The AI turns
+              warm when it's on but not ready; Folders lights up while there are none. */}
+          <SmallBtn color="warm" onClick={() => setModal("ingest")} disabled={!roots.length || scan.running}>Ingest</SmallBtn>
+          <SmallBtn color="red" onClick={() => setModal("dupes")} disabled={!cards.length}
             title={dupes.exact.length ? countWord(dupes.exact.length, "group") + " of identical files" : "Find duplicates"}>
             Dupes{dupes.exact.length ? <span style={{ color: "var(--accent-red)", fontWeight: 600 }}>{" " + dupes.exact.length}</span> : null}
           </SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("tags")} disabled={!cards.length}>Tags</SmallBtn>
-          <SmallBtn color={roots.length ? "plain" : "green"} active={!roots.length} onClick={() => setModal("roots")}>Folders</SmallBtn>
-          <SmallBtn color={aiNotReady ? "warm" : aiSettings.enabled ? "blue" : "plain"}
+          <SmallBtn color="purple" onClick={() => setModal("tags")} disabled={!cards.length}>Tags</SmallBtn>
+          <SmallBtn color="green" active={!roots.length} onClick={() => setModal("roots")}>Folders</SmallBtn>
+          <SmallBtn color={aiNotReady ? "warm" : "blue"}
             onClick={() => setModal("ai")} active={aiSettings.enabled}
             title={aiNotReady ? "The AI features are on but not ready — open to see why"
               : aiSettings.enabled ? "AI settings · " + (aiSettings.model || "no model") : "AI settings (the AI features are off)"}>
             ✦ AI{aiNotReady ? " ⚠" : ""}
           </SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("log")}>Log</SmallBtn>
-          <SmallBtn color="plain" onClick={() => setModal("settings")} title="Settings">⚙</SmallBtn>
+          <SmallBtn color="muted" onClick={() => setModal("log")}>Log</SmallBtn>
+          <SmallBtn color="muted" onClick={() => setModal("settings")} title="Settings">⚙</SmallBtn>
         </div>
       </div>
 
