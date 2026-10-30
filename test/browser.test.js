@@ -32,7 +32,7 @@ const t = require("./harness");
 const ROOT = path.join(__dirname, "..");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry"]);
+const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk"]);
 const cardPng = (o, rgb, more) => {
   const v3 = V.newCardPayload(o);
   Object.assign(v3.data, more || {});
@@ -370,6 +370,58 @@ async function main() {
       await desc.fill("Grows roses.");
       await setRole("Library");
       t.ok(true, "the folder is a Library again");
+    });
+
+    await step("an animated card is marked, filtered, and plays only while you point at it", async () => {
+      // A two-frame APNG (red, then blue) made into a card the way Save to card does.
+      const zlib = require("zlib");
+      const be = (n) => { const x = Buffer.alloc(4); x.writeUInt32BE(n); return x; };
+      const chunk = (type, data) => Buffer.from(V.makeChunk(type, new Uint8Array(data)));
+      const pix = (r, g, bl) => zlib.deflateSync(Buffer.concat([0, 1].map(() => Buffer.from([0].concat(Array(2).fill([r, g, bl, 255]).flat())))));
+      const fctl = (seq) => Buffer.concat([be(seq), be(2), be(2), be(0), be(0), Buffer.from([0, 50, 0, 100, 0, 0])]);
+      const apng = Buffer.concat([
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        chunk("IHDR", Buffer.concat([be(2), be(2), Buffer.from([8, 6, 0, 0, 0])])),
+        chunk("acTL", Buffer.concat([be(2), be(0)])), chunk("fcTL", fctl(0)), chunk("IDAT", pix(200, 40, 40)),
+        chunk("fcTL", fctl(1)), chunk("fdAT", Buffer.concat([be(2), pix(40, 40, 200)])), chunk("IEND", Buffer.alloc(0)),
+      ]);
+      const v3 = V.newCardPayload({ name: "Animated Ada", description: "Moves." });
+      await writeFiles(page, "Cards", [["Animated Ada.png", Buffer.from(V.writeCardIntoPng(new Uint8Array(apng), v3, V.buildV2Payload(v3)))]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      const anim = tile("Animated Ada");
+      await anim.waitFor();
+      t.ok(await anim.getByTitle("Animated picture").isVisible(), "its tile has the ▶ badge");
+      t.eq(await tile("Ada Clockmaker").getByTitle("Animated picture").count(), 0, "a still card doesn't");
+      await page.getByText("Animated", { exact: true }).first().click();
+      await page.waitForFunction(() => /\b1 shown\b/.test(document.body.innerText));
+      t.ok(true, "the Animated filter shows just that card");
+      await page.getByText("Animated", { exact: true }).first().click();
+      await page.mouse.move(2, 2);
+      t.eq(await page.locator(".card-moving").count(), 0, "nothing plays while nothing is pointed at");
+      await anim.hover();
+      const moving = anim.locator("img.card-moving");
+      await moving.waitFor();
+      t.ok(/^blob:/.test(await moving.getAttribute("src")), "pointing at it plays the card's own file");
+      await page.mouse.move(2, 2);
+      await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
+      t.ok(true, "and it stops when you move away");
+      await anim.click();
+      await page.mouse.move(2, 2);
+      await page.locator(".card-moving").first().waitFor();
+      t.eq(await page.locator(".cardTile .card-moving").count(), 0, "the card panel plays it, the grid doesn't");
+      // Off in Settings: it never plays.
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("Play animated card pictures", { exact: true }).click();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await anim.hover();
+      await page.waitForTimeout(800);
+      t.eq(await page.locator(".card-moving").count(), 0, "with Play animated card pictures off, neither plays");
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("Play animated card pictures", { exact: true }).click();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Animated Ada.png"));
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Animated Ada/.test(e.textContent)));
     });
 
     await step("Shift-click selects the cards between, in the order shown now", async () => {

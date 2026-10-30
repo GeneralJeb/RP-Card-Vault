@@ -16,6 +16,7 @@ const { mod: V } = loadPureRegion([
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
+  "pngIsAnimated", "withAnimated", "readPngChunks",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -285,6 +286,47 @@ async function main() {
     t.eq(V.agentFolderList([Object.assign({ dirs: ["Kept", "Other"] }, lib), ref]).map((f) => f.path + ":" + f.writable).join(", "),
       "Lib:true, Lib/Kept:false, Lib/Other:true, Ref:false", "the agent is told the same: which folders it can write to");
     V.setFolderRolesNow({});
+  }
+
+  console.log("\nanimated (APNG) cards");
+  {
+    const zlib = require("zlib");
+    const be = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+    const chunk = (type, data) => Buffer.from(V.makeChunk(type, new Uint8Array(data)));
+    const pix = (r, g, b) => zlib.deflateSync(Buffer.from([0, r, g, b, 255]));
+    const fctl = (seq) => Buffer.concat([be(seq), be(1), be(1), be(0), be(0), Buffer.from([0, 50, 0, 100, 0, 0])]);
+    // A 1x1 picture; with frames > 1 it has a second frame, in blue.
+    const apng = (frames) => Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      chunk("IHDR", Buffer.concat([be(1), be(1), Buffer.from([8, 6, 0, 0, 0])])),
+    ].concat(frames ? [chunk("acTL", Buffer.concat([be(frames), be(0)])), chunk("fcTL", fctl(0))] : [])
+      .concat([chunk("IDAT", pix(255, 0, 0))])
+      .concat(frames > 1 ? [chunk("fcTL", fctl(1)), chunk("fdAT", Buffer.concat([be(2), pix(0, 0, 255)]))] : [])
+      .concat([chunk("IEND", Buffer.alloc(0))]));
+    const asFile = (b, n) => new File([b], n || "x.png");
+    const v3 = V.newCardPayload({ name: "Animated Ada", description: "x".repeat(200000) });
+    const saved = V.writeCardIntoPng(new Uint8Array(apng(2)), v3, V.buildV2Payload(v3));
+
+    t.ok(await V.pngIsAnimated(asFile(apng(2))), "a PNG with two frames is animated");
+    t.ok(!(await V.pngIsAnimated(asFile(apng(0)))), "a plain PNG isn't");
+    t.ok(!(await V.pngIsAnimated(asFile(apng(1)))), "nor an APNG of a single frame");
+    t.ok(await V.pngIsAnimated(asFile(saved)), "and one is still found when hundreds of KB of card text come before the animation");
+    t.ok(!(await V.pngIsAnimated(asFile(apng(2).subarray(0, 40)))) && !(await V.pngIsAnimated(asFile(Buffer.from("not a png at all")))),
+      "a cut-off file or one that isn't a PNG is just not animated");
+
+    const types = V.readPngChunks(saved, { stopAtIDAT: false }).chunks.map((c) => c.type);
+    t.eq(types.join(" "), "IHDR tEXt tEXt acTL fcTL IDAT fcTL fdAT IEND",
+      "Save to card keeps every animation chunk, in order, with the card text before them (as APNG allows)");
+    const back = await V.parseCardBytes(saved, "Animated Ada.png");
+    t.ok(back.ok && back.data.name === "Animated Ada", "and the card reads back");
+
+    const root = { id: "r", name: "Cards", role: "library" };
+    const info = { rel: "Ada.png", dir: "", file: "Ada.png", ext: "png" };
+    t.eq((await V.processCardFile(root, info, asFile(saved, "Ada.png"))).rec.animated, true, "the scan marks an animated card");
+    t.eq((await V.processCardFile(root, info, asFile(apng(0), "Ada.png"))).rec.animated, false, "and a still one as still");
+    const old = { id: "r:Ada.png", ext: "png", name: "Ada" };
+    t.eq((await V.withAnimated(old, asFile(saved))).animated, true, "a card indexed before this is checked on the next scan, without being read again");
+    t.ok((await V.withAnimated({ ext: "json" }, asFile(saved))).animated === undefined, "a .json card isn't looked at");
   }
 
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");

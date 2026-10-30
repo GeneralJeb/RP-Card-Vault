@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.13";
+const APP_VERSION = "1.6.14";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -796,6 +796,7 @@ const DEFAULT_SETTINGS = {
   destinations: [],              // where Send to front end can put cards: see DEST_KINDS
   defaultDestination: "",        // the id that S and the Send button use
   backupBeforeSave: true,        // keep a timestamped copy before overwriting a card
+  animateCards: true,            // play an animated (APNG) card picture on hover and in the card panel
   backupKeep: 5,                 // backups kept per card; older ones are removed after a save (0 = keep all)
   autoBackupKey: "auto",         // where vault data is backed up: "auto" (first folder), "off", or "rootId::dir"
   autoBackupDays: 1,             // how often
@@ -2105,6 +2106,7 @@ function unopenedCardRecord(root, info, e) {
 async function processCardFile(root, info, file) {
   const id = root.id + ":" + info.rel;
   const rec = cardRecordBase(root, info, file.size, file.lastModified);
+  rec.animated = info.ext === "png" || info.ext === "apng" ? await pngIsAnimated(file) : false;
 
   try { rec.sig = await byteSignature(file); }
   catch (e) { /* non-fatal */ }
@@ -2169,6 +2171,34 @@ async function processCardFile(root, info, file) {
   return { rec, body, thumb };
 }
 
+/**
+ * Whether a PNG is animated (APNG): an acTL chunk saying two or more frames,
+ * before the first IDAT. Only chunk headers are read, a few small slices, so
+ * it's cheap even when megabytes of card text come first.
+ */
+async function pngIsAnimated(file) {
+  try {
+    if (file.size < 8 || !isPng(new Uint8Array(await file.slice(0, 8).arrayBuffer()))) return false;
+    let off = 8;
+    for (let n = 0; n < 200 && off + 8 <= file.size; n++) {
+      const h = new Uint8Array(await file.slice(off, off + 12).arrayBuffer());
+      if (h.length < 8) return false;
+      const len = ((h[0] << 24) | (h[1] << 16) | (h[2] << 8) | h[3]) >>> 0;
+      const type = String.fromCharCode(h[4], h[5], h[6], h[7]);
+      if (type === "acTL") return h.length >= 12 && (((h[8] << 24) | (h[9] << 16) | (h[10] << 8) | h[11]) >>> 0) >= 2;
+      if (type === "IDAT" || type === "IEND") return false;
+      off += 12 + len;
+    }
+  } catch (e) { /* unreadable: not known to be animated */ }
+  return false;
+}
+
+/** A reused index record, told whether it's animated if it was indexed before the vault looked. */
+async function withAnimated(rec, file) {
+  if (rec.animated !== undefined || (rec.ext !== "png" && rec.ext !== "apng")) return rec;
+  return Object.assign({}, rec, { animated: await pngIsAnimated(file) });
+}
+
 function reusableRecord(prev, file) {
   return prev && prev.size === file.size && prev.mtime === file.lastModified && prev.scanVersion === 1;
 }
@@ -2219,7 +2249,7 @@ async function scanRoot(root, existing, ctl, onProgress) {
       continue;
     }
 
-    if (reusableRecord(prev, file)) { records.push(prev); continue; }
+    if (reusableRecord(prev, file)) { records.push(await withAnimated(prev, file)); continue; }
 
     const out = await processCardFile(root, f, file);
     records.push(out.rec);
@@ -2266,7 +2296,7 @@ async function scanImportRoot(root, existing, ctl, onProgress) {
       onProgress({ phase: "parsing", done: i + 1, total: pending.length, label: info.file });
     }
     const prev = existing.get(id);
-    if (reusableRecord(prev, info.fileObj)) { records.push(prev); continue; }
+    if (reusableRecord(prev, info.fileObj)) { records.push(await withAnimated(prev, info.fileObj)); continue; }
     const out = await processCardFile(root, info, info.fileObj);
     records.push(out.rec);
     if (out.body) bodies.push(out.body);
@@ -5217,7 +5247,7 @@ const AGENT_TOOLS = [
       tag: { type: "string", description: "A card tag or vault-only tag." },
       creator: { type: "string" },
       folder: { type: "string", description: "Folder path, as shown in the vault." },
-      flag: { type: "string", description: "A flag key such as needsEdit, or favorite, edited, aiPending." },
+      flag: { type: "string", description: "A flag key such as needsEdit, or favorite, edited, aiPending, animated (an animated picture)." },
       duplicates: { type: "string", enum: ["any", "exact", "content", "version"], description: "Only cards in a duplicate group of this kind (see list_duplicates)." },
       limit: { type: "integer", description: "Default 50." }, offset: { type: "integer" } } } },
   { name: "list_duplicates", group: "cards",
@@ -5376,7 +5406,7 @@ const AGENT_TOOLS = [
       tag: { type: "string", description: "A card tag or vault-only tag." },
       creator: { type: "string" },
       folder: { type: "string", description: "Folder path, as shown in the vault." },
-      flag: { type: "string", description: "A flag key such as needsEdit, or favorite, edited, aiPending." },
+      flag: { type: "string", description: "A flag key such as needsEdit, or favorite, edited, aiPending, animated (an animated picture)." },
       count: { type: "integer", description: "How many, 1 to " + AGENT_RANDOM_MAX.cards + " (default 1). No card twice." } } } },
   { name: "random_pick", group: "chance",
     description: "Pick at random from a list you give: a name, a direction for a scene, which idea to try. Give every option; don't trim the list first.",
@@ -6495,7 +6525,7 @@ function agentMatchCards(records, a, dupeIdx) {
     if (creator && String(r.creator || "").toLowerCase().indexOf(creator) < 0) return false;
     if (folder) { const d = String(r.dir || "").toLowerCase(); if (d !== folder && d.indexOf(folder + "/") !== 0) return false; }
     if (flag) {
-      if (flag === "favorite" || flag === "edited" || flag === "aiPending") { if (!r[flag]) return false; }
+      if (flag === "favorite" || flag === "edited" || flag === "aiPending" || flag === "animated") { if (!r[flag]) return false; }
       else if (!(r.flags || []).some((x) => x.key === flag)) return false;
     }
     if (dupKind) {
@@ -8980,6 +9010,26 @@ function Thumb({ id, hasThumb, alt, radius, fit }) {
   }} />;
 }
 
+/**
+ * A card's own picture, so an animated one moves, in place of its still
+ * thumbnail once `load(rec)` gives the file's address. Shows the thumbnail
+ * meanwhile, and if the file can't be read.
+ */
+function MovingThumb({ rec, load, alt, radius }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    setUrl(null);
+    load(rec).then((u) => { if (!dead) setUrl(u); }).catch(() => {});
+    return () => { dead = true; };
+  }, [rec.id, load]);
+  if (!url) return <Thumb id={rec.id} hasThumb={rec.hasThumb} alt={alt} radius={radius} />;
+  return <img className="card-moving" src={url} alt={alt || ""} draggable={false} style={{
+    width: "100%", height: "100%", objectFit: "cover",
+    borderRadius: radius || 0, display: "block", background: "var(--bg-tertiary)",
+  }} />;
+}
+
 /** Window-based virtualization for a fixed-size grid. */
 function useGridVirtual(el, itemCount, tileW, tileH, gap) {
   const [dims, setDims] = useState({ w: 0, h: 0, top: 0 });
@@ -9043,12 +9093,15 @@ function onArt(color) {
   };
 }
 
-function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, onDouble, onContext, onDragStart, onDragEnd, draggable, onMouseEnter }) {
+function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, onDouble, onContext, onDragStart, onDragEnd, draggable, onMouseEnter, onPlay }) {
   const imgH = Math.round(tileW * 1.35);
   const fav = rec.favorite;
+  // An animated picture plays only while the pointer is on its card.
+  const [hover, setHover] = useState(false);
   return (
     <div className="cardTile no-sel" onClick={onClick} onDoubleClick={onDouble} onContextMenu={onContext}
-      draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd} onMouseEnter={onMouseEnter}
+      draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}
+      onMouseEnter={(e) => { if (onMouseEnter) onMouseEnter(e); setHover(true); }} onMouseLeave={() => setHover(false)}
       style={{
         width: tileW, cursor: "pointer",
         background: selected ? "var(--bg-elevated)" : "var(--bg-secondary)",
@@ -9056,10 +9109,12 @@ function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, 
         borderRadius: "var(--radius-md)", overflow: "hidden", position: "relative",
       }}>
       <div style={{ width: "100%", height: imgH, position: "relative" }}>
-        <Thumb id={rec.id} hasThumb={rec.hasThumb} alt={rec.name} />
+        {hover && onPlay && rec.animated ? <MovingThumb rec={rec} load={onPlay} alt={rec.name} />
+          : <Thumb id={rec.id} hasThumb={rec.hasThumb} alt={rec.name} />}
         <div style={{
           position: "absolute", top: 5, left: 5, display: "flex", gap: 3, flexWrap: "wrap", maxWidth: tileW - 10,
         }}>
+          {rec.animated ? <Pill color="green" style={onArt("green")} title="Animated picture">{"▶"}</Pill> : null}
           {/* Only on cards whose format differs from most of the library: a v3 badge on every card says nothing. */}
           {rec.spec !== commonSpec || rec.spec === "none" ? (
             <Pill color={SPEC_COLOR[rec.spec] || "red"} style={onArt(SPEC_COLOR[rec.spec] || "red")} title={rec.spec === "none" ? "No card data found" : "Card format " + rec.spec}>{rec.spec === "none" ? "?" : rec.spec}</Pill>
@@ -9167,6 +9222,7 @@ const FLAGS = [
   { key: "edited",     label: "Locally edited",   color: "purple" },
   { key: "hasLore",    label: "Has lorebook",     color: "purple" },
   { key: "hasAlts",    label: "Alt greetings",    color: "cyan" },
+  { key: "animated",   label: "Animated",         color: "green" },
   { key: "untagged",   label: "No tags",          color: "muted" },
   { key: "broken",     label: "Unreadable",       color: "red" },
   { key: "dupe",       label: "Duplicates",       color: "red" },
@@ -12028,7 +12084,7 @@ function LorebookEditor({ body, edit, onPatchEdit }) {
   );
 }
 
-function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate, writeBlock }) {
+function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate, writeBlock, onPlay }) {
   const [tab, setTab] = useState("overview");
   const [body, setBody] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -12130,7 +12186,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
       <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-tertiary)" }}>
         <div style={{ display: "flex", gap: 10 }}>
           <div style={{ width: 62, height: 84, flexShrink: 0, borderRadius: "var(--radius-sm)", overflow: "hidden", border: "1px solid var(--border-subtle)" }}>
-            <Thumb id={rec.id} hasThumb={rec.hasThumb} />
+            {onPlay && rec.animated ? <MovingThumb rec={rec} load={onPlay} /> : <Thumb id={rec.id} hasThumb={rec.hasThumb} />}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
@@ -14460,6 +14516,12 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
             {SORTS.map((x) => <option key={x.key} value={x.key}>{x.label}</option>)}
           </select>
         </div>
+        <Toggle color="green" checked={settings.animateCards !== false} onChange={(v) => onSave({ animateCards: v })}
+          label="Play animated card pictures" />
+        <div style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 42, marginTop: -6, lineHeight: 1.5 }}>
+          A card with an animated picture (▶) plays while you point at it, and in the card panel; never all at once.
+          Turning off Windows' animation effects stops them too.
+        </div>
         <Toggle color="warm" checked={settings.normalizeTags} onChange={(v) => onSave({ normalizeTags: v })}
           label="Normalize tag case and separators" />
         <div style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 42, marginTop: -6, lineHeight: 1.5 }}>
@@ -15003,6 +15065,7 @@ function App() {
       if (fl.edited && !r.edited) return false;
       if (fl.hasLore && !r.loreCount) return false;
       if (fl.hasAlts && !r.altCount) return false;
+      if (fl.animated && !r.animated) return false;
       if (fl.untagged && r.tags.length) return false;
       if (fl.broken && r.ok) return false;
       if (fl.dupe && !dupes.dupeIds.has(r.id)) return false;
@@ -16231,15 +16294,35 @@ function App() {
    * actual file. Kicked off on hover, because dragstart is synchronous and
    * reading from disk is not.
    */
+  // A card file's bytes as an address: what a drag hands the OS, and what an
+  // animated picture plays from. Kept in the same small cache.
+  const cardFileUrl = useCallback(async (rec) => {
+    const hit = DRAG_FILE_CACHE.get(rec.id);
+    if (hit) return hit.url;
+    const { bytes } = await readOriginalBytes(rec, roots);
+    const mime = mimeForExt(rec.ext);
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    cacheDragFile(rec.id, { url, name: rec.file, mime });
+    return url;
+  }, [roots]);
   const prefetchDragFile = useCallback(async (rec) => {
     if (!rec || !rec.ok || DRAG_FILE_CACHE.has(rec.id)) return;
-    try {
-      const { bytes } = await readOriginalBytes(rec, roots);
-      const mime = mimeForExt(rec.ext);
-      const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-      cacheDragFile(rec.id, { url, name: rec.file, mime });
-    } catch (e) { /* drag-out simply won't be available for this card */ }
-  }, [roots]);
+    try { await cardFileUrl(rec); }
+    catch (e) { /* drag-out simply won't be available for this card */ }
+  }, [cardFileUrl]);
+
+  // Animated pictures play unless Settings says not to, or Windows' animation
+  // effects are off (which browsers pass on as "reduce motion").
+  const [reducedMotion, setReducedMotion] = useState(() =>
+    typeof window !== "undefined" && !!window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  useEffect(() => {
+    const mq = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+    if (!mq) return undefined;
+    const on = () => setReducedMotion(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  const playPicture = settings.animateCards !== false && !reducedMotion ? cardFileUrl : null;
 
   const onCardDragStart = useCallback((rec, e) => {
     const ids = selection.has(rec.id) && selection.size > 1 ? Array.from(selection) : [rec.id];
@@ -17546,6 +17629,7 @@ function App() {
                           onDragStart={(e) => onCardDragStart(rec, e)}
                           onDragEnd={() => setDragActive(false)}
                           onMouseEnter={() => prefetchDragFile(rec)}
+                          onPlay={playPicture}
                           onClick={(e) => onTileClick(rec, vg.start + i, e)}
                           onDouble={() => setFocusId(rec.id)}
                           onContext={(e) => openCardMenu(rec, e)} />
@@ -17559,7 +17643,7 @@ function App() {
             {focusRec ? (
               <Inspector rec={focusRec} roots={roots} edit={focusEdit} tagIndex={tagIndex}
                 dupeGroup={focusDupeGroup}
-                onSaveToCard={() => saveToCard(focusRec)}
+                onSaveToCard={() => saveToCard(focusRec)} onPlay={playPicture}
                 writeBlock={referenceFolderError(roots.find((r) => r.id === focusRec.rootId), focusRec.dir, folderRoles)}
                 onOpenFlag={(key, note, index) => setFlagModal({ ids: [focusRec.id], key, note, index })}
                 onJumpTo={(id) => { setFocusId(id); setSelection(new Set([id])); }}
