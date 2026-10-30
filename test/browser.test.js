@@ -409,16 +409,28 @@ async function main() {
       await page.mouse.move(2, 2);
       await page.locator(".card-moving").first().waitFor();
       t.eq(await page.locator(".cardTile .card-moving").count(), 0, "the card panel plays it, the grid doesn't");
-      // Off in Settings: it never plays.
-      await page.getByRole("button", { name: "⚙" }).first().click();
-      await page.getByText("Play animated card pictures", { exact: true }).click();
-      await page.getByRole("button", { name: "Close", exact: true }).click();
+      const setMode = async (label) => {
+        await page.getByRole("button", { name: "⚙" }).first().click();
+        const sel = page.getByLabel("Animated card pictures");
+        const was = await sel.inputValue();
+        await sel.selectOption({ label });
+        await page.getByRole("button", { name: "Close", exact: true }).click();
+        return was;
+      };
+      // Never play: neither the grid nor the card panel.
+      t.eq(await setMode("Never play"), "hover", "Settings starts at Play when you point at them");
       await anim.hover();
       await page.waitForTimeout(800);
-      t.eq(await page.locator(".card-moving").count(), 0, "with Play animated card pictures off, neither plays");
-      await page.getByRole("button", { name: "⚙" }).first().click();
-      await page.getByText("Play animated card pictures", { exact: true }).click();
-      await page.getByRole("button", { name: "Close", exact: true }).click();
+      t.eq(await page.locator(".card-moving").count(), 0, "with Never play, neither plays");
+      // Always play: it plays with nothing pointed at, and still cards stay still.
+      await setMode("Always play");
+      await page.mouse.move(2, 2);
+      await anim.locator("img.card-moving").waitFor();
+      t.ok(true, "with Always play, the tile plays without being pointed at");
+      t.eq(await page.locator(".cardTile .card-moving").count(), 1, "and only the animated card does");
+      await setMode("Play when you point at them");
+      await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
+      t.ok(true, "back to pointing, it stops");
       await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Animated Ada.png"));
       await page.getByRole("button", { name: "Rescan", exact: true }).click();
       await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Animated Ada/.test(e.textContent)));

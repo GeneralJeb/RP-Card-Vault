@@ -796,7 +796,7 @@ const DEFAULT_SETTINGS = {
   destinations: [],              // where Send to front end can put cards: see DEST_KINDS
   defaultDestination: "",        // the id that S and the Send button use
   backupBeforeSave: true,        // keep a timestamped copy before overwriting a card
-  animateCards: true,            // play an animated (APNG) card picture on hover and in the card panel
+  animateCards: "hover",         // animated (APNG) card pictures: "hover", "always" or "off" (see animateModeOf)
   backupKeep: 5,                 // backups kept per card; older ones are removed after a save (0 = keep all)
   autoBackupKey: "auto",         // where vault data is backed up: "auto" (first folder), "off", or "rootId::dir"
   autoBackupDays: 1,             // how often
@@ -2191,6 +2191,18 @@ async function pngIsAnimated(file) {
     }
   } catch (e) { /* unreadable: not known to be animated */ }
   return false;
+}
+
+/**
+ * When animated card pictures play: "hover" (while you point at the card, and
+ * in the card panel), "always" (every one on screen) or "off". The setting
+ * was once on/off: on is "hover".
+ */
+const ANIMATE_MODES = ["hover", "always", "off"];
+function animateModeOf(settings) {
+  const v = settings && settings.animateCards;
+  if (v === false) return "off";
+  return ANIMATE_MODES.indexOf(v) >= 0 ? v : "hover";
 }
 
 /** A reused index record, told whether it's animated if it was indexed before the vault looked. */
@@ -8956,12 +8968,20 @@ function mimeForExt(ext) {
 
 function cacheDragFile(id, entry) {
   DRAG_FILE_CACHE.set(id, entry);
-  while (DRAG_FILE_CACHE.size > DRAG_CACHE_CAP) {
-    const k = DRAG_FILE_CACHE.keys().next().value;
-    const old = DRAG_FILE_CACHE.get(k);
+  // Oldest first, but never one a picture on screen is playing from (pinned):
+  // with every animated card playing, more than the cap can be in use at once.
+  for (const [k, old] of DRAG_FILE_CACHE) {
+    if (DRAG_FILE_CACHE.size <= DRAG_CACHE_CAP) break;
+    if (k === id || old.pins > 0) continue;
     DRAG_FILE_CACHE.delete(k);
-    if (old && old.url) { try { URL.revokeObjectURL(old.url); } catch (e) {} }
+    if (old.url) { try { URL.revokeObjectURL(old.url); } catch (e) {} }
   }
+}
+
+/** A card file's cached address held (+1) or let go (-1) by a picture playing from it. */
+function pinDragFile(id, by) {
+  const e = DRAG_FILE_CACHE.get(id);
+  if (e) e.pins = Math.max(0, (e.pins || 0) + by);
 }
 
 function clearDragFileCache() {
@@ -9018,10 +9038,14 @@ function Thumb({ id, hasThumb, alt, radius, fit }) {
 function MovingThumb({ rec, load, alt, radius }) {
   const [url, setUrl] = useState(null);
   useEffect(() => {
-    let dead = false;
+    let dead = false, pinned = false;
     setUrl(null);
-    load(rec).then((u) => { if (!dead) setUrl(u); }).catch(() => {});
-    return () => { dead = true; };
+    load(rec).then((u) => {
+      if (dead) return;
+      pinDragFile(rec.id, 1); pinned = true;
+      setUrl(u);
+    }).catch(() => {});
+    return () => { dead = true; if (pinned) pinDragFile(rec.id, -1); };
   }, [rec.id, load]);
   if (!url) return <Thumb id={rec.id} hasThumb={rec.hasThumb} alt={alt} radius={radius} />;
   return <img className="card-moving" src={url} alt={alt || ""} draggable={false} style={{
@@ -9093,10 +9117,11 @@ function onArt(color) {
   };
 }
 
-function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, onDouble, onContext, onDragStart, onDragEnd, draggable, onMouseEnter, onPlay }) {
+function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, onDouble, onContext, onDragStart, onDragEnd, draggable, onMouseEnter, onPlay, autoPlay }) {
   const imgH = Math.round(tileW * 1.35);
   const fav = rec.favorite;
-  // An animated picture plays only while the pointer is on its card.
+  // An animated picture plays while the pointer is on its card, or all the
+  // time when Settings says so (only cards on screen are drawn at all).
   const [hover, setHover] = useState(false);
   return (
     <div className="cardTile no-sel" onClick={onClick} onDoubleClick={onDouble} onContextMenu={onContext}
@@ -9109,7 +9134,7 @@ function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, 
         borderRadius: "var(--radius-md)", overflow: "hidden", position: "relative",
       }}>
       <div style={{ width: "100%", height: imgH, position: "relative" }}>
-        {hover && onPlay && rec.animated ? <MovingThumb rec={rec} load={onPlay} alt={rec.name} />
+        {(hover || autoPlay) && onPlay && rec.animated ? <MovingThumb rec={rec} load={onPlay} alt={rec.name} />
           : <Thumb id={rec.id} hasThumb={rec.hasThumb} alt={rec.name} />}
         <div style={{
           position: "absolute", top: 5, left: 5, display: "flex", gap: 3, flexWrap: "wrap", maxWidth: tileW - 10,
@@ -14516,11 +14541,18 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
             {SORTS.map((x) => <option key={x.key} value={x.key}>{x.label}</option>)}
           </select>
         </div>
-        <Toggle color="green" checked={settings.animateCards !== false} onChange={(v) => onSave({ animateCards: v })}
-          label="Play animated card pictures" />
-        <div style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 42, marginTop: -6, lineHeight: 1.5 }}>
-          A card with an animated picture (▶) plays while you point at it, and in the card panel; never all at once.
-          Turning off Windows' animation effects stops them too.
+        <div className="animate-cards" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>Animated card pictures (▶)</span>
+          <select value={animateModeOf(settings)} onChange={(e) => onSave({ animateCards: e.target.value })} aria-label="Animated card pictures"
+            style={Object.assign({}, selectStyle, { width: "auto", flex: "1 1 180px", padding: "5px 8px" })}>
+            <option value="hover">Play when you point at them</option>
+            <option value="always">Always play</option>
+            <option value="off">Never play</option>
+          </select>
+        </div>
+        <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: -6, lineHeight: 1.5 }}>
+          They also play in the card panel, unless set to Never. Always play plays every animated card on screen, which
+          can slow the vault down when many are showing. Turning off Windows' animation effects stops them all.
         </div>
         <Toggle color="warm" checked={settings.normalizeTags} onChange={(v) => onSave({ normalizeTags: v })}
           label="Normalize tag case and separators" />
@@ -16322,7 +16354,8 @@ function App() {
     mq.addEventListener("change", on);
     return () => mq.removeEventListener("change", on);
   }, []);
-  const playPicture = settings.animateCards !== false && !reducedMotion ? cardFileUrl : null;
+  const animateMode = animateModeOf(settings);
+  const playPicture = animateMode !== "off" && !reducedMotion ? cardFileUrl : null;
 
   const onCardDragStart = useCallback((rec, e) => {
     const ids = selection.has(rec.id) && selection.size > 1 ? Array.from(selection) : [rec.id];
@@ -17629,7 +17662,7 @@ function App() {
                           onDragStart={(e) => onCardDragStart(rec, e)}
                           onDragEnd={() => setDragActive(false)}
                           onMouseEnter={() => prefetchDragFile(rec)}
-                          onPlay={playPicture}
+                          onPlay={playPicture} autoPlay={animateMode === "always"}
                           onClick={(e) => onTileClick(rec, vg.start + i, e)}
                           onDouble={() => setFocusId(rec.id)}
                           onContext={(e) => openCardMenu(rec, e)} />

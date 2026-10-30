@@ -16,7 +16,7 @@ const { mod: V } = loadPureRegion([
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
-  "pngIsAnimated", "withAnimated", "readPngChunks",
+  "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -327,6 +327,8 @@ async function main() {
     const old = { id: "r:Ada.png", ext: "png", name: "Ada" };
     t.eq((await V.withAnimated(old, asFile(saved))).animated, true, "a card indexed before this is checked on the next scan, without being read again");
     t.ok((await V.withAnimated({ ext: "json" }, asFile(saved))).animated === undefined, "a .json card isn't looked at");
+    t.eq([undefined, "hover", "always", "off", true, false, "nonsense"].map((v) => V.animateModeOf({ animateCards: v })),
+      ["hover", "hover", "always", "off", "hover", "off", "hover"], "the play setting: pointing by default; always and never when chosen; the old on/off carried over");
   }
 
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");

@@ -12,7 +12,7 @@ If you skipped several releases, read every section down to the one you had.
 
 - **Animated (APNG) cards are marked, and play.** A card whose picture is an animated PNG now has a ▶ badge on its tile, and the new **Animated** filter in the sidebar shows just those (the agent can find them too). The vault notices them on your next scan without reading every card again.
   - **Playing:** an animated picture plays while you point at its card, and in the card panel when you open it. Never the whole grid at once: animated cards can be large, and thousands playing together would slow everything down.
-  - **Turning it off:** Settings → Play animated card pictures. Turning off Windows' animation effects stops them too.
+  - **Your choice:** Settings → Animated card pictures: Play when you point at them (the default), Always play (every animated card on screen plays, which can slow the vault down when many are showing) or Never play. Turning off Windows' animation effects stops them too.
 - **Save to card keeps the animation.** It always did, and now a test makes sure it stays that way: every animation chunk is kept, in order, with the card text before them as the APNG format allows.
 
 ## 1.6.13
