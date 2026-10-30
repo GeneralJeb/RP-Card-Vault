@@ -226,6 +226,21 @@ async function main() {
     catch (e) { err = e.message; }
     t.ok(/put back/.test(err), "the save fails (" + (err || "no error") + ")");
     t.ok(Buffer.compare(Buffer.from(fsys.get("ada.png")), Buffer.from(orig)) === 0, "and the file on disk is the original again");
+
+    // And when putting it back fails too, with backups off: there's no backup to point to.
+    writes = 0;
+    const open2 = fsys.handle.getFileHandle;
+    fsys.handle.getFileHandle = async (n, o) => {
+      const fh = await open2(n, o);
+      const create = fh.createWritable;
+      fh.createWritable = async () => { if (writes > 0) throw new Error("disk gone"); return create(); };
+      return fh;
+    };
+    err = "";
+    try { await V.saveCardToFile(rec, parsed.data, { fields: { personality: "Punctual." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false }); }
+    catch (e) { err = e.message; }
+    t.ok(/Restore failed/.test(err) && /backups are off/i.test(err) && !/recover from/.test(err),
+      "a failed restore with backups off doesn't send you looking for a backup (" + (err || "no error") + ")");
   }
 
   console.log("\nReference folders are never written to");
@@ -367,6 +382,16 @@ async function main() {
     same.put("Lib/Bram.json", A);
     const out = await V.copyIntoRoot({ id: "c", name: "Copy", handle: same.handle }, ["Lib"], "Bram.json", new Blob([A]), await sig(A));
     t.ok(out.skipped && same.list("Lib").length === 1, "a truly identical file is still recognised, and not copied twice");
+
+    // Every numbered name taken: the last one tried must not be overwritten.
+    const full = memFs("Full");
+    full.put("D/x.png", new Uint8Array([1]));
+    for (let i = 2; i <= 51; i++) full.put("D/x (" + i + ").png", new Uint8Array([i]));
+    let fullErr = "";
+    try { await V.copyIntoRoot({ id: "f", name: "Full", handle: full.handle }, ["D"], "x.png", new Blob([B]), await sig(B)); }
+    catch (e) { fullErr = e.message; }
+    t.ok(!!fullErr && Array.from(full.get("D/x (51).png")).join() === "51" && full.list("D").length === 51,
+      "with x.png to x (51).png all taken, the copy is refused and none of them is overwritten (" + (fullErr || "no error") + ")");
 
     // The duplicate finder's clean-up only removes copies proven to be the keeper's bytes.
     const files = { keep: A, twin: A.slice(), other: B };
@@ -707,6 +732,28 @@ async function main() {
     t.eq(V.backupsToPrune(names, "Ada 2.png", 0).length + V.backupsToPrune(names, "Ada 2.png", 1).length, 0, "\"Ada 2\" has only one");
     t.eq(V.backupsToPrune(["C++ (v2) 20260101-000000.json", "C++ (v2) 20260102-000000.json"], "C++ (v2).json", 1).join(),
       "C++ (v2) 20260101-000000.json", "names with regex characters work");
+    t.eq(V.backupsToPrune(names, "Ada.png", 1, "Ada 20260901-120000.png").sort().join(" | "),
+      "Ada 20261001-090000.png | Ada 20261002-090000 (2).png | Ada 20261002-090000.png | Ada 20261003-080000.png",
+      "the backup named as the newest is kept, whatever its stamp says");
+  }
+
+  console.log("\nthe backup a save has just made is never the one pruned");
+  {
+    // After the clock goes back (the autumn hour change, or a fast clock put
+    // right), older backups can carry later stamps than the one just made.
+    const fsys = memFs("Cards");
+    const root = { id: "r", name: "Cards", handle: fsys.handle };
+    const v3 = V.newCardPayload({ name: "Ada" });
+    const bytes = V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3));
+    fsys.put("Ada.png", bytes);
+    for (const s of ["20991101-015000", "20991101-015500", "20991101-015800"]) fsys.put("_vault backups/Ada " + s + ".png", new Uint8Array([1]));
+    const parsed = await V.parseCardBytes(bytes, "Ada.png");
+    const rec = { id: "r:Ada.png", rootId: "r", rel: "Ada.png", dir: "", file: "Ada.png", ext: "png", sig: "s" };
+    const res = await V.saveCardToFile(rec, parsed.data, { fields: { description: "Edited." } }, [root], { keep: 3 });
+    const made = res.backupPath.split("/").pop();
+    const kept = fsys.list("_vault backups");
+    t.ok(kept.length === 3 && kept.includes(made) && V.sameBytes(fsys.get("_vault backups/" + made), bytes),
+      "keeping 3, the new backup (" + made + ") stays and one of the later-stamped ones goes", kept);
   }
 
   t.done();
