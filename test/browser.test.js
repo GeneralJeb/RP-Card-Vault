@@ -32,7 +32,7 @@ const t = require("./harness");
 const ROOT = path.join(__dirname, "..");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk"]);
+const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk", "cardPictures"]);
 const cardPng = (o, rgb, more) => {
   const v3 = V.newCardPayload(o);
   Object.assign(v3.data, more || {});
@@ -434,6 +434,62 @@ async function main() {
       await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Animated Ada.png"));
       await page.getByRole("button", { name: "Rescan", exact: true }).click();
       await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Animated Ada/.test(e.textContent)));
+    });
+
+    await step("a .charx card shows its picture, saves as a .charx and downloads in any format", async () => {
+      const JSZip = global.JSZip = require("../lib/jszip.min.js");
+      const pic = (rgb) => Buffer.from(V.solidPng(30, 40, rgb));
+      const cx = V.newCardPayload({ name: "Charx Cora", description: "Before." });
+      cx.data.assets = [{ type: "icon", uri: "embeded://assets/icon/images/main.png", name: "main", ext: "png" },
+        { type: "emotion", uri: "embeded://assets/emotion/images/sad.png", name: "sad", ext: "png" }];
+      const zip = new JSZip();
+      zip.file("card.json", JSON.stringify(cx));
+      zip.file("assets/icon/images/main.png", pic([160, 30, 30]));
+      zip.file("assets/emotion/images/sad.png", pic([30, 30, 160]));
+      zip.file("module.risum", "a front end's own module");
+      await writeFiles(page, "Cards", [["Charx Cora.charx", await zip.generateAsync({ type: "nodebuffer" })]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Charx Cora").locator("img").first().waitFor();
+      t.ok(true, "its tile shows the icon packed in it");
+
+      await tile("Charx Cora").click();
+      await page.getByText("Fields", { exact: true }).click();
+      await page.locator("xpath=//label[normalize-space()='Description']/following::textarea[1]").fill("After.");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).click();
+      await page.getByRole("button", { name: /Saved/ }).first().waitFor();
+      const saved = await readFile(page, "Cards", "Charx Cora.charx");
+      const back = await V.parseCardBytes(saved, "Charx Cora.charx");
+      const inside = await JSZip.loadAsync(saved);
+      t.ok(back.ok && back.data.description === "After.", "Save to card writes into the .charx", back.data && back.data.description);
+      t.ok(Buffer.compare(await inside.file("assets/emotion/images/sad.png").async("nodebuffer"), pic([30, 30, 160])) === 0 && !!inside.file("module.risum"),
+        "and its pictures and other files are still in it");
+
+      const download = async (act) => {
+        const [dl] = await Promise.all([page.waitForEvent("download"), act()]);
+        return { name: dl.suggestedFilename(), bytes: new Uint8Array(fs.readFileSync(await dl.path())) };
+      };
+      const own = await download(() => page.getByRole("button", { name: "Download copy" }).click());
+      t.eq(own.name, "Charx Cora (vault).charx", "Download copy keeps the card's own format");
+      const asPng = await download(() => page.getByLabel("Download as").selectOption("png"));
+      const png = await V.parseCardBytes(asPng.bytes, asPng.name);
+      t.ok(asPng.name === "Charx Cora (vault).png" && png.ok && png.data.description === "After.", "Download as PNG gives a PNG card", asPng.name);
+      t.eq((await V.cardPictures(asPng.bytes, asPng.name)).pictures.map((p) => p.name), ["Card picture", "sad"], "with the icon as its picture and the expression inside");
+      const asJson = await download(() => page.getByLabel("Download as").selectOption("json"));
+      t.ok(asJson.name === "Charx Cora (vault).json" && JSON.parse(Buffer.from(asJson.bytes).toString()).data.description === "After.", "Download as JSON gives the text", asJson.name);
+      await toast(/2 pictures or files couldn't come along \(JSON holds no pictures/);
+      t.ok(true, "and says the two pictures were left out");
+
+      await page.getByRole("button", { name: "Duplicate" }).click();
+      await page.waitForFunction(() => Array.from(document.querySelectorAll(".cardTile")).some((e) => /Charx Cora \(copy\)/.test(e.textContent)));
+      t.ok(Object.keys(await listFiles(page, "Cards")).includes("Charx Cora (copy).charx"), "Duplicate makes a .charx too");
+
+      await page.keyboard.press("Escape");
+      await page.evaluate(async () => {
+        const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards");
+        for (const n of ["Charx Cora.charx", "Charx Cora (copy).charx"]) await d.removeEntry(n);
+      });
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Charx Cora/.test(e.textContent)));
     });
 
     await step("a card's picture opens full size, and its Gallery shows the pictures it embeds", async () => {
