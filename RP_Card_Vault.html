@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.15";
+const APP_VERSION = "1.6.16";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -2303,9 +2303,13 @@ function reusableRecord(prev, file) {
  * Scan one root. Reuses cached records when size+mtime are unchanged.
  * ctl = { stop:boolean }
  * onProgress({ phase, done, total, label })
+ * reparse: true to read every card again, or a Set of ids to read again.
+ * Those still count as known, so if their files are gone they're removed.
  */
-async function scanRoot(root, existing, ctl, onProgress) {
-  if (isImportRoot(root)) return scanImportRoot(root, existing, ctl, onProgress);
+const mustReparse = (reparse, id) => reparse === true || !!(reparse && reparse.has(id));
+
+async function scanRoot(root, existing, ctl, onProgress, reparse) {
+  if (isImportRoot(root)) return scanImportRoot(root, existing, ctl, onProgress, reparse);
 
   const okPerm = await verifyPermission(root.handle, root.role !== "reference");
   if (!okPerm) return { error: "Permission denied for " + root.name, records: [], bodies: [], thumbs: [], removed: [] };
@@ -2345,7 +2349,7 @@ async function scanRoot(root, existing, ctl, onProgress) {
       continue;
     }
 
-    if (reusableRecord(prev, file)) { records.push(await withAnimated(prev, file)); continue; }
+    if (!mustReparse(reparse, id) && reusableRecord(prev, file)) { records.push(await withAnimated(prev, file)); continue; }
 
     const out = await processCardFile(root, f, file);
     records.push(out.rec);
@@ -2368,7 +2372,7 @@ async function scanRoot(root, existing, ctl, onProgress) {
 }
 
 /** Read-only scan over files handed to us by a directory <input>. */
-async function scanImportRoot(root, existing, ctl, onProgress) {
+async function scanImportRoot(root, existing, ctl, onProgress, reparse) {
   const pending = IMPORT_PENDING.get(root.id);
   if (!pending || !pending.length) {
     // No live files this session — keep the existing index intact rather than
@@ -2392,7 +2396,7 @@ async function scanImportRoot(root, existing, ctl, onProgress) {
       onProgress({ phase: "parsing", done: i + 1, total: pending.length, label: info.file });
     }
     const prev = existing.get(id);
-    if (reusableRecord(prev, info.fileObj)) { records.push(await withAnimated(prev, info.fileObj)); continue; }
+    if (!mustReparse(reparse, id) && reusableRecord(prev, info.fileObj)) { records.push(await withAnimated(prev, info.fileObj)); continue; }
     const out = await processCardFile(root, info, info.fileObj);
     records.push(out.rec);
     if (out.body) bodies.push(out.body);
@@ -15757,18 +15761,22 @@ function App() {
     const unopened = [];
     for (const root of list) {
       if (stopRef.current.stop) break;
+      // Every known card goes in, even ones read again below: the scan only
+      // removes the cards it knew of whose files are gone.
       const existing = new Map();
-      if (!force) for (const c of working) if (c.rootId === root.id) existing.set(c.id, c);
+      for (const c of working) if (c.rootId === root.id) existing.set(c.id, c);
       // A readable card whose text never made it into the cache is read again,
       // rather than showing "no card data" until a full rescan.
-      if (existing.size) {
+      let reparse = force ? true : null;
+      if (!force && existing.size) {
         const cached = new Set(await dbKeys(STORE_BODIES));
-        for (const [id, c] of existing) if (c.ok && !cached.has(id)) existing.delete(id);
+        reparse = new Set();
+        for (const [id, c] of existing) if (c.ok && !cached.has(id)) reparse.add(id);
       }
       setScan((s) => Object.assign({}, s, { rootName: root.name }));
       const res = await scanRoot(root, existing, stopRef.current, (p) => {
         setScan({ running: true, done: p.done, total: p.total, label: p.label, rootName: root.name });
-      });
+      }, reparse);
       if (res.error) { showToast(res.error, "red"); continue; }
       // The folder may have been removed (or replaced by the folder above it)
       // while this scan ran. Then nothing of it is written back: no records,
