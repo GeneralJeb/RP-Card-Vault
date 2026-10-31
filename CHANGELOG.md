@@ -8,6 +8,16 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.17
+
+- **.charx cards can be saved.** Save to card on a .charx used to stop with "Don't know how to write this file type in place". It now writes your changes into the card inside the .charx and keeps every picture and other file in it as it was, with the same backup and read-back check as a PNG save. Duplicate and Download copy also make a .charx now; before, they made a .json and left the pictures behind.
+- **.charx cards show their picture** in the grid and the card panel, taken from the icon packed inside. Clicking it opens it full size, as for a PNG card. A .charx already in the vault is read once more on the next scan to get its picture.
+- **New: Download as…, next to Download copy.** It saves the card as PNG, CHARX or JSON, whatever its own format, and brings its pictures along:
+  - **CHARX:** the card's picture and the pictures it embeds become files in the zip.
+  - **PNG:** a .charx's icon becomes the picture, and its other pictures are stored inside the PNG the way RisuAI does. A card without a picture gets a drawn one with its name.
+  - **JSON:** text only. The vault says how many pictures were left out.
+  - Pictures given as a web address or a data: address stay as they are in every format. Download copy still keeps the card's own format.
+
 ## 1.6.16
 
 - **A card whose file is gone now leaves the vault for good.** After a **Full re-parse**, cards whose files had been deleted outside the vault disappeared from the grid, but came back the next time the vault opened. The same happened on any rescan to a card whose text hadn't been cached (it was read again, and if its file was gone, it was never removed). Both now drop the card once its file is gone. Stopping a Full re-parse part-way also no longer hides the cards it hadn't reached yet.
