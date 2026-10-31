@@ -804,6 +804,34 @@ async function main() {
       t.ok(extras.length === 300 && extras.every((c) => c.rootId === added[0]), "each of the 300 cards is indexed once, under the folder above", extras.length);
     });
 
+    await step("a card whose file is gone leaves the index, also when it's read again", async () => {
+      const extras = async () => (await cardRecords()).filter((c) => /^Extra [01]\.png$/.test(c.file)).map((c) => c.file).sort();
+      const gone = async (want) => {
+        for (let i = 0; i < 100 && (await extras()).join() !== want.join(); i++) await page.waitForTimeout(200);
+        return extras();
+      };
+      const rescan = async (name) => {
+        await page.getByRole("button", { name: "Folders", exact: true }).click();
+        await page.getByRole("button", { name }).click();
+        await page.getByRole("button", { name: "Close", exact: true }).click();
+      };
+      const remove = (n) => page.evaluate(async (n) =>
+        (await (await (await navigator.storage.getDirectory()).getDirectoryHandle("Parent")).getDirectoryHandle("Big")).removeEntry(n), n);
+      t.eq(await extras(), ["Extra 0.png", "Extra 1.png"], "two of the cards are indexed");
+      // Extra 1's text isn't cached, so a rescan reads it again; then its file goes.
+      await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const keys = await new Promise((res) => { const q = db.transaction("bodies").objectStore("bodies").getAllKeys(); q.onsuccess = () => res(q.result); });
+        await new Promise((res) => { const tx = db.transaction("bodies", "readwrite"); tx.objectStore("bodies").delete(keys.find((k) => /:Big\/Extra 1\.png$/.test(k))); tx.oncomplete = res; });
+      });
+      await remove("Extra 1.png");
+      await rescan("Rescan changed");
+      t.eq(await gone(["Extra 0.png"]), ["Extra 0.png"], "a card with no cached text is dropped once its file is gone");
+      await remove("Extra 0.png");
+      await rescan("Full re-parse");
+      t.eq(await gone([]), [], "and Full re-parse drops a card whose file is gone, so it doesn't come back after a reload");
+    });
+
     if (!reloadCrashes) await step("leftover records from before are cleaned up when the vault opens", async () => {
       await page.evaluate(async () => {
         const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });

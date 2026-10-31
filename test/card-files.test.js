@@ -775,6 +775,26 @@ async function main() {
     const later = await V.scanRoot(root(), new Map(longScan.records.map((r) => [r.id, r])), go, () => {});
     t.ok(!later.records.some((r) => r.rel === long) && later.removed.includes(lr.id), "once it's renamed, the unreadable entry goes");
 
+    // Full re-parse, and cards whose text isn't cached: read again, even when
+    // size and date say unchanged, and still removed if their files are gone.
+    const knownPlus = () => {
+      const m = known();
+      const ada = m.get("r1:Ada.json");
+      m.set(ada.id, Object.assign({}, ada, { name: "Stale" }));
+      m.set("r1:Gone.json", Object.assign({}, ada, { id: "r1:Gone.json", rel: "Gone.json", file: "Gone.json" }));
+      return m;
+    };
+    for (const [how, reparse] of [["all", true], ["by id", new Set(["r1:Ada.json", "r1:Gone.json"])]]) {
+      const again = await V.scanRoot(root(), knownPlus(), go, () => {}, reparse);
+      t.eq(again.records.find((r) => r.rel === "Ada.json").name, "Ada.json", "a card read again (" + how + ") is read from its file");
+      t.eq(again.removed, ["r1:Gone.json"], "and a card read again whose file is gone is removed (" + how + ")");
+    }
+    t.eq((await V.scanRoot(root(), knownPlus(), go, () => {})).records.find((r) => r.rel === "Ada.json").name, "Stale",
+      "a plain rescan still reuses an unchanged card's record");
+    looks = 0;
+    const stoppedAll = await V.scanRoot(root(), known(), stopAfterOne, () => {}, true);
+    t.eq([stoppedAll.removed, stoppedAll.records.length], [[], 5], "stopping a full re-parse keeps the cards it hadn't reached");
+
     let res, threw = null;
     try { res = await V.scanRoot(root({ list: "Old" }), known(), go, () => {}); } catch (e) { threw = e; }
     t.ok(!threw, "a subfolder that can't be listed doesn't make the scan fail", threw && threw.message);

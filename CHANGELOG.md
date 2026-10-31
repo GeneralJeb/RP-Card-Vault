@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.16
+
+- **A card whose file is gone now leaves the vault for good.** After a **Full re-parse**, cards whose files had been deleted outside the vault disappeared from the grid, but came back the next time the vault opened. The same happened on any rescan to a card whose text hadn't been cached (it was read again, and if its file was gone, it was never removed). Both now drop the card once its file is gone. Stopping a Full re-parse part-way also no longer hides the cards it hadn't reached yet.
+
 ## 1.6.15
 
 - **A card's picture opens full size.** Click the picture in the card panel and it opens centred over the vault, as large as fits the window (never larger than it is), with its size shown. ← and → step through the card's other pictures; Escape, ✕ or a click outside closes it, and the card stays open.
