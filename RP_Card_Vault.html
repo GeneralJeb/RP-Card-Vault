@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.15";
+const APP_VERSION = "1.6.17";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1259,14 +1259,26 @@ function makeTextChunk(key, valueLatin1) {
  * text chunks replaced by the supplied card JSON. Used only for exporting
  * edited copies — never applied in place to a source file.
  */
-function writeCardIntoPng(origBytes, cardV3, cardV2) {
-  if (!isPng(origBytes)) throw new Error("Not a PNG");
-  const res = readPngChunks(origBytes, { stopAtIDAT: false });
-  const dropKeys = new Set(["chara", "ccv3", "character"]);
-  const pieces = [new Uint8Array(PNG_SIG)];
+const CARD_TEXT_KEYS = new Set(["chara", "ccv3", "character"]);
 
+function writeCardIntoPng(origBytes, cardV3, cardV2) {
   const v3b64 = utf8ToB64(JSON.stringify(cardV3));
   const v2b64 = utf8ToB64(JSON.stringify(cardV2 || cardV3));
+  return rewritePngText(origBytes, (key) => CARD_TEXT_KEYS.has(key), [makeTextChunk("chara", v2b64), makeTextChunk("ccv3", v3b64)], []);
+}
+
+/** A PNG's picture alone: its card text and RisuAI-style asset chunks taken out. */
+function pngWithoutCard(bytes) {
+  return rewritePngText(bytes, (key) => CARD_TEXT_KEYS.has(key) || /^chara-ext-asset_/.test(key), [], []);
+}
+
+/**
+ * A new PNG from `origBytes`: text chunks whose key `drop` picks are left out,
+ * `afterHeader` chunks go straight after IHDR and `beforeEnd` ones before IEND.
+ */
+function rewritePngText(origBytes, drop, afterHeader, beforeEnd) {
+  if (!isPng(origBytes)) throw new Error("Not a PNG");
+  const pieces = [new Uint8Array(PNG_SIG)];
   let inserted = false;
 
   const dv = new DataView(origBytes.buffer, origBytes.byteOffset, origBytes.byteLength);
@@ -1286,16 +1298,15 @@ function writeCardIntoPng(origBytes, cardV3, cardV2) {
       for (let i = 0; i < d.length; i++) if (d[i] === 0) { nul = i; break; }
       if (nul > 0) {
         const key = bytesToLatin1(d.subarray(0, nul));
-        if (dropKeys.has(key)) skip = true;
+        if (drop(key)) skip = true;
       }
     }
 
+    if (type === "IEND") for (const c of beforeEnd) pieces.push(c);
     if (!skip) pieces.push(whole);
 
-    // Insert our chunks immediately after IHDR
     if (type === "IHDR" && !inserted) {
-      pieces.push(makeTextChunk("chara", v2b64));
-      pieces.push(makeTextChunk("ccv3", v3b64));
+      for (const c of afterHeader) pieces.push(c);
       inserted = true;
     }
 
@@ -1566,6 +1577,11 @@ function unzipEntryLimited(entry, limit) {
   });
 }
 
+/** A .charx's card.json: at the top, or else the first one in a folder. */
+function charxCardEntry(zip) {
+  return zip.file("card.json") || zip.file(/(^|\/)card\.json$/i)[0] || null;
+}
+
 /**
  * Given the raw bytes of a file, produce { ok, spec, data, raw, err }.
  */
@@ -1586,7 +1602,7 @@ async function parseCardBytes(bytes, filename) {
     if (typeof JSZip === "undefined") return { ok: false, err: "JSZip unavailable" };
     try {
       const zip = await JSZip.loadAsync(bytes);
-      const f = zip.file("card.json") || zip.file(/(^|\/)card\.json$/i)[0];
+      const f = charxCardEntry(zip);
       if (!f) return { ok: false, err: "charx has no card.json" };
       const size = f._data && f._data.uncompressedSize;
       if (size > CARD_UNPACK_MAX) return { ok: false, err: "charx card.json unpacks to over " + Math.round(CARD_UNPACK_MAX / 1048576) + " MB" };
@@ -2112,7 +2128,7 @@ async function processCardFile(root, info, file) {
   catch (e) { /* non-fatal */ }
 
   // Metadata usually sits before IDAT, so try a head slice first.
-  let parsed = null;
+  let parsed = null, full = null;
   try {
     if (info.ext === "png" || info.ext === "apng") {
       const headBytes = new Uint8Array(await file.slice(0, Math.min(file.size, SCAN_HEAD_BYTES)).arrayBuffer());
@@ -2124,12 +2140,13 @@ async function processCardFile(root, info, file) {
         parsed = await parseCardBytes(full, info.file);
       }
     } else {
-      const full = new Uint8Array(await file.arrayBuffer());
+      full = new Uint8Array(await file.arrayBuffer());
       parsed = await parseCardBytes(full, info.file);
     }
   } catch (e) {
     parsed = { ok: false, err: "Read failed: " + e.message };
   }
+  if (info.ext === "charx") rec.iconChecked = true;
 
   let body = null;
   if (parsed && parsed.ok) {
@@ -2163,8 +2180,13 @@ async function processCardFile(root, info, file) {
   }
 
   let thumb = null;
-  if (info.ext === "png" || info.ext === "apng") {
-    const tb = await makeThumb(file, THUMB_W);
+  let pictureOf = null;
+  if (info.ext === "png" || info.ext === "apng") pictureOf = file;
+  else if (info.ext === "charx" && full && parsed && parsed.ok) {
+    try { const main = (await cardPackedFiles(full, info.file)).main; if (main) pictureOf = new Blob([main]); } catch (e) { /* no picture */ }
+  }
+  if (pictureOf) {
+    const tb = await makeThumb(pictureOf, THUMB_W);
     if (tb) { thumb = { __key: id, __val: tb }; rec.hasThumb = true; }
   }
 
@@ -2239,16 +2261,41 @@ const CARD_ASSET_MAX = 64 * 1048576;   // one embedded picture, unpacked
  * (a web address, which the vault doesn't fetch).
  */
 async function cardPictures(bytes, filename) {
-  const ext = extOf(filename || "");
-  const pictures = [], usedChunks = new Set();
+  const packed = await cardPackedFiles(bytes, filename);
+  const pictures = [];
   let others = 0;
   const add = (b, key, name, type) => {
     const mime = pictureMime(b);
     if (!mime) { others++; return; }
     pictures.push({ key, name, type, mime, bytes: b });
   };
-  if ((ext === "png" || ext === "apng") && isPng(bytes)) add(bytes, "card", "Card picture", "card");
+  if (packed.isPngCard) add(bytes, "card", "Card picture", "card");
+  for (const a of packed.assets) {
+    const uri = assetUri(a);
+    if (/^ccdefault:/i.test(uri)) continue;   // the card's own picture, already first
+    const b = packed.files.get(uri);
+    if (b) add(b, uri, String((a && (a.name || a.type)) || "asset"), String((a && a.type) || "")); else others++;
+  }
+  // Asset chunks the list doesn't name are still pictures in the file.
+  for (const l of packed.loose) {
+    if (l.bytes) add(l.bytes, "__asset:" + l.n, "Asset " + l.n, ""); else others++;
+  }
+  return { pictures, others };
+}
 
+const assetUri = (a) => (a && typeof a.uri === "string" ? a.uri.trim() : "");
+
+/**
+ * What a card file holds besides its text. `assets` is its asset list;
+ * `files` maps each asset address whose bytes are in the file (a PNG chunk,
+ * a file in a .charx, a data: address) to those bytes; `loose` lists PNG
+ * asset chunks the list doesn't name ({ n, bytes }). `main` is the card's own
+ * picture: a PNG card's whole file, or the icon packed in a .charx, at the
+ * address `mainUri`. Nothing is fetched: web addresses stay addresses.
+ */
+async function cardPackedFiles(bytes, filename) {
+  const ext = extOf(filename || "");
+  const isPngCard = (ext === "png" || ext === "apng") && isPng(bytes);
   const chunks = new Map();
   if (isPng(bytes)) {
     for (const c of readPngChunks(bytes, { stopAtIDAT: false }).chunks) {
@@ -2267,26 +2314,162 @@ async function cardPictures(bytes, filename) {
   let zip = null;
   if (ext === "charx" && typeof JSZip !== "undefined") { try { zip = await JSZip.loadAsync(bytes); } catch (e) { zip = null; } }
 
+  const files = new Map(), usedChunks = new Set();
   for (const a of assets) {
-    const uri = a && typeof a.uri === "string" ? a.uri.trim() : "";
-    if (/^ccdefault:/i.test(uri)) continue;   // the card's own picture, already first
-    const name = String((a && (a.name || a.type)) || "asset");
-    const type = String((a && a.type) || "");
+    const uri = assetUri(a);
+    if (/^ccdefault:/i.test(uri) || files.has(uri)) continue;
     let b = null, m;
     try {
       if ((m = /^__asset:(\d+)$/.exec(uri)) && chunks.has(m[1])) { usedChunks.add(m[1]); b = b64Bytes(bytesToLatin1(chunks.get(m[1]))); }
       else if ((m = /^embed+ed:\/\/(.+)$/i.exec(uri)) && zip) { const f = zip.file(m[1]); if (f) b = await unzipEntryLimited(f, CARD_ASSET_MAX); }
       else if ((m = /^data:[^,]*;base64,(.*)$/i.exec(uri))) b = b64Bytes(m[1]);
     } catch (e) { b = null; }
-    if (b && b.length <= CARD_ASSET_MAX) add(b, uri, name, type); else others++;
+    if (b && b.length <= CARD_ASSET_MAX) files.set(uri, b);
   }
-  // Asset chunks the list doesn't name are still pictures in the file.
-  for (const [n, v] of chunks) {
-    if (usedChunks.has(n)) continue;
-    const b = b64Bytes(bytesToLatin1(v));
-    if (b) add(b, "__asset:" + n, "Asset " + n, ""); else others++;
+  const loose = [];
+  for (const [n, v] of chunks) if (!usedChunks.has(n)) loose.push({ n, bytes: b64Bytes(bytesToLatin1(v)) });
+
+  let main = isPngCard ? bytes : null, mainUri = isPngCard ? "ccdefault:" : "";
+  if (zip) {
+    const packedIcon = (a) => a && a.type === "icon" && files.has(assetUri(a)) && pictureMime(files.get(assetUri(a)));
+    const icon = assets.find((a) => packedIcon(a) && a.name === "main") || assets.find(packedIcon);
+    if (icon) { mainUri = assetUri(icon); main = files.get(mainUri); }
   }
-  return { pictures, others };
+  return { raw, assets, files, loose, main, mainUri, isPngCard };
+}
+
+/* ── card file formats ─────────────────────────────────────────────────────
+   A card is saved in its own format. A copy can be made in another: PNG (the
+   card's text in its picture, with any other pictures as RisuAI-style chunks),
+   CHARX (a zip of card.json and the files it names) or JSON (text only). */
+const CARD_FORMATS = {
+  png: { label: "PNG", mime: "image/png" },
+  charx: { label: "CHARX", mime: "application/zip" },
+  json: { label: "JSON", mime: "application/json" },
+};
+function cardFormatOf(filename) {
+  const ext = extOf(filename || "");
+  return ext === "charx" || ext === "json" ? ext : "png";
+}
+
+/** A .charx with its card.json replaced by `v3`; every other file in it is kept as it was. */
+async function writeCardIntoCharx(bytes, v3) {
+  if (typeof JSZip === "undefined") throw new Error("JSZip unavailable");
+  const zip = await JSZip.loadAsync(bytes);
+  const entry = charxCardEntry(zip);
+  zip.file(entry ? entry.name : "card.json", JSON.stringify(v3, null, 2));
+  return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+}
+
+/** Where a packed asset goes in a .charx: assets/<type>/<images|audio|video|other>/<name>.<ext>. */
+function charxAssetPath(a, b, taken) {
+  const mime = pictureMime(b);
+  let ext = String((a && a.ext) || "").toLowerCase();
+  if (!/^[a-z0-9]{1,8}$/.test(ext)) ext = mime ? mime.split("/")[1].replace("jpeg", "jpg") : "bin";
+  const kind = mime ? "images" : /^(mp3|wav|ogg|oga|flac|m4a|aac|opus)$/.test(ext) ? "audio" : /^(mp4|webm|mov|mkv)$/.test(ext) ? "video" : "other";
+  const type = /^[a-z0-9_-]{1,40}$/i.test(String((a && a.type) || "")) ? String(a.type) : "other";
+  const name = safeFileName((a && a.name) || "asset").replace(/[#%]/g, "_");
+  let path = "assets/" + type + "/" + kind + "/" + name + "." + ext;
+  for (let i = 2; taken.has(path.toLowerCase()); i++) path = "assets/" + type + "/" + kind + "/" + name + " " + i + "." + ext;
+  taken.add(path.toLowerCase());
+  return path;
+}
+
+/** A picture as a PNG, drawn through a canvas; null where that can't be done. */
+async function pictureToPng(bytes) {
+  try {
+    if (typeof createImageBitmap !== "function" || typeof document === "undefined") return null;
+    const bmp = await createImageBitmap(new Blob([bytes]));
+    const c = document.createElement("canvas");
+    c.width = bmp.width; c.height = bmp.height;
+    c.getContext("2d").drawImage(bmp, 0, 0);
+    bmp.close && bmp.close();
+    const blob = await new Promise((res) => c.toBlob(res, "image/png"));
+    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+  } catch (e) { return null; }
+}
+
+/**
+ * The card `v3` as a file in format `to` ("png", "charx" or "json"; its own
+ * format when left out), starting from the card file's bytes. In its own
+ * format only the card's text changes. Converting carries every picture and
+ * file the card packs that the new format can hold: { bytes, ext, mime, left },
+ * where `left` counts those it can't (JSON holds no pictures, for one).
+ * Data: and web addresses stay as they are in every format.
+ * opts.toPng(bytes) turns a JPEG or WebP picture into a PNG, for a PNG card.
+ */
+async function writeCardFile(bytes, filename, v3, to, opts) {
+  opts = opts || {};
+  const from = cardFormatOf(filename);
+  to = CARD_FORMATS[to] ? to : from;
+  const done = (out, left) => ({ bytes: out, ext: to, mime: CARD_FORMATS[to].mime, left: left || 0 });
+  const asJson = (card) => new TextEncoder().encode(JSON.stringify(card, null, 2));
+  if (to === from) {
+    if (to === "json") return done(asJson(v3));
+    if (to === "charx") return done(await writeCardIntoCharx(bytes, v3));
+    if (isPng(bytes)) return done(writeCardIntoPng(bytes, v3, buildV2Payload(v3)));
+  }
+
+  const packed = await cardPackedFiles(bytes, filename);
+  const list = Array.isArray(v3.data && v3.data.assets) ? v3.data.assets : null;
+  const movable = (uri) => packed.files.has(uri) && !/^data:/i.test(uri);
+  const withAssets = (assets) => assets ? Object.assign({}, v3, { data: Object.assign({}, v3.data, { assets }) }) : v3;
+  // Chunks the list doesn't name, and files it names that aren't there (or are too big to unpack), can't come along.
+  const missing = (uri) => /^(__asset:|embed+ed:\/\/)/i.test(uri) && !packed.files.has(uri);
+  let left = packed.loose.length + (list ? list.filter((a) => missing(assetUri(a))).length : 0);
+
+  if (to === "json") {
+    // The card's own picture stays in the list as "ccdefault:", the app's own picture for it.
+    if (packed.main) left++;
+    const assets = list && list
+      .map((a) => (packed.main && assetUri(a) === packed.mainUri ? Object.assign({}, a, { uri: "ccdefault:" }) : a))
+      .filter((a) => { if (!movable(assetUri(a))) return true; left++; return false; });
+    return done(asJson(withAssets(assets)), left);
+  }
+
+  if (to === "charx") {
+    if (typeof JSZip === "undefined") throw new Error("JSZip unavailable");
+    const zip = new JSZip(), taken = new Set(["card.json"]);
+    let icon = "";
+    if (packed.main) {
+      const b = isPng(packed.main) ? pngWithoutCard(packed.main) : packed.main;
+      const path = charxAssetPath({ type: "icon", name: "main", ext: isPng(b) ? "png" : "" }, b, taken);
+      zip.file(path, b);
+      icon = "embeded://" + path;
+    }
+    let assets = list ? list.map((a) => {
+      const uri = assetUri(a);
+      if (icon && (uri === packed.mainUri || /^ccdefault:/i.test(uri))) return Object.assign({}, a, { uri: icon });
+      if (!movable(uri)) return a;
+      const path = charxAssetPath(a, packed.files.get(uri), taken);
+      zip.file(path, packed.files.get(uri));
+      return Object.assign({}, a, { uri: "embeded://" + path });
+    }) : null;
+    if (icon && !(assets || []).some((a) => assetUri(a) === icon)) assets = [{ type: "icon", uri: icon, name: "main", ext: extOf(icon) }].concat(assets || []);
+    zip.file("card.json", JSON.stringify(withAssets(assets), null, 2));
+    return done(await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" }), left);
+  }
+
+  // To a PNG: the card's picture (a placeholder when it has none, or it can't
+  // be made a PNG, and then it's kept as a chunk), its other files as chunks.
+  let base = packed.main;
+  if (base && !isPng(base)) base = await (opts.toPng || pictureToPng)(base);
+  const ownPicture = !!(base && isPng(base));
+  if (!ownPicture) base = await makePlaceholderPng(v3.data && v3.data.name);
+  const extra = [];
+  const assets = list ? list.map((a) => {
+    const uri = assetUri(a);
+    if (ownPicture && uri === packed.mainUri) return Object.assign({}, a, { uri: "ccdefault:", ext: "png" });
+    if (!movable(uri)) return a;
+    const n = extra.length;
+    extra.push(makeTextChunk("chara-ext-asset_:" + n, btoa(bytesToLatin1(packed.files.get(uri)))));
+    return Object.assign({}, a, { uri: "__asset:" + n });
+  }) : null;
+  const card = withAssets(assets);
+  const v2b64 = utf8ToB64(JSON.stringify(buildV2Payload(card)));
+  const v3b64 = utf8ToB64(JSON.stringify(card));
+  return done(rewritePngText(base, (key) => CARD_TEXT_KEYS.has(key) || /^chara-ext-asset_/.test(key),
+    [makeTextChunk("chara", v2b64), makeTextChunk("ccv3", v3b64)], extra), left);
 }
 
 /** A reused index record, told whether it's animated if it was indexed before the vault looked. */
@@ -2296,16 +2479,22 @@ async function withAnimated(rec, file) {
 }
 
 function reusableRecord(prev, file) {
-  return prev && prev.size === file.size && prev.mtime === file.lastModified && prev.scanVersion === 1;
+  // A .charx indexed before the vault drew its icon is read again, once, for its picture.
+  return prev && prev.size === file.size && prev.mtime === file.lastModified && prev.scanVersion === 1 &&
+    (prev.ext !== "charx" || !!prev.iconChecked);
 }
 
 /**
  * Scan one root. Reuses cached records when size+mtime are unchanged.
  * ctl = { stop:boolean }
  * onProgress({ phase, done, total, label })
+ * reparse: true to read every card again, or a Set of ids to read again.
+ * Those still count as known, so if their files are gone they're removed.
  */
-async function scanRoot(root, existing, ctl, onProgress) {
-  if (isImportRoot(root)) return scanImportRoot(root, existing, ctl, onProgress);
+const mustReparse = (reparse, id) => reparse === true || !!(reparse && reparse.has(id));
+
+async function scanRoot(root, existing, ctl, onProgress, reparse) {
+  if (isImportRoot(root)) return scanImportRoot(root, existing, ctl, onProgress, reparse);
 
   const okPerm = await verifyPermission(root.handle, root.role !== "reference");
   if (!okPerm) return { error: "Permission denied for " + root.name, records: [], bodies: [], thumbs: [], removed: [] };
@@ -2345,7 +2534,7 @@ async function scanRoot(root, existing, ctl, onProgress) {
       continue;
     }
 
-    if (reusableRecord(prev, file)) { records.push(await withAnimated(prev, file)); continue; }
+    if (!mustReparse(reparse, id) && reusableRecord(prev, file)) { records.push(await withAnimated(prev, file)); continue; }
 
     const out = await processCardFile(root, f, file);
     records.push(out.rec);
@@ -2368,7 +2557,7 @@ async function scanRoot(root, existing, ctl, onProgress) {
 }
 
 /** Read-only scan over files handed to us by a directory <input>. */
-async function scanImportRoot(root, existing, ctl, onProgress) {
+async function scanImportRoot(root, existing, ctl, onProgress, reparse) {
   const pending = IMPORT_PENDING.get(root.id);
   if (!pending || !pending.length) {
     // No live files this session — keep the existing index intact rather than
@@ -2392,7 +2581,7 @@ async function scanImportRoot(root, existing, ctl, onProgress) {
       onProgress({ phase: "parsing", done: i + 1, total: pending.length, label: info.file });
     }
     const prev = existing.get(id);
-    if (reusableRecord(prev, info.fileObj)) { records.push(await withAnimated(prev, info.fileObj)); continue; }
+    if (!mustReparse(reparse, id) && reusableRecord(prev, info.fileObj)) { records.push(await withAnimated(prev, info.fileObj)); continue; }
     const out = await processCardFile(root, info, info.fileObj);
     records.push(out.rec);
     if (out.body) bodies.push(out.body);
@@ -3517,21 +3706,18 @@ async function rawCardFromBytes(bytes, filename) {
   } catch (e) { return null; }
 }
 
-/** Produce the edited card as a Blob, never touching the source file. */
-async function materializeEdit(rec, body, edit, roots) {
+/**
+ * Produce the edited card as a Blob, never touching the source file: in the
+ * card's own format, or in `format` ("png", "charx" or "json"). `left` counts
+ * the pictures and files the new format couldn't hold.
+ */
+async function materializeEdit(rec, body, edit, roots, format) {
   const { bytes } = await readOriginalBytes(rec, roots);
   const raw = await rawCardFromBytes(bytes, rec.file);
   const v3 = buildV3Payload(body, edit, rawCharacterBook(raw), raw);
-  const v2 = buildV2Payload(v3);
+  const out = await writeCardFile(bytes, rec.file, v3, format);
   const name = safeFileName(v3.data.name || rec.name) + " (vault)";
-  if (rec.ext === "json") {
-    return { blob: new Blob([JSON.stringify(v3, null, 2)], { type: "application/json" }), filename: name + ".json" };
-  }
-  if (!isPng(bytes)) {
-    return { blob: new Blob([JSON.stringify(v3, null, 2)], { type: "application/json" }), filename: name + ".json" };
-  }
-  const out = writeCardIntoPng(bytes, v3, v2);
-  return { blob: new Blob([out], { type: "image/png" }), filename: name + ".png" };
+  return { blob: new Blob([out.bytes], { type: out.mime }), filename: name + "." + out.ext, left: out.left };
 }
 
 const BACKUP_FOLDER_NAME = "_vault backups";
@@ -3642,16 +3828,11 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   // Start from the file's own card, so nothing the vault doesn't model is lost.
   const raw = await rawCardFromBytes(originalBytes, rec.file);
   const v3 = buildV3Payload(body, edit, rawCharacterBook(raw), raw);
-  const v2 = buildV2Payload(v3);
 
-  let outBytes;
-  if (rec.ext === "json") {
-    outBytes = new TextEncoder().encode(JSON.stringify(v3, null, 2));
-  } else if (isPng(originalBytes)) {
-    outBytes = writeCardIntoPng(originalBytes, v3, v2);
-  } else {
+  if (cardFormatOf(rec.file) === "png" && !isPng(originalBytes)) {
     throw new Error("Don't know how to write this file type in place — use Download copy");
   }
+  const outBytes = (await writeCardFile(originalBytes, rec.file, v3)).bytes;
 
   let backupPath = "", backupName = "";
   if (opts.backup !== false) {
@@ -9329,8 +9510,18 @@ function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, 
   // An animated picture plays while the pointer is on its card, or all the
   // time when Settings says so (only cards on screen are drawn at all).
   const [hover, setHover] = useState(false);
+  const tileRef = useRef(null);
+  // Starting to play swaps the picture under the pointer, and a pointer that
+  // leaves just then can get no leave event at all. So while it plays, a move
+  // anywhere outside the card stops it too.
+  useEffect(() => {
+    if (!hover) return;
+    const away = (e) => { if (tileRef.current && !tileRef.current.contains(e.target)) setHover(false); };
+    document.addEventListener("mousemove", away, true);
+    return () => document.removeEventListener("mousemove", away, true);
+  }, [hover]);
   return (
-    <div className="cardTile no-sel" onClick={onClick} onDoubleClick={onDouble} onContextMenu={onContext}
+    <div ref={tileRef} className="cardTile no-sel" onClick={onClick} onDoubleClick={onDouble} onContextMenu={onContext}
       draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}
       onMouseEnter={(e) => { if (onMouseEnter) onMouseEnter(e); setHover(true); }} onMouseLeave={() => setHover(false)}
       style={{
@@ -12388,13 +12579,16 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
     onPatchEdit({ fields });
   };
 
-  const exportCopy = async (destRootId) => {
+  const exportCopy = async (destRootId, format) => {
     setBusy("Building copy…");
     try {
-      const out = await materializeEdit(rec, body, edit, roots);
+      const out = await materializeEdit(rec, body, edit, roots, format);
       if (!destRootId) {
         downloadBlob(out.blob, out.filename);
-        onToast("Downloaded " + out.filename, "green");
+        onToast(out.left
+          ? "Downloaded " + out.filename + ". " + out.left + " picture" + (out.left === 1 ? "" : "s") + " or file" + (out.left === 1 ? "" : "s") +
+            " couldn't come along" + (format === "json" ? " (JSON holds no pictures; PNG or CHARX keeps them)" : "")
+          : "Downloaded " + out.filename, out.left ? "warm" : "green");
       } else {
         const dest = roots.find((r) => r.id === destRootId);
         if (!(await verifyPermission(dest.handle, true))) throw new Error("Write permission denied");
@@ -12415,7 +12609,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
       const dest = roots.find((r) => r.id === destRootId);
       if (!(await verifyPermission(dest.handle, true))) throw new Error("Write permission denied");
       const { bytes } = await readOriginalBytes(rec, roots);
-      const blob = new Blob([bytes], { type: "image/png" });
+      const blob = new Blob([bytes], { type: CARD_FORMATS[cardFormatOf(rec.file)].mime });
       const res = await copyIntoRoot(dest, [], rec.file, blob, rec.sig);
       await logOp("copy", { card: rec.name, from: rec.rel, to: dest.name + "/" + res.name, skipped: res.skipped });
       onToast(res.skipped ? "Already there — " + res.reason : "Copied to " + dest.name + "/" + res.name, res.skipped ? "blue" : "green");
@@ -12471,7 +12665,16 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             {edit && edit.favorite ? "★ Favourite" : "☆ Favourite"}
           </SmallBtn>
           <SmallBtn color="cyan" onClick={() => { navigator.clipboard && navigator.clipboard.writeText((root ? root.name : "") + "/" + rec.rel); onToast("Path copied", "cyan"); }}>Copy path</SmallBtn>
-          <SmallBtn color="purple" disabled={!body} onClick={() => exportCopy(null)}>Download copy</SmallBtn>
+          <SmallBtn color="purple" disabled={!body} onClick={() => exportCopy(null)}
+            title={"The card as the vault shows it, as a " + CARD_FORMATS[cardFormatOf(rec.file)].label + " file like its own"}>Download copy</SmallBtn>
+          <select aria-label="Download as" value="" disabled={!body} onChange={(e) => { const f = e.target.value; e.target.value = ""; if (f) exportCopy(null, f); }}
+            title="Download the card in another format: PNG (text in the picture), CHARX (a zip with its pictures) or JSON (text only)"
+            style={Object.assign({}, selectStyle, { width: "auto", padding: "4px 26px 4px 8px", fontSize: 11 })}>
+            <option value="">Download as…</option>
+            {Object.keys(CARD_FORMATS).map((f) => (
+              <option key={f} value={f}>{CARD_FORMATS[f].label}{f === cardFormatOf(rec.file) ? " (its own format)" : f === "json" ? " (text only)" : ""}</option>
+            ))}
+          </select>
           {onDuplicate ? <SmallBtn color="green" disabled={!body} onClick={onDuplicate} title="A copy named “(copy)” in the same folder, as a card of its own">Duplicate</SmallBtn> : null}
           <SmallBtn color={dirtyCount ? "red" : "muted"} disabled={!dirtyCount || !body || readOnlyRoot || !!writeBlock}
             title={readOnlyRoot ? "Imported folders are read-only" : writeBlock || "Write these changes into the card file itself"}
@@ -15442,11 +15645,10 @@ function App() {
     const named = Object.assign({}, edit, { fields: Object.assign({}, edit && edit.fields, { name }) });
     const raw = await rawCardFromBytes(orig.bytes, rec.file);
     const v3 = buildV3Payload(body, named, rawCharacterBook(raw), raw);
-    const asPng = isPng(orig.bytes);
-    const blob = asPng
-      ? new Blob([writeCardIntoPng(orig.bytes, v3, buildV2Payload(v3))], { type: "image/png" })
-      : new Blob([JSON.stringify(v3, null, 2)], { type: "application/json" });
-    const res = await copyIntoRoot(root, dir ? dir.split("/") : [], safeFileName(name) + (asPng ? ".png" : ".json"), blob, await byteSignature(blob));
+    // In the card's own format, so a .charx keeps the files packed in it.
+    const out = await writeCardFile(orig.bytes, rec.file, v3, cardFormatOf(rec.file) === "png" && !isPng(orig.bytes) ? "json" : null);
+    const blob = new Blob([out.bytes], { type: out.mime });
+    const res = await copyIntoRoot(root, dir ? dir.split("/") : [], safeFileName(name) + "." + out.ext, blob, await byteSignature(blob));
     const id = root.id + ":" + (dir ? dir + "/" : "") + res.name;
     await logOp("copyCard", { card: rec.name, as: name, to: root.name + "/" + (dir ? dir + "/" : "") + res.name });
     const recs = await runScanRef.current(root.id, false, { quiet: true });
@@ -15757,18 +15959,22 @@ function App() {
     const unopened = [];
     for (const root of list) {
       if (stopRef.current.stop) break;
+      // Every known card goes in, even ones read again below: the scan only
+      // removes the cards it knew of whose files are gone.
       const existing = new Map();
-      if (!force) for (const c of working) if (c.rootId === root.id) existing.set(c.id, c);
+      for (const c of working) if (c.rootId === root.id) existing.set(c.id, c);
       // A readable card whose text never made it into the cache is read again,
       // rather than showing "no card data" until a full rescan.
-      if (existing.size) {
+      let reparse = force ? true : null;
+      if (!force && existing.size) {
         const cached = new Set(await dbKeys(STORE_BODIES));
-        for (const [id, c] of existing) if (c.ok && !cached.has(id)) existing.delete(id);
+        reparse = new Set();
+        for (const [id, c] of existing) if (c.ok && !cached.has(id)) reparse.add(id);
       }
       setScan((s) => Object.assign({}, s, { rootName: root.name }));
       const res = await scanRoot(root, existing, stopRef.current, (p) => {
         setScan({ running: true, done: p.done, total: p.total, label: p.label, rootName: root.name });
-      });
+      }, reparse);
       if (res.error) { showToast(res.error, "red"); continue; }
       // The folder may have been removed (or replaced by the folder above it)
       // while this scan ran. Then nothing of it is written back: no records,

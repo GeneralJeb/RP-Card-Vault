@@ -32,7 +32,7 @@ const t = require("./harness");
 const ROOT = path.join(__dirname, "..");
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk"]);
+const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk", "cardPictures"]);
 const cardPng = (o, rgb, more) => {
   const v3 = V.newCardPayload(o);
   Object.assign(v3.data, more || {});
@@ -405,6 +405,14 @@ async function main() {
       await page.mouse.move(2, 2);
       await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
       t.ok(true, "and it stops when you move away");
+      // The pointer leaving just as the picture under it is swapped can bring
+      // no leave event at all: a move anywhere else still stops it.
+      await anim.hover();
+      await moving.waitFor();
+      await page.evaluate(() => document.body.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
+      await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
+      t.ok(true, "and stops on a move elsewhere even when the leave never came");
+      await page.mouse.move(2, 2);
       await anim.click();
       await page.mouse.move(2, 2);
       await page.locator(".card-moving").first().waitFor();
@@ -434,6 +442,62 @@ async function main() {
       await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Animated Ada.png"));
       await page.getByRole("button", { name: "Rescan", exact: true }).click();
       await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Animated Ada/.test(e.textContent)));
+    });
+
+    await step("a .charx card shows its picture, saves as a .charx and downloads in any format", async () => {
+      const JSZip = global.JSZip = require("../lib/jszip.min.js");
+      const pic = (rgb) => Buffer.from(V.solidPng(30, 40, rgb));
+      const cx = V.newCardPayload({ name: "Charx Cora", description: "Before." });
+      cx.data.assets = [{ type: "icon", uri: "embeded://assets/icon/images/main.png", name: "main", ext: "png" },
+        { type: "emotion", uri: "embeded://assets/emotion/images/sad.png", name: "sad", ext: "png" }];
+      const zip = new JSZip();
+      zip.file("card.json", JSON.stringify(cx));
+      zip.file("assets/icon/images/main.png", pic([160, 30, 30]));
+      zip.file("assets/emotion/images/sad.png", pic([30, 30, 160]));
+      zip.file("module.risum", "a front end's own module");
+      await writeFiles(page, "Cards", [["Charx Cora.charx", await zip.generateAsync({ type: "nodebuffer" })]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Charx Cora").locator("img").first().waitFor();
+      t.ok(true, "its tile shows the icon packed in it");
+
+      await tile("Charx Cora").click();
+      await page.getByText("Fields", { exact: true }).click();
+      await page.locator("xpath=//label[normalize-space()='Description']/following::textarea[1]").fill("After.");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).click();
+      await page.getByRole("button", { name: /Saved/ }).first().waitFor();
+      const saved = await readFile(page, "Cards", "Charx Cora.charx");
+      const back = await V.parseCardBytes(saved, "Charx Cora.charx");
+      const inside = await JSZip.loadAsync(saved);
+      t.ok(back.ok && back.data.description === "After.", "Save to card writes into the .charx", back.data && back.data.description);
+      t.ok(Buffer.compare(await inside.file("assets/emotion/images/sad.png").async("nodebuffer"), pic([30, 30, 160])) === 0 && !!inside.file("module.risum"),
+        "and its pictures and other files are still in it");
+
+      const download = async (act) => {
+        const [dl] = await Promise.all([page.waitForEvent("download"), act()]);
+        return { name: dl.suggestedFilename(), bytes: new Uint8Array(fs.readFileSync(await dl.path())) };
+      };
+      const own = await download(() => page.getByRole("button", { name: "Download copy" }).click());
+      t.eq(own.name, "Charx Cora (vault).charx", "Download copy keeps the card's own format");
+      const asPng = await download(() => page.getByLabel("Download as").selectOption("png"));
+      const png = await V.parseCardBytes(asPng.bytes, asPng.name);
+      t.ok(asPng.name === "Charx Cora (vault).png" && png.ok && png.data.description === "After.", "Download as PNG gives a PNG card", asPng.name);
+      t.eq((await V.cardPictures(asPng.bytes, asPng.name)).pictures.map((p) => p.name), ["Card picture", "sad"], "with the icon as its picture and the expression inside");
+      const asJson = await download(() => page.getByLabel("Download as").selectOption("json"));
+      t.ok(asJson.name === "Charx Cora (vault).json" && JSON.parse(Buffer.from(asJson.bytes).toString()).data.description === "After.", "Download as JSON gives the text", asJson.name);
+      await toast(/2 pictures or files couldn't come along \(JSON holds no pictures/);
+      t.ok(true, "and says the two pictures were left out");
+
+      await page.getByRole("button", { name: "Duplicate" }).click();
+      await page.waitForFunction(() => Array.from(document.querySelectorAll(".cardTile")).some((e) => /Charx Cora \(copy\)/.test(e.textContent)));
+      t.ok(Object.keys(await listFiles(page, "Cards")).includes("Charx Cora (copy).charx"), "Duplicate makes a .charx too");
+
+      await page.keyboard.press("Escape");
+      await page.evaluate(async () => {
+        const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards");
+        for (const n of ["Charx Cora.charx", "Charx Cora (copy).charx"]) await d.removeEntry(n);
+      });
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Charx Cora/.test(e.textContent)));
     });
 
     await step("a card's picture opens full size, and its Gallery shows the pictures it embeds", async () => {
@@ -802,6 +866,34 @@ async function main() {
       t.eq(added.length, 1, "one folder was added in the end, Parent: the inner one's scan didn't write it back", added);
       const extras = (await cardRecords()).filter((c) => /^Extra \d+\.png$/.test(c.file));
       t.ok(extras.length === 300 && extras.every((c) => c.rootId === added[0]), "each of the 300 cards is indexed once, under the folder above", extras.length);
+    });
+
+    await step("a card whose file is gone leaves the index, also when it's read again", async () => {
+      const extras = async () => (await cardRecords()).filter((c) => /^Extra [01]\.png$/.test(c.file)).map((c) => c.file).sort();
+      const gone = async (want) => {
+        for (let i = 0; i < 100 && (await extras()).join() !== want.join(); i++) await page.waitForTimeout(200);
+        return extras();
+      };
+      const rescan = async (name) => {
+        await page.getByRole("button", { name: "Folders", exact: true }).click();
+        await page.getByRole("button", { name }).click();
+        await page.getByRole("button", { name: "Close", exact: true }).click();
+      };
+      const remove = (n) => page.evaluate(async (n) =>
+        (await (await (await navigator.storage.getDirectory()).getDirectoryHandle("Parent")).getDirectoryHandle("Big")).removeEntry(n), n);
+      t.eq(await extras(), ["Extra 0.png", "Extra 1.png"], "two of the cards are indexed");
+      // Extra 1's text isn't cached, so a rescan reads it again; then its file goes.
+      await page.evaluate(async () => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const keys = await new Promise((res) => { const q = db.transaction("bodies").objectStore("bodies").getAllKeys(); q.onsuccess = () => res(q.result); });
+        await new Promise((res) => { const tx = db.transaction("bodies", "readwrite"); tx.objectStore("bodies").delete(keys.find((k) => /:Big\/Extra 1\.png$/.test(k))); tx.oncomplete = res; });
+      });
+      await remove("Extra 1.png");
+      await rescan("Rescan changed");
+      t.eq(await gone(["Extra 0.png"]), ["Extra 0.png"], "a card with no cached text is dropped once its file is gone");
+      await remove("Extra 0.png");
+      await rescan("Full re-parse");
+      t.eq(await gone([]), [], "and Full re-parse drops a card whose file is gone, so it doesn't come back after a reload");
     });
 
     if (!reloadCrashes) await step("leftover records from before are cleaned up when the vault opens", async () => {

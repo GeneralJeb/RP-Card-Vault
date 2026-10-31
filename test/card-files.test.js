@@ -17,6 +17,7 @@ const { mod: V } = loadPureRegion([
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
+  "writeCardFile", "cardFormatOf", "pngWithoutCard", "reusableRecord",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -371,6 +372,111 @@ async function main() {
     t.eq([plain.pictures.length, plain.others], [0, 0], "a .json card with no assets has none");
     t.eq([[0xff, 0xd8, 0xff, 0xe0], [0x47, 0x49, 0x46, 0x38, 0x39, 0x61], [...Buffer.from("RIFF0000WEBPVP8 ")], [...Buffer.from("plain text here")]]
       .map((b) => V.pictureMime(new Uint8Array(b.concat(Array(12).fill(0))))), ["image/jpeg", "image/gif", "image/webp", ""], "JPEG, GIF and WebP are known by their first bytes; text isn't a picture");
+  }
+
+  console.log("\n.charx cards are saved as .charx, and a card can be written in another format");
+  {
+    const pic = (rgb) => V.solidPng(8, 8, rgb);
+    const b64 = (b) => Buffer.from(b).toString("base64");
+    const hex = (b) => Buffer.from(b).toString("hex");
+    const unzip = async (bytes) => JSZip.loadAsync(bytes);
+    const fileBytes = async (zip, path) => { const f = zip.file(path); return f ? f.async("uint8array") : null; };
+
+    // A .charx with its icon, an expression and a file the vault knows nothing about.
+    const cx = V.newCardPayload({ name: "Charx Cora", description: "Before." });
+    cx.data.assets = [{ type: "icon", uri: "embeded://assets/icon/images/main.png", name: "main", ext: "png" },
+      { type: "emotion", uri: "embeded://assets/emotion/images/sad.png", name: "sad", ext: "png" }];
+    let zip = new JSZip();
+    zip.file("card.json", JSON.stringify(cx));
+    zip.file("assets/icon/images/main.png", pic([10, 10, 10]));
+    zip.file("assets/emotion/images/sad.png", pic([20, 20, 20]));
+    zip.file("module.risum", Buffer.from("a front end's own module"));
+    const charxBytes = await zip.generateAsync({ type: "uint8array" });
+
+    const fsys = memFs("Scratch");
+    fsys.put("cora.charx", charxBytes);
+    const parsed = await V.parseCardBytes(charxBytes, "cora.charx");
+    const rec = { id: "r:cora.charx", rootId: "r", rel: "cora.charx", dir: "", file: "cora.charx", ext: "charx", sig: "s" };
+    await V.saveCardToFile(rec, parsed.data, { fields: { description: "After." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
+    const saved = fsys.get("cora.charx");
+    const back = await V.parseCardBytes(saved, "cora.charx");
+    t.ok(back.ok && back.isCharx && back.data.description === "After.", "Save to card writes the edit into the .charx's card.json");
+    zip = await unzip(saved);
+    t.ok(hex(await fileBytes(zip, "assets/icon/images/main.png")) === hex(pic([10, 10, 10])) && hex(await fileBytes(zip, "assets/emotion/images/sad.png")) === hex(pic([20, 20, 20]))
+      && Buffer.from(await fileBytes(zip, "module.risum")).toString() === "a front end's own module", "and every other file in it is kept as it was");
+    t.eq(back.raw.data.assets.map((a) => a.uri), cx.data.assets.map((a) => a.uri), "its asset list too");
+    t.eq((await V.cardPictures(saved, "cora.charx")).pictures.length, 2, "so the Gallery still shows both pictures");
+
+    // A PNG card: its own picture, one RisuAI-style chunk, a data: address, a web address and an unnamed chunk.
+    const v3 = V.newCardPayload({ name: "Gallery Gwen", description: "Has pictures." });
+    v3.data.assets = [
+      { type: "icon", uri: "ccdefault:", name: "main", ext: "png" },
+      { type: "emotion", uri: "__asset:0", name: "happy", ext: "png" },
+      { type: "background", uri: "data:image/png;base64," + b64(pic([0, 90, 0])), name: "meadow", ext: "png" },
+      { type: "background", uri: "https://example.com/sky.png", name: "sky", ext: "png" },
+    ];
+    const tEXt = (k, v) => Buffer.from(V.makeChunk("tEXt", new Uint8Array(Buffer.concat([Buffer.from(k, "latin1"), Buffer.from([0]), Buffer.from(v, "latin1")]))));
+    let gwen = Buffer.from(V.writeCardIntoPng(pic([200, 0, 0]), v3, V.buildV2Payload(v3)));
+    gwen = new Uint8Array(Buffer.concat([gwen.subarray(0, gwen.length - 12), tEXt("chara-ext-asset_:0", b64(pic([0, 0, 200]))), tEXt("chara-ext-asset_7", b64(pic([1, 2, 3]))), gwen.subarray(gwen.length - 12)]));
+
+    const same = await V.writeCardFile(gwen, "Gwen.png", v3);
+    t.ok(same.ext === "png" && hex(same.bytes) === hex(V.writeCardIntoPng(gwen, v3, V.buildV2Payload(v3))), "in its own format a PNG is written as before, chunks and all");
+    t.eq(["a.png", "a.APNG", "a.charx", "a.JSON", "a"].map(V.cardFormatOf), ["png", "png", "charx", "json", "png"], "a file's format comes from its extension");
+
+    const asCharx = await V.writeCardFile(gwen, "Gwen.png", v3, "charx");
+    zip = await unzip(asCharx.bytes);
+    const card = JSON.parse(await zip.file("card.json").async("string"));
+    t.eq([asCharx.ext, asCharx.mime, asCharx.left], ["charx", "application/zip", 1], "PNG → CHARX: the one unnamed chunk can't come along, and it says so");
+    t.eq(card.data.assets.map((a) => a.uri), ["embeded://assets/icon/images/main.png", "embeded://assets/emotion/images/happy.png",
+      v3.data.assets[2].uri, "https://example.com/sky.png"], "its picture and the chunk become files; data: and web addresses stay as they are");
+    const icon = await fileBytes(zip, "assets/icon/images/main.png");
+    t.ok(hex(icon) === hex(V.pngWithoutCard(pic([200, 0, 0]))) && !(await V.parseCardBytes(icon, "main.png")).ok, "the icon is the picture alone, without the card's text in it");
+    t.eq(hex(await fileBytes(zip, "assets/emotion/images/happy.png")), hex(pic([0, 0, 200])), "the expression comes out byte for byte");
+    const cxBack = await V.parseCardBytes(asCharx.bytes, "Gwen.charx");
+    t.ok(cxBack.ok && cxBack.data.description === "Has pictures.", "and the .charx reads back as the card");
+
+    const toPng = await V.writeCardFile(asCharx.bytes, "Gwen.charx", cxBack.raw, "png");
+    const pngBack = await V.parseCardBytes(toPng.bytes, "Gwen.png");
+    t.ok(toPng.left === 0 && pngBack.ok && pngBack.spec === "v3", "CHARX → PNG: everything comes along");
+    t.eq(pngBack.raw.data.assets.map((a) => a.uri.slice(0, 22)), ["ccdefault:", "__asset:0", "data:image/png;base64,", "https://example.com/sk"], "the icon is the PNG's own picture again, the expression a chunk");
+    t.eq(hex(V.pngWithoutCard(toPng.bytes)), hex(V.pngWithoutCard(pic([200, 0, 0]))), "the picture is the card's own");
+    t.eq((await V.cardPictures(toPng.bytes, "Gwen.png")).pictures.map((p) => p.name), ["Card picture", "happy", "meadow"], "and its Gallery shows the same pictures");
+
+    const asJson = await V.writeCardFile(gwen, "Gwen.png", v3, "json");
+    const jsonBack = JSON.parse(Buffer.from(asJson.bytes).toString());
+    t.eq([asJson.ext, asJson.left], ["json", 3], "PNG → JSON: the picture, the expression and the unnamed chunk can't come along, and it says so");
+    t.eq(jsonBack.data.assets.map((a) => a.uri.slice(0, 22)), ["ccdefault:", "data:image/png;base64,", "https://example.com/sk"], "what stays in the list is what a JSON card can still use");
+    const cxJson = JSON.parse(Buffer.from((await V.writeCardFile(asCharx.bytes, "Gwen.charx", cxBack.raw, "json")).bytes).toString());
+    t.eq(cxJson.data.assets[0].uri, "ccdefault:", "CHARX → JSON: the packed icon becomes the app's own picture");
+
+    // JSON → PNG and CHARX: a drawn placeholder picture, nothing to carry.
+    const plain = V.newCardPayload({ name: "Json Jo" });
+    const plainBytes = new Uint8Array(Buffer.from(JSON.stringify(plain)));
+    const jp = await V.writeCardFile(plainBytes, "Jo.json", plain, "png");
+    t.ok(jp.left === 0 && V.isPng(jp.bytes) && (await V.parseCardBytes(jp.bytes, "Jo.png")).data.name === "Json Jo", "JSON → PNG: a placeholder picture with the card in it");
+    const jc = await V.writeCardFile(plainBytes, "Jo.json", plain, "charx");
+    t.ok(jc.left === 0 && (await V.parseCardBytes(jc.bytes, "Jo.charx")).data.name === "Json Jo", "JSON → CHARX: just its card.json");
+
+    // A .charx whose icon is a JPEG, where it can't be made a PNG: a placeholder, and the JPEG kept as a chunk.
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0].concat(Array(40).fill(7)));
+    const jx = V.newCardPayload({ name: "Jpeg Jan" });
+    jx.data.assets = [{ type: "icon", uri: "embeded://assets/icon/images/main.jpg", name: "main", ext: "jpg" }];
+    zip = new JSZip();
+    zip.file("card.json", JSON.stringify(jx));
+    zip.file("assets/icon/images/main.jpg", jpeg);
+    const jxPng = await V.writeCardFile(await zip.generateAsync({ type: "uint8array" }), "Jan.charx", jx, "png", { toPng: async () => null });
+    const jxBack = await V.parseCardBytes(jxPng.bytes, "Jan.png");
+    t.ok(jxPng.left === 0 && jxBack.raw.data.assets[0].uri === "__asset:0", "CHARX with a JPEG icon → PNG: nothing lost when the JPEG can't be redrawn");
+    t.eq(hex((await V.cardPictures(jxPng.bytes, "Jan.png")).pictures[1].bytes), hex(jpeg), "the JPEG is still in the file, byte for byte");
+
+    // The scan: a .charx is read for its picture, once.
+    const info = { rel: "cora.charx", dir: "", file: "cora.charx", ext: "charx" };
+    const scanned = (await V.processCardFile({ id: "r" }, info, new File([saved], "cora.charx", { lastModified: 5 }))).rec;
+    t.ok(scanned.ok && scanned.iconChecked === true, "the scan looks for a .charx's icon");
+    const file = { size: scanned.size, lastModified: 5 };
+    t.ok(V.reusableRecord(scanned, file) && !V.reusableRecord(Object.assign({}, scanned, { iconChecked: undefined }), file),
+      "a .charx indexed before the vault drew its icon is read again");
+    t.ok(V.reusableRecord({ ext: "png", size: 1, mtime: 5, scanVersion: 1 }, { size: 1, lastModified: 5 }), "other cards are reused as before");
   }
 
   console.log("\nmoving and backing up cards, on a folder tree that ignores case");
@@ -774,6 +880,26 @@ async function main() {
     t.ok(fb && lr && fb.fp !== fresh.records.find((r) => r.rel === long).fp, "two unopened cards aren't taken for duplicates of each other");
     const later = await V.scanRoot(root(), new Map(longScan.records.map((r) => [r.id, r])), go, () => {});
     t.ok(!later.records.some((r) => r.rel === long) && later.removed.includes(lr.id), "once it's renamed, the unreadable entry goes");
+
+    // Full re-parse, and cards whose text isn't cached: read again, even when
+    // size and date say unchanged, and still removed if their files are gone.
+    const knownPlus = () => {
+      const m = known();
+      const ada = m.get("r1:Ada.json");
+      m.set(ada.id, Object.assign({}, ada, { name: "Stale" }));
+      m.set("r1:Gone.json", Object.assign({}, ada, { id: "r1:Gone.json", rel: "Gone.json", file: "Gone.json" }));
+      return m;
+    };
+    for (const [how, reparse] of [["all", true], ["by id", new Set(["r1:Ada.json", "r1:Gone.json"])]]) {
+      const again = await V.scanRoot(root(), knownPlus(), go, () => {}, reparse);
+      t.eq(again.records.find((r) => r.rel === "Ada.json").name, "Ada.json", "a card read again (" + how + ") is read from its file");
+      t.eq(again.removed, ["r1:Gone.json"], "and a card read again whose file is gone is removed (" + how + ")");
+    }
+    t.eq((await V.scanRoot(root(), knownPlus(), go, () => {})).records.find((r) => r.rel === "Ada.json").name, "Stale",
+      "a plain rescan still reuses an unchanged card's record");
+    looks = 0;
+    const stoppedAll = await V.scanRoot(root(), known(), stopAfterOne, () => {}, true);
+    t.eq([stoppedAll.removed, stoppedAll.records.length], [[], 5], "stopping a full re-parse keeps the cards it hadn't reached");
 
     let res, threw = null;
     try { res = await V.scanRoot(root({ list: "Old" }), known(), go, () => {}); } catch (e) { threw = e; }
