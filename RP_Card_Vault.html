@@ -9510,8 +9510,18 @@ function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, 
   // An animated picture plays while the pointer is on its card, or all the
   // time when Settings says so (only cards on screen are drawn at all).
   const [hover, setHover] = useState(false);
+  const tileRef = useRef(null);
+  // Starting to play swaps the picture under the pointer, and a pointer that
+  // leaves just then can get no leave event at all. So while it plays, a move
+  // anywhere outside the card stops it too.
+  useEffect(() => {
+    if (!hover) return;
+    const away = (e) => { if (tileRef.current && !tileRef.current.contains(e.target)) setHover(false); };
+    document.addEventListener("mousemove", away, true);
+    return () => document.removeEventListener("mousemove", away, true);
+  }, [hover]);
   return (
-    <div className="cardTile no-sel" onClick={onClick} onDoubleClick={onDouble} onContextMenu={onContext}
+    <div ref={tileRef} className="cardTile no-sel" onClick={onClick} onDoubleClick={onDouble} onContextMenu={onContext}
       draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}
       onMouseEnter={(e) => { if (onMouseEnter) onMouseEnter(e); setHover(true); }} onMouseLeave={() => setHover(false)}
       style={{

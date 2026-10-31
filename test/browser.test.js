@@ -405,6 +405,14 @@ async function main() {
       await page.mouse.move(2, 2);
       await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
       t.ok(true, "and it stops when you move away");
+      // The pointer leaving just as the picture under it is swapped can bring
+      // no leave event at all: a move anywhere else still stops it.
+      await anim.hover();
+      await moving.waitFor();
+      await page.evaluate(() => document.body.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
+      await page.waitForFunction(() => !document.querySelector(".cardTile .card-moving"));
+      t.ok(true, "and stops on a move elsewhere even when the leave never came");
+      await page.mouse.move(2, 2);
       await anim.click();
       await page.mouse.move(2, 2);
       await page.locator(".card-moving").first().waitFor();
