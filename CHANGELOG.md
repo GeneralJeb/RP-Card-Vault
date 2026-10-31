@@ -17,6 +17,7 @@ If you skipped several releases, read every section down to the one you had.
   - **PNG:** a .charx's icon becomes the picture, and its other pictures are stored inside the PNG the way RisuAI does. A card without a picture gets a drawn one with its name.
   - **JSON:** text only. The vault says how many pictures were left out.
   - Pictures given as a web address or a data: address stay as they are in every format. Download copy still keeps the card's own format.
+- **An animated card no longer keeps playing after you move away.** Moving the pointer off a card just as it started playing could leave it playing until you pointed at it again. Moving anywhere else now stops it.
 
 ## 1.6.16
 
