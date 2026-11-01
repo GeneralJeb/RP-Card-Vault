@@ -896,6 +896,40 @@ async function main() {
       t.eq(await gone([]), [], "and Full re-parse drops a card whose file is gone, so it doesn't come back after a reload");
     });
 
+    if (!reloadCrashes) await step("ingest doesn't hold on to a folder that's no longer linked", async () => {
+      await writeFiles(page, "Ingest/Inbox", [["Fay Ferrier.png", cardPng({ name: "Fay Ferrier", description: "Rows the ferry." }, [150, 90, 30])]]);
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Ingest")).getDirectoryHandle("Shelf", { create: true }));
+      const before = new Set(await rootKeys());
+      await page.evaluate(() => { window.__pickFolder = "Ingest"; });
+      await page.getByRole("button", { name: "Folders", exact: true }).click();
+      await page.getByRole("button", { name: "+ Add folder" }).click();
+      await page.getByText(/Scan complete/).first().waitFor();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      const id = (await rootKeys()).find((k) => !before.has(k));
+      // Last ingest went into a folder since removed (or added again, under a
+      // new id); Ingest/Shelf is labelled Library (as is Parent/Big, from above).
+      await page.evaluate(async (id) => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const get = (k) => new Promise((res) => { const q = db.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); });
+        const settings = await get("settings"), roles = (await get("folderRoles")) || {};
+        await new Promise((res) => {
+          const tx = db.transaction("kv", "readwrite");
+          tx.objectStore("kv").put(Object.assign({}, settings, { ingestSourceKeys: [id + "::Inbox"], ingestDestKeys: ["gone::Shelf"] }), "settings");
+          tx.objectStore("kv").put(Object.assign({}, roles, { [id + "::Shelf"]: "library" }), "folderRoles");
+          tx.oncomplete = res;
+        });
+      }, id);
+      await page.reload();
+      await page.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
+      await page.getByText("Shelf", { exact: true }).first().waitFor();
+      await page.getByRole("button", { name: "Ingest", exact: true }).click();
+      await page.getByRole("button", { name: "Build plan" }).click();
+      await page.getByRole("button", { name: "Copy 1 card" }).click();
+      await toast(/Ingest finished — [1-9]\d* copied/);
+      t.ok("Shelf/Fay Ferrier.png" in (await listFiles(page, "Ingest")), "the card is copied into the labelled Library folder, not lost to the folder that's gone");
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+    });
+
     if (!reloadCrashes) await step("leftover records from before are cleaned up when the vault opens", async () => {
       await page.evaluate(async () => {
         const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
