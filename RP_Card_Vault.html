@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.17";
+const APP_VERSION = "1.6.18";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -13224,10 +13224,18 @@ function IngestModal({ roots, records, settings, tagMeta, folderRoles, dupeExclu
   const labelledDests = foldersWithRole(records, roots, folderRoles, "library")
     .concat(foldersWithRole(records, roots, folderRoles, "archive"))
     .filter((k) => { const r = roots.find((x) => x.id === parseDirKey(k).rootId); return r && !isImportRoot(r); });
+  // The folders picked last time, less those no longer linked (a folder
+  // removed, or added again under a new id): those can't be shown or used.
+  const linkedKeys = (keys, writableOnly) => (keys || []).filter((k) => {
+    const r = roots.find((x) => x.id === parseDirKey(k).rootId);
+    return r && !(writableOnly && isImportRoot(r));
+  });
+  const savedSourceKeys = linkedKeys(settings.ingestSourceKeys, false);
+  const savedDestKeys = linkedKeys(settings.ingestDestKeys, true);
 
   const [sourceKeys, setSourceKeys] = useState(
-    (settings.ingestSourceKeys && settings.ingestSourceKeys.length)
-      ? settings.ingestSourceKeys
+    savedSourceKeys.length
+      ? savedSourceKeys
       : (labelledInbox.length ? labelledInbox
         : (inboxRoots.length
             ? inboxRoots.map((r) => dirKey(r.id, ""))
@@ -13236,8 +13244,8 @@ function IngestModal({ roots, records, settings, tagMeta, folderRoles, dupeExclu
             : roots.filter((r) => !isImportRoot(r)).map((r) => dirKey(r.id, ""))))
   );
   const [destKeys, setDestKeys] = useState(
-    (settings.ingestDestKeys && settings.ingestDestKeys.length)
-      ? settings.ingestDestKeys
+    savedDestKeys.length
+      ? savedDestKeys
       : (labelledDests.length ? labelledDests : writable.map((r) => dirKey(r.id, "")))
   );
   const [srcRecursive, setSrcRecursive] = useState(!!settings.ingestSourceRecursive);

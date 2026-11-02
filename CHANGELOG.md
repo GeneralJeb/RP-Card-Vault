@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.18
+
+- **Ingest no longer quietly does nothing after a folder is removed.** Ingest remembers the folders you took cards from and filed them into. If one of those folders had since been removed from the vault (or removed and added again), it stayed picked but out of sight: nothing showed as picked, and **Copy** could do nothing at all, without a word. Folders that are no longer linked are now left out, and Ingest starts from its usual choices (your Inbox and Library folders) instead.
+
 ## 1.6.17
 
 - **.charx cards can be saved.** Save to card on a .charx used to stop with "Don't know how to write this file type in place". It now writes your changes into the card inside the .charx and keeps every picture and other file in it as it was, with the same backup and read-back check as a PNG save. Duplicate and Download copy also make a .charx now; before, they made a .json and left the pictures behind.
