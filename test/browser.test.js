@@ -612,18 +612,58 @@ async function main() {
       await page.getByText("Show trash", { exact: true }).click();
     });
 
+    await step("trashing cards from a Reference folder and a Library one moves the Library card, and writes nothing into the Reference folder", async () => {
+      await writeFiles(page, "Refshelf", [["Gil Reader.png", cardPng({ name: "Gil Reader", description: "Reads the old books." }, [120, 120, 40])]]);
+      await writeFiles(page, "Loose", [["Hal Tinker.png", cardPng({ name: "Hal Tinker", description: "Mends kettles." }, [40, 120, 120])]]);
+      await page.getByRole("button", { name: "Folders", exact: true }).click();
+      for (const name of ["Refshelf", "Loose"]) {
+        await page.evaluate((n) => { window.__pickFolder = n; }, name);
+        await page.getByRole("button", { name: "+ Add folder" }).click();
+        // Its notice may already have made way for "Scan complete": its row in the list is what stays.
+        await page.getByText(name, { exact: true }).first().waitFor();
+      }
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await tile("Gil Reader").waitFor();
+      await tile("Hal Tinker").waitFor();
+      await page.locator(".folder-tree, body").first().getByText("Refshelf", { exact: true }).first().click({ button: "right" });
+      await page.getByText(/^Role: /).hover();
+      await page.getByText("Reference", { exact: true }).last().click();
+      // Gil (Reference, so it stays) is picked first: the trash isn't looked for in its folder.
+      await tile("Gil Reader").click();
+      await tile("Hal Tinker").click({ modifiers: ["Control"] });
+      await page.getByTitle("Relocate to your trash folder").click();
+      await toast(/^1 sent to Loose\/_vault trash\. 1 card\(s\) live in a read-only folder/);
+      t.ok(true, "the notice says the one went to the trash, and the other can't be moved");
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Hal Tinker/.test(e.textContent)));
+      const ref = Object.keys(await listFiles(page, "Refshelf"));
+      t.eq(ref, ["Gil Reader.png"], "the Reference folder is as it was: no trash folder made in it", ref);
+      const elsewhere = Object.keys(await listFiles(page, "Cards")).concat(Object.keys(await listFiles(page, "Loose")));
+      t.ok(elsewhere.some((f) => /^_vault trash\/Hal Tinker\.png$/.test(f)) && elsewhere.indexOf("Hal Tinker.png") < 0,
+        "the Library card went to a trash folder outside it", elsewhere);
+      t.ok(await tile("Gil Reader").isVisible(), "the Reference card stays where it is");
+      // The steps below count the cards: these two folders leave the vault again.
+      await page.getByRole("button", { name: "Folders", exact: true }).click();
+      for (const name of ["Refshelf", "Loose"]) {
+        const forget = page.getByRole("button", { name: "forget" });
+        // Its own row: the innermost box holding both its name and a forget button.
+        await page.locator("div").filter({ has: page.getByText(name, { exact: true }) }).filter({ has: forget }).last().getByRole("button", { name: "forget" }).click();
+      }
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Gil Reader/.test(e.textContent)));
+    });
+
     await step("a card is sent to a folder destination", async () => {
       await page.evaluate(() => { window.__pickFolder = "Frontend"; });
       await page.getByRole("button", { name: "Folders", exact: true }).click();
       await page.getByRole("button", { name: "+ Add folder" }).click();
-      await page.getByText(/Added Frontend/).first().waitFor();
+      await page.getByText("Frontend", { exact: true }).first().waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
       await page.getByText("Frontend", { exact: true }).first().click({ button: "right" });
       await page.getByText("Send cards here (add as a destination)").click();
       // With one destination the card menu has a single item; with several, a Send to… submenu.
       await tile("Bram Lighthouse").click({ button: "right" });
       await page.getByText("Send to front end", { exact: true }).click();
-      await toast(/sent to/i);
+      await toast(/sent to Frontend/i);
       const sent = Object.keys(await listFiles(page, "Frontend"));
       t.ok(sent.some((f) => /Bram Lighthouse/.test(f)), "Bram Lighthouse arrived in the front end's folder", sent);
     });
