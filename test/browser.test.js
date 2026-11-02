@@ -903,9 +903,17 @@ async function main() {
       await page.evaluate(() => { window.__pickFolder = "Ingest"; });
       await page.getByRole("button", { name: "Folders", exact: true }).click();
       await page.getByRole("button", { name: "+ Add folder" }).click();
-      await page.getByText(/Scan complete/).first().waitFor();
+      await page.getByText(/Added Ingest/).first().waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
       const id = (await rootKeys()).find((k) => !before.has(k));
+      // Its scan has stored the card and the folder list once Fay is indexed
+      // and Ingest (off while a scan runs) can be pressed again. An earlier
+      // "Scan complete" notice may still be up, so it can't be waited for.
+      const ingestBtn = page.getByRole("button", { name: "Ingest", exact: true });
+      for (let i = 0; i < 150; i++) {
+        if ((await cardRecords()).some((c) => c.rootId === id && c.file === "Fay Ferrier.png") && await ingestBtn.isEnabled()) break;
+        await page.waitForTimeout(200);
+      }
       // Last ingest went into a folder since removed (or added again, under a
       // new id); Ingest/Shelf is labelled Library (as is Parent/Big, from above).
       await page.evaluate(async (id) => {
@@ -921,8 +929,9 @@ async function main() {
       }, id);
       await page.reload();
       await page.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
-      await page.getByText("Shelf", { exact: true }).first().waitFor();
-      await page.getByRole("button", { name: "Ingest", exact: true }).click();
+      await page.getByText(/\d+ shown/).first().waitFor();
+      await ingestBtn.click();
+      await page.getByText("1 card in scope").waitFor();
       await page.getByRole("button", { name: "Build plan" }).click();
       await page.getByRole("button", { name: "Copy 1 card" }).click();
       await toast(/Ingest finished — [1-9]\d* copied/);
