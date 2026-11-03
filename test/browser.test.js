@@ -279,6 +279,68 @@ async function main() {
       await page.getByPlaceholder("filter tags…").fill("");
     });
 
+    await step("a tag you add is marked, and one taken off again leaves nothing to save", async () => {
+      // The card-tag box's chips, as "tag=colour". Ada has "victorian" from her file and "clockwork" added here.
+      const chips = () => page.evaluate(() => {
+        const wrap = document.querySelector("input[placeholder='add tag, Enter to commit']").parentElement.previousElementSibling;
+        return Array.from(wrap.children).filter((c) => c.firstChild && c.firstChild.nodeType === 3)
+          .map((c) => c.firstChild.nodeValue + "=" + getComputedStyle(c).color);
+      });
+      const colour = (list, tag) => (list.filter((c) => c.startsWith(tag + "="))[0] || "").split("=")[1];
+      const ada = await chips();
+      t.ok(colour(ada, "victorian") && colour(ada, "clockwork") && colour(ada, "victorian") !== colour(ada, "clockwork"),
+        "the added tag is marked apart from the file's own", ada);
+      await tile("Cora Gardener").click();
+      await page.getByText(/^Tags & Notes/).click();
+      const box = page.getByPlaceholder("add tag, Enter to commit").first();
+      await box.fill("zz");
+      await box.press("Enter");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).waitFor();
+      await page.evaluate(() => {
+        const wrap = document.querySelector("input[placeholder='add tag, Enter to commit']").parentElement.previousElementSibling;
+        Array.from(wrap.children).filter((c) => c.firstChild && c.firstChild.nodeValue === "zz")[0].lastElementChild.click();
+      });
+      await page.getByRole("button", { name: /Saved/ }).first().waitFor();
+      t.ok(true, "taking it off again leaves nothing to save");
+      t.eq(await page.getByText("revert to the card's own tags").count(), 0, "and no tag edit to revert");
+    });
+
+    await step("keys don't reach the card behind the flag dialog", async () => {
+      const favourites = () => page.evaluate(() => new Promise((res) => {
+        const r = indexedDB.open("rpCardVault");
+        r.onsuccess = () => {
+          const q = r.result.transaction("edits", "readonly").objectStore("edits").getAll();
+          q.onsuccess = () => res(q.result.filter((e) => e.favorite).length);
+        };
+      }));
+      const favouritesBecome = async (n, what) => {
+        for (let i = 0; i < 50 && (await favourites()) !== n; i++) await wait(100);
+        t.eq(await favourites(), n, what);
+      };
+      const before = await favourites();
+      const dialog = page.getByText("Vault-only. Flags and their reasons are never written").first();
+      const openDialog = async () => {
+        await page.getByText(/^\+ .*Needs a rewrite$/).first().click();
+        await dialog.waitFor();
+        await dialog.click();   // out of the reason box, as a click anywhere on the dialog does
+      };
+      // Cora is open in the inspector.
+      await openDialog();
+      await page.keyboard.press("f");
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+      // f once the dialog is closed favourites Cora: once, not twice (which would undo it).
+      await page.keyboard.press("f");
+      await favouritesBecome(before + 1, "f behind the dialog did nothing; f after it favourited the card");
+      await openDialog();
+      await page.keyboard.press("Escape");
+      t.ok(await dialog.isVisible(), "Escape doesn't close the dialog");
+      t.ok(await page.getByText(/^Tags & Notes/).isVisible(), "nor the inspector behind it");
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.keyboard.press("f");
+      await favouritesBecome(before, "f takes the favourite off again");
+    });
+
     await step("looking through a card's lorebook and greetings changes nothing", async () => {
       await tile("Bram Lighthouse").click();
       const saved = page.getByRole("button", { name: /Saved/ }).first();

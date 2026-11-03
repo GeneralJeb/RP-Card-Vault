@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.18";
+const APP_VERSION = "1.6.20";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -3406,6 +3406,16 @@ function effectiveField(body, edit, key) {
 function effectiveTags(rec, edit) {
   if (edit && Array.isArray(edit.tags)) return edit.tags;
   return rec.tags || [];
+}
+
+/**
+ * The patch that puts `list` into the vault's edits as the card's tags, or
+ * { tags: null } (no edit) when it's the file's own list again.
+ */
+function tagsPatch(fileTags, list) {
+  const orig = fileTags || [];
+  const same = list.length === orig.length && list.every((t, i) => t === orig[i]);
+  return { tags: same ? null : list };
 }
 
 function addedTagsOf(rec, edit) {
@@ -12882,8 +12892,8 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
 
             <Field label={"Card tags · " + tags.length}
               hint="Purple outlines mark tags you added. These travel with the card.">
-              <TagEditor tags={tags} baseTags={rec.tags} tagIndex={tagIndex}
-                onChange={(t) => onPatchEdit({ tags: t })} />
+              <TagEditor tags={tags} baseTags={rec.fileTags} tagIndex={tagIndex}
+                onChange={(t) => onPatchEdit(tagsPatch(rec.fileTags, t))} />
             </Field>
             {Array.isArray(edit && edit.tags) ? (
               <div style={{ marginBottom: 14 }}>
@@ -17654,8 +17664,11 @@ function App() {
       const tag = document.activeElement && document.activeElement.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       // Escape closes the inspector, never a dialog: those close only from their own buttons.
-      if (e.key === "Escape" && !modal && focusId) setFocusId(null);
-      if (!focusId || modal) return;
+      // The flag dialog is a dialog too, with its own state: while it's up, keys
+      // mustn't reach the card behind it.
+      const dialog = modal || flagModal;
+      if (e.key === "Escape" && !dialog && focusId) setFocusId(null);
+      if (!focusId || dialog) return;
       // Ctrl+F is the browser's find and Ctrl+S its save, Alt+arrows its back
       // and forward: none of them is the card's f, s or arrow key.
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -17682,7 +17695,7 @@ function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [focusId, filtered, modal, patchEdit, selection]);
+  }, [focusId, filtered, modal, flagModal, patchEdit, selection]);
 
   /* ---- grid geometry ---- */
   const tileW = settings.tileSize;
