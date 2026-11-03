@@ -14,6 +14,11 @@ If you skipped several releases, read every section down to the one you had.
 - **Tags you add to a card are marked again.** The card tags you added in the vault were meant to show with a purple outline, apart from the card's own, but showed in the same colour as the rest. They're purple again.
 - **Keys no longer reach the card behind the flag dialog.** With the flag dialog open and the cursor out of its reason box, **f** favourited the card behind it, **s** sent it to your front end, the arrow keys moved to another card, and **Escape** closed the card panel instead of nothing. They now do nothing until the dialog is closed, as with every other dialog.
 
+## 1.6.19
+
+- **Move to trash never makes a trash folder inside a Reference folder.** With no trash folder chosen in Settings, the trash goes next to the cards being trashed. When the first card picked was in a Reference folder (one that's never written to), the vault made a "_vault trash" folder inside it anyway, and then refused to move anything there, so the other cards you'd picked stayed put too. The trash now goes in a folder that can be written to, the cards that can go are moved, and the ones in a Reference folder stay where they are.
+- **A move that's only partly possible says what did move.** When some of the cards picked for a move (or for the trash) were in a read-only folder, the notice said they couldn't be moved and nothing else, even though the rest had moved. One notice now says both.
+
 ## 1.6.18
 
 - **Ingest no longer quietly does nothing after a folder is removed.** Ingest remembers the folders you took cards from and filed them into. If one of those folders had since been removed from the vault (or removed and added again), it stayed picked but out of sight: nothing showed as picked, and **Copy** could do nothing at all, without a word. Folders that are no longer linked are now left out, and Ingest starts from its usual choices (your Inbox and Library folders) instead.
