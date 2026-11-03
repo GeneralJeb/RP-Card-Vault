@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.20
+
+- **Adding a tag and taking it off again no longer leaves an edit behind.** In the card panel's Tags & Notes, a card tag you added and then removed left the card marked **Locally edited**, with **Save to card (1)** waiting for nothing. The card is now back as it was, the way a field, greeting or lorebook entry typed back already is.
+- **Tags you add to a card are marked again.** The card tags you added in the vault were meant to show with a purple outline, apart from the card's own, but showed in the same colour as the rest. They're purple again.
+- **Keys no longer reach the card behind the flag dialog.** With the flag dialog open and the cursor out of its reason box, **f** favourited the card behind it, **s** sent it to your front end, the arrow keys moved to another card, and **Escape** closed the card panel instead of nothing. They now do nothing until the dialog is closed, as with every other dialog.
+
 ## 1.6.19
 
 - **Move to trash never makes a trash folder inside a Reference folder.** With no trash folder chosen in Settings, the trash goes next to the cards being trashed. When the first card picked was in a Reference folder (one that's never written to), the vault made a "_vault trash" folder inside it anyway, and then refused to move anything there, so the other cards you'd picked stayed put too. The trash now goes in a folder that can be written to, the cards that can go are moved, and the ones in a Reference folder stay where they are.

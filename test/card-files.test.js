@@ -13,7 +13,7 @@ const t = require("./harness");
 const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
-  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
+  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "tagsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
@@ -697,6 +697,17 @@ async function main() {
     t.eq(V.greetingsPatch(body, ["Hi.", "Hello."]), { greetings: ["Hi.", "Hello."] }, "a new order is an edit");
     t.eq(V.greetingsPatch({ alternate_greetings: [] }, []), { greetings: null }, "none added to none is no edit");
     t.eq(V.greetingsPatch(body, []), { greetings: [] }, "removing them all is an edit");
+  }
+
+  console.log("\ncard tag edits in the vault");
+  {
+    t.eq(V.tagsPatch(["sea", "storm"], ["sea", "storm", "gulls"]), { tags: ["sea", "storm", "gulls"] }, "an added tag is an edit");
+    t.eq(V.tagsPatch(["sea", "storm"], ["sea", "storm"]), { tags: null }, "a tag added and taken off again is no edit at all");
+    t.eq(V.tagsPatch([], []), { tags: null }, "none added to none is no edit");
+    t.eq(V.tagsPatch(undefined, []), { tags: null }, "nor on a card whose file has no tag list");
+    t.eq(V.tagsPatch(["sea", "storm"], ["storm", "sea"]), { tags: ["storm", "sea"] }, "a new order is an edit");
+    t.eq(V.tagsPatch(["sea"], ["Sea"]), { tags: ["Sea"] }, "and so is a new spelling");
+    t.eq(V.tagsPatch(["sea"], []), { tags: [] }, "removing them all is an edit");
   }
 
   console.log("\nnew cards");
