@@ -221,6 +221,7 @@ const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
 const APP_VERSION = "1.6.20";
+const APP_VERSION = "1.6.19";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -16594,10 +16595,11 @@ function App() {
     const intoRef = referenceFolderError(destRoot, destDir, folderRoles);
     if (intoRef) { showToast(intoRef, "warm"); return; }
     const locked = recs.filter((r) => cardFileLock(r, roots, folderRoles));
-    if (locked.length) {
-      showToast(fmtNum(locked.length) + " card(s) live in a read-only folder (imported, or Reference) and can't be moved", locked.length === recs.length ? "warm" : "red");
-      if (locked.length === recs.length) return;
-    }
+    const lockedText = fmtNum(locked.length) + " card(s) live in a read-only folder (imported, or Reference) and can't be moved";
+    if (locked.length === recs.length) { showToast(lockedText, "warm"); return; }
+    // Said with the result below when there is one: a notice of its own moments
+    // earlier would keep the result (how many did move) from being shown.
+    if (locked.length && opts.silent) showToast(lockedText, "red");
     const movable = recs.filter((r) => roots.some((x) => x.id === r.rootId) && !cardFileLock(r, roots, folderRoles));
     const label = destRoot.name + (destDir ? "/" + destDir : "");
     if (!opts.noConfirm && movable.length > 1) {
@@ -16626,8 +16628,9 @@ function App() {
       showToast(
         moved + verb + label +
         (skipped ? ", " + skipped + " already there" : "") +
-        (failed ? ", " + failed + " failed — " + errs.join(" | ") : ""),
-        failed ? "red" : "green"
+        (failed ? ", " + failed + " failed — " + errs.join(" | ") : "") +
+        (locked.length ? ". " + lockedText : ""),
+        failed ? "red" : locked.length ? "warm" : "green"
       );
       setSelection(new Set());
     }
@@ -16665,25 +16668,30 @@ function App() {
       const root = roots.find((r) => r.id === settings.trashKey.slice(0, i));
       if (root && !isImportRoot(root)) return { root, dir: settings.trashKey.slice(i + 2) };
     }
-    const root = roots.find((r) => r.id === fallbackRootId && !isImportRoot(r))
-      || roots.find((r) => !isImportRoot(r));
+    // Never in a Reference folder: nothing is written there, so a trash made
+    // or found in one would take no cards and refuse the rest of a selection.
+    const usable = (r) => !isImportRoot(r) && !referenceFolderError(r, "", folderRoles);
+    const root = roots.find((r) => r.id === fallbackRootId && usable(r))
+      || roots.find(usable);
     if (!root) throw new Error("No writable folder available for a trash folder");
     // reuse an existing trash-looking folder if the user already has one
-    const existing = (root.dirs || []).find((d) => /(^|\/)(_vault trash|trash cards|trash)$/i.test(d));
+    const existing = (root.dirs || []).find((d) => /(^|\/)(_vault trash|trash cards|trash)$/i.test(d) && !referenceFolderError(root, d, folderRoles));
     if (existing) return { root, dir: existing };
     await createFolderIn(root, "", TRASH_FOLDER_NAME);
     const updated = Object.assign({}, root, { dirs: (root.dirs || []).concat([TRASH_FOLDER_NAME]).sort() });
     await dbPut(STORE_ROOTS, updated);
     setRoots((prev) => prev.map((r) => (r.id === root.id ? updated : r)));
     return { root, dir: TRASH_FOLDER_NAME };
-  }, [settings.trashKey, roots]);
+  }, [settings.trashKey, roots, folderRoles]);
 
   const trashCards = useCallback(async (ids, opts) => {
     opts = opts || {};
     const recs = ids.map((id) => recById.get(id)).filter(Boolean);
     if (!recs.length) return;
     try {
-      const dest = await resolveTrash(recs[0].rootId);
+      // Near the first card that can go: a read-only one stays where it is.
+      const first = recs.find((r) => !cardFileLock(r, roots, folderRoles)) || recs[0];
+      const dest = await resolveTrash(first.rootId);
       const label = dest.root.name + "/" + dest.dir;
       if (!opts.noConfirm) {
         if (!window.confirm(
@@ -16695,7 +16703,7 @@ function App() {
     } catch (e) {
       showToast("Couldn't trash: " + e.message, "red");
     }
-  }, [recById, resolveTrash, showToast]);
+  }, [recById, resolveTrash, showToast, roots, folderRoles]);
 
   const deleteCards = useCallback(async (ids, opts) => {
     opts = opts || {};
