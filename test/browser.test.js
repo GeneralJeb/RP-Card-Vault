@@ -475,12 +475,173 @@ async function main() {
       const asked = [];
       const seen = (d) => asked.push(d.message());
       page.on("dialog", seen);
+      await page.evaluate(() => { navigator.clipboard.writeText = () => Promise.resolve(); });   // a headless browser may refuse the real one
       await page.getByRole("button", { name: "Copy V3 JSON" }).click();
       await toast(/V3 JSON copied \(without the file's extra fields\)/);
       page.off("dialog", seen);
       t.ok(asked.length === 1 && /Copy it anyway\?/.test(asked[0]), "Copy asks first, and still copies when you say yes", asked);
       await page.getByRole("button", { name: "Rescan", exact: true }).click();
       await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Dora Vanishing/.test(e.textContent)));
+    });
+
+    await step("the inspector shows what a save wrote, and keeps what you do meanwhile", async () => {
+      await writeFiles(page, "Cards", [["Nell Editor.png", cardPng({ name: "Nell Editor", description: "Edits.", tags: ["ink"] }, [120, 90, 40], {
+        personality: "Quiet.", alternate_greetings: ["One.", "Two."],
+        character_book: { name: "Press", entries: [{ keys: ["type"], content: "Lead type.", insertion_order: 10, position: "before_char" }] },
+      })]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Nell Editor").waitFor();
+      await tile("Nell Editor").click();
+      const file = async () => (await V.parseCardBytes(await readFile(page, "Cards", "Nell Editor.png"), "Nell Editor.png"));
+      const box = (label) => page.locator("xpath=//label[starts-with(normalize-space(), '" + label + "')]/following::textarea[1]");
+      // The toolbar's Rescan button is back when the save's rescan is over.
+      const idle = () => page.getByRole("button", { name: "Rescan", exact: true }).waitFor();
+      const save = async () => {
+        await page.getByRole("button", { name: /Save to card \(\d+\)/ }).click();
+        await page.getByRole("button", { name: /Saved/ }).first().waitFor();
+        await idle();
+      };
+      // For what the page should come to show: a miss is a failed check, not the end of the run.
+      const eventually = async (fn) => {
+        for (const end = Date.now() + 5000; Date.now() < end; await page.waitForTimeout(50)) {
+          if (await fn().catch(() => false)) return true;
+        }
+        return false;
+      };
+      const boxShows = (b, want) => eventually(async () => (await b.inputValue()) === want);
+      // These fields aren't part of the fingerprint, which stays the same.
+      await page.getByRole("tab", { name: /^Fields/ }).click();
+      await box("Personality").fill("Loud.");
+      await save();
+      t.eq((await file()).data.personality, "Loud.", "the personality went into the file");
+      t.ok(await boxShows(box("Personality"), "Loud."), "and the Fields tab shows it, not the text from before the save");
+      // Building on what's shown must not undo the last save.
+      await page.getByRole("tab", { name: /^Greetings/ }).click();
+      const greeting = (n) => page.locator("xpath=//label[starts-with(normalize-space(), 'Alternate greetings')]/following::textarea[" + n + "]");
+      await greeting(1).fill("One, changed.");
+      await save();
+      t.ok(await boxShows(greeting(1), "One, changed."), "a saved greeting shows");
+      await greeting(2).fill("Two, changed.");
+      await save();
+      t.eq((await file()).data.alternate_greetings, ["One, changed.", "Two, changed."], "and the next save keeps it");
+
+      // Gates hold a write or a folder listing until the test lets go.
+      await page.evaluate(() => {
+        const W = FileSystemWritableFileStream.prototype, D = FileSystemDirectoryHandle.prototype, H = FileSystemFileHandle.prototype;
+        window.__real = { close: W.close, values: D.values, getFile: H.getFile };
+        W.close = async function () { if (window.__writeGate) { window.__atGate = true; await window.__writeGate; } return window.__real.close.call(this); };
+        D.values = function () { const self = this, gate = this.name === "Cards" ? window.__listGate : null;
+          return (async function* () { if (gate) { window.__atList = true; await gate; } yield* window.__real.values.call(self); })(); };
+        H.getFile = async function () { if (window.__readGate) await window.__readGate; return window.__real.getFile.call(this); };
+        window.__gate = (name) => new Promise((go) => { window["__open" + name] = () => { window["__" + name + "Gate"] = null; go(); }; });
+        window.__hold = (name) => { window["__" + name + "Gate"] = window.__gate(name); };
+      });
+      // Changed while the save is being written.
+      const favourite = page.getByRole("button", { name: /Favourite/ }).first();
+      await page.getByRole("tab", { name: /^Fields/ }).click();
+      await box("Personality").fill("Louder.");
+      await page.evaluate(() => { window.__atGate = false; window.__hold("write"); });
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).click();
+      await page.waitForFunction(() => window.__atGate);
+      await favourite.click();
+      await box("Scenario").fill("Typed during the save.");
+      await page.evaluate(() => window.__openwrite());
+      await toast(/Saved into Nell Editor/);
+      await idle();
+      t.ok(/★/.test(await favourite.innerText()), "a favourite set during a save is kept");
+      t.eq(await box("Scenario").inputValue(), "Typed during the save.", "and so is a field typed during it");
+      t.eq((await file()).data.personality, "Louder.", "while what was saved went into the file");
+      await box("Scenario").fill("");
+      t.ok(await eventually(() => page.getByRole("button", { name: /Saved/ }).first().isVisible()), "and clearing that field again leaves nothing to save");
+      // A save that changes the fingerprint, with its rescan still to come (a big folder takes a while).
+      await box("Description").fill("Edits again.");
+      await page.evaluate(() => { window.__atList = false; window.__hold("list"); });
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).click();
+      await page.waitForFunction(() => window.__atList);
+      // Long enough for a page that loses the edit to have lost it.
+      t.ok(await eventually(() => page.getByRole("button", { name: /Saved/ }).first().isVisible()), "the save is done, with the rescan still to come");
+      t.ok(await boxShows(box("Description"), "Edits again."), "before the rescan, the saved text is what shows");
+      t.ok(/★/.test(await favourite.innerText()), "the favourite is still there");
+      await page.getByRole("tab", { name: /^Tags/ }).click();
+      await box("Private notes").fill("Written before the rescan.");
+      await page.evaluate(() => window.__openlist());
+      await idle();
+      t.eq(await box("Private notes").inputValue(), "Written before the rescan.", "a note written before the rescan is still there after it");
+
+      // The lorebook: order and position.
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      const order = page.locator(".lore-order").first();
+      await order.click({ clickCount: 3 });
+      await page.keyboard.type("-5");
+      t.eq(await order.inputValue(), "-5", "a negative order can be typed");
+      await order.click({ clickCount: 3 });
+      await page.keyboard.press("Backspace");
+      await page.keyboard.type("25");
+      t.eq(await order.inputValue(), "25", "and an order typed into an emptied box has no zero in front");
+      await page.getByPlaceholder("e.g. before_char").fill("");
+      await save();
+      const entry = (await file()).raw.data.character_book.entries[0];
+      t.eq([entry.insertion_order, "position" in entry], [25, false], "the order is saved, and an emptied position is gone from the file", entry);
+      t.ok(await boxShows(page.getByPlaceholder("e.g. before_char"), ""), "and stays empty in the box");
+      await page.getByText("+ add entry").click();
+      t.ok(/^Lorebook\s*2$/.test((await page.getByRole("tab", { name: /^Lorebook/ }).innerText()).trim()), "the tab counts an entry just added");
+      await page.getByRole("button", { name: "Revert lorebook" }).click();
+
+      // A card with no lorebook: one started and emptied again leaves nothing to save.
+      await tile("Cora Gardener").click();
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      await page.getByText("+ Start a lorebook").click();
+      await page.locator(".lore-entry").first().getByText("remove").click();
+      t.ok(await page.getByText("No embedded lorebook").isVisible(), "a lorebook started and emptied again is no lorebook");
+      t.ok(await page.getByRole("button", { name: /Saved/ }).first().isVisible(), "and leaves nothing to save");
+
+      // The picture viewer keeps keys from the card behind it, with one picture too.
+      await page.locator(".inspector-picture").click();
+      await page.locator(".picture-viewer").waitFor();
+      const coraFav = await favourite.innerText();
+      await page.keyboard.press("f");
+      await page.waitForTimeout(200);
+      t.eq(await favourite.innerText(), coraFav, "f in the viewer doesn't favourite the card behind it");
+      await page.keyboard.press("ArrowLeft");
+      await page.waitForTimeout(200);
+      t.ok(await page.locator(".picture-viewer").isVisible(), "an arrow key with one picture leaves the viewer up, on this card");
+      await page.keyboard.press("Escape");
+      await page.locator(".picture-viewer").waitFor({ state: "detached" });
+      t.ok(await page.getByText(/^Tags & Notes/).isVisible(), "Escape closes the viewer, not the inspector");
+
+      // A picture still being read doesn't open over the next card.
+      await page.evaluate(() => window.__hold("read"));
+      await page.locator(".inspector-picture").click();
+      await tile("Ada Clockmaker").click();
+      await page.evaluate(() => window.__openread());
+      await page.waitForTimeout(500);
+      t.eq(await page.locator(".picture-viewer").count(), 0, "moving to another card drops the picture being read");
+
+      // Only says copied when it was.
+      await page.evaluate(() => {
+        window.__realExec = document.execCommand;
+        navigator.clipboard.writeText = () => Promise.reject(new Error("refused"));
+        document.execCommand = () => false;
+      });
+      await page.getByRole("button", { name: "Copy path" }).click();
+      t.ok(await eventually(() => page.getByText(/Couldn't copy the path/).first().isVisible()), "a refused copy says so");
+      t.eq(await page.getByText("Path copied").count(), 0, "and doesn't say it was copied");
+      await page.evaluate(() => {
+        navigator.clipboard.writeText = () => Promise.resolve();
+        document.execCommand = window.__realExec;
+        const W = FileSystemWritableFileStream.prototype, D = FileSystemDirectoryHandle.prototype, H = FileSystemFileHandle.prototype;
+        W.close = window.__real.close; D.values = window.__real.values; H.getFile = window.__real.getFile;
+      });
+      await page.getByRole("button", { name: "Copy path" }).click();
+      await toast(/Path copied/);
+
+      // Tidy up for the steps after this one.
+      await page.evaluate(async () => {
+        const c = await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards");
+        await c.removeEntry("Nell Editor.png");
+      });
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Nell Editor/.test(e.textContent)));
     });
 
     await step("a card in a Reference folder can't be saved to its file", async () => {

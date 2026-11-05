@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.21";
+const APP_VERSION = "1.6.22";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -990,6 +990,12 @@ function fmtDate(ts) {
   return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
 }
 
+/** A card's creation_date as milliseconds: cards hold it in seconds or in milliseconds. */
+function cardDateMs(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && Math.abs(n) < 1e11 ? n * 1000 : n;
+}
+
 function fmtDateShort(ts) {
   if (!ts) return "—";
   const d = new Date(ts);
@@ -1022,6 +1028,20 @@ function uid() {
 }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+/** Text onto the clipboard, or the old way if that's refused. Says whether it worked. */
+async function copyToClipboard(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e2) { /* nothing more to try */ }
+    document.body.removeChild(ta);
+    return ok;
+  }
+}
 
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -3409,6 +3429,32 @@ function effectiveTags(rec, edit) {
 }
 
 /**
+ * The edit record once a save has written `saved` into the file. `live` is the
+ * record as it is now: anything changed since the save began isn't in the file,
+ * so it stays as an edit, and the vault-only things are as they are now.
+ * Pending AI suggestions are kept; a field rewrite remembers the text it was
+ * made from, so one whose field this save changed simply can't be accepted any
+ * more (the proposals panel says so) rather than overwriting the saved text.
+ */
+function editAfterSave(saved, live, fp) {
+  const cur = live || saved;
+  const out = {
+    fingerprint: fp,
+    fields: {}, tags: null, vaultTags: vaultTagsOf(cur), flags: flagsOf(cur),
+    notes: cur.notes || "", rating: cur.rating || 0, favorite: !!cur.favorite,
+    updatedAt: Date.now(),
+  };
+  const was = saved.fields || {}, now = cur.fields || {};
+  for (const k of Object.keys(now)) if (now[k] !== was[k]) out.fields[k] = now[k];
+  if (Array.isArray(cur.tags) && cur.tags !== saved.tags) out.tags = cur.tags;
+  if (cur.greetings && cur.greetings !== saved.greetings) out.greetings = cur.greetings;
+  if (cur.lorebook && cur.lorebook !== saved.lorebook) out.lorebook = cur.lorebook;
+  const pending = proposalOf(cur);
+  if (proposalCount(pending) > 0) out.aiProposal = pending;
+  return out;
+}
+
+/**
  * The patch that puts `list` into the vault's edits as the card's tags, or
  * { tags: null } (no edit) when it's the file's own list again.
  */
@@ -3503,6 +3549,8 @@ function lorebookPatch(body, lb) {
   const next = lb ? cleanLorebook(lb) : null;
   const orig = (body && body.lorebook) || null;
   if (!next && !orig) return { lorebook: null };
+  // Started here and emptied again: nothing to write, not an empty book.
+  if (!orig && !next.entries.length && !next.name && !next.description) return { lorebook: null };
   return { lorebook: next && orig && sameLorebook(next, orig) ? null : next };
 }
 
@@ -3675,6 +3723,12 @@ function mergeLorebookForSave(rawBook, lb) {
     }
     const out = Object.assign({}, orig);
     for (const k of Object.keys(mine)) if (mine[k] !== undefined) out[k] = mine[k];
+    // The box shows position as text. Unchanged, it stays as the file has it
+    // (a number, in some cards); emptied, it goes from the entry.
+    if (has(orig, "position")) {
+      if (asStr(orig.position) === (e.position || "")) out.position = orig.position;
+      else if (!e.position) delete out.position;
+    }
     // Keep alternative spellings some front ends use in step with the edited values.
     if (has(orig, "key")) out.key = mine.keys;
     if (has(orig, "keysecondary")) out.keysecondary = mine.secondary_keys;
@@ -9344,13 +9398,16 @@ function PictureViewer({ items, start, still, onClose }) {
   const n = items.length, it = items[i];
   const step = (d) => setI((x) => (x + d + n) % n);
   useEffect(() => {
-    // Ahead of the vault's own keys, which would close the card or move to the next.
+    // Ahead of the vault's own keys, none of which may reach the card behind:
+    // they'd close it or move to the next (with one picture too), favourite it
+    // or send it. The browser's own keys still work.
     const h = (e) => {
+      e.stopImmediatePropagation();
       if (e.key === "Escape") onClose();
       else if (e.key === "ArrowRight" && n > 1) step(1);
       else if (e.key === "ArrowLeft" && n > 1) step(-1);
       else return;
-      e.preventDefault(); e.stopImmediatePropagation();
+      e.preventDefault();
     };
     window.addEventListener("keydown", h, true);
     return () => window.removeEventListener("keydown", h, true);
@@ -9428,7 +9485,7 @@ function CardGallery({ rec, roots, still, onView }) {
       setState({ loading: false, items: r.items, others: r.others, err: "" });
     }).catch((e) => { if (!dead) setState({ loading: false, items: [], others: 0, err: e.message }); });
     return () => { dead = true; dropPictureItems(got); };
-  }, [rec.id, rec.fp]);
+  }, [rec.id, rec.fp, rec.scannedAt]);
   if (state.loading) return <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Reading the card file…</div>;
   if (state.err) return <div style={{ fontSize: 12, color: "var(--accent-red)" }}>Couldn't read the card file: {state.err}</div>;
   const extra = state.items.filter((it) => it.key !== "card").length;
@@ -12420,6 +12477,23 @@ function ListInput({ value, onChange, placeholder, className }) {
   );
 }
 
+/**
+ * A lorebook entry's order. What you type is kept as you type it, and a number
+ * goes in as soon as there is one: "-" on its way to "-5" isn't one yet.
+ */
+function OrderInput({ value, onChange, style }) {
+  const [draft, setDraft] = useState(null);
+  return (
+    <input type="number" className="lore-order" value={draft === null ? (value || 0) : draft} style={style}
+      onChange={(ev) => {
+        const v = ev.target.value;
+        setDraft(v);
+        if (v !== "" && Number.isFinite(Number(v))) onChange(Number(v));
+      }}
+      onBlur={() => setDraft(null)} />
+  );
+}
+
 /* One lorebook entry in the editor below. */
 const LORE_ROW_KEYS = ["comment", "enabled", "constant", "selective", "content", "insertionOrder", "position", "tokens"];
 
@@ -12457,7 +12531,7 @@ const LoreEntryRow = React.memo(function LoreEntryRow({ e, i, rowApi }) {
         style={Object.assign({}, inputBase, { resize: "vertical", lineHeight: 1.55, fontSize: 11.5 })} />
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
         <label style={small}>order
-          <input type="number" value={e.insertionOrder || 0} onChange={(ev) => setEntry(i, { insertionOrder: Number(ev.target.value) || 0 })}
+          <OrderInput value={e.insertionOrder} onChange={(n) => setEntry(i, { insertionOrder: n })}
             style={Object.assign({}, inputBase, { padding: "2px 5px", fontSize: 10.5, width: 64 })} /></label>
         <label style={small}>position
           <input value={e.position || ""} onChange={(ev) => setEntry(i, { position: ev.target.value })} placeholder="e.g. before_char"
@@ -12533,14 +12607,16 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
 
   // Reloaded when the file's content changes too (Save to card, an edit made
   // outside the vault), or the Fields tab keeps showing the text from before
-  // the save until another card is picked. Only a different card blanks it.
+  // the save until another card is picked. The fingerprint alone won't do: it's
+  // only the name, description and first message. scannedAt changes whenever
+  // the file is read again. Only a different card blanks it.
   const bodyOf = useRef(null);
   useEffect(() => {
     let dead = false;
     if (bodyOf.current !== rec.id) { bodyOf.current = rec.id; setLoading(true); setBody(null); }
     dbGet(STORE_BODIES, rec.id).then((b) => { if (!dead) { setBody(b || null); setLoading(false); } });
     return () => { dead = true; };
-  }, [rec.id, rec.fp]);
+  }, [rec.id, rec.fp, rec.scannedAt]);
 
   useEffect(() => { setTab("overview"); }, [rec.id]);
 
@@ -12555,10 +12631,14 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
     setViewer(null);
   }, []);
   useEffect(() => closeViewer, [rec.id]);
+  const showing = useRef(rec.id);
+  showing.current = rec.id;
   const openPicture = async () => {
     if (!rec.hasThumb) return;
     try {
       const got = await loadPictureItems(rec, roots);
+      // You've moved to another card while the file was read.
+      if (showing.current !== rec.id) { dropPictureItems(got.items); return; }
       if (!got.items.length) { onToast("No picture could be read from this card's file", "warm"); return; }
       setViewer({ items: got.items, start: 0, owned: true });
     } catch (e) { onToast("Couldn't read the card file: " + e.message, "red"); }
@@ -12578,7 +12658,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
       .then((c) => { if (!dead) { setRawCard(c); setRawState(c ? "read" : "it has no card the vault can read"); } })
       .catch((e) => { if (!dead) setRawState((e && e.message) || "unknown error"); });
     return () => { dead = true; };
-  }, [tab, rec.id, rec.fp]);
+  }, [tab, rec.id, rec.fp, rec.scannedAt]);
   const rawWarning = rawState === "read" ? ""
     : (rawState === "reading" ? "Still reading the card file." : "The card file couldn't be read: " + rawState + ".") +
       " Until it is, this JSON leaves out what the vault doesn't keep itself, such as lorebook entry extensions, V3 assets and other extra fields.";
@@ -12682,7 +12762,10 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
           <SmallBtn color="warm" active={!!(edit && edit.favorite)} onClick={() => onPatchEdit({ favorite: !(edit && edit.favorite) })}>
             {edit && edit.favorite ? "★ Favourite" : "☆ Favourite"}
           </SmallBtn>
-          <SmallBtn color="cyan" onClick={() => { navigator.clipboard && navigator.clipboard.writeText((root ? root.name : "") + "/" + rec.rel); onToast("Path copied", "cyan"); }}>Copy path</SmallBtn>
+          <SmallBtn color="cyan" onClick={async () => {
+            const ok = await copyToClipboard((root ? root.name : "") + "/" + rec.rel);
+            onToast(ok ? "Path copied" : "Couldn't copy the path: this browser refused", ok ? "cyan" : "warm");
+          }}>Copy path</SmallBtn>
           <SmallBtn color="purple" disabled={!body} onClick={() => exportCopy(null)}
             title={"The card as the vault shows it, as a " + CARD_FORMATS[cardFormatOf(rec.file)].label + " file like its own"}>Download copy</SmallBtn>
           <select aria-label="Download as" value="" disabled={!body} onChange={(e) => { const f = e.target.value; e.target.value = ""; if (f) exportCopy(null, f); }}
@@ -12719,8 +12802,9 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
       <div role="tablist" style={{ display: "flex", flexWrap: "wrap", borderBottom: "1px solid var(--border-subtle)", flexShrink: 0 }}>
         {TABS.map((t) => {
           const on = tab === t.key;
-          const badge = t.key === "lore" ? rec.loreCount
-            : t.key === "greet" ? (greetings.length + (body && body.first_mes ? 1 : 0))
+          const shownBook = body ? effectiveLorebook(body, edit) : null;
+          const badge = t.key === "lore" ? (body ? (shownBook ? shownBook.entries.length : 0) : rec.loreCount)
+            : t.key === "greet" ? (greetings.length + (effectiveField(body, edit, "first_mes") ? 1 : 0))
             : t.key === "tags" ? tags.length + vaultTags.length + flags.length
             : t.key === "ai" ? proposalCount(edit && edit.aiProposal)
             : t.key === "gallery" ? rec.assetCount
@@ -12775,7 +12859,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
               <label style={tinyLabel}>File</label>
               <StatRow k="Size" v={fmtBytes(rec.size)} />
               <StatRow k="Modified" v={fmtDate(rec.mtime)} />
-              <StatRow k="Card created" v={body.creation_date ? fmtDate(body.creation_date * (String(body.creation_date).length <= 10 ? 1000 : 1)) : "—"} />
+              <StatRow k="Card created" v={body.creation_date ? fmtDate(cardDateMs(body.creation_date)) : "—"} />
               <StatRow k="Format" v={rec.ext.toUpperCase() + (rec.specRaw ? " · " + rec.specRaw : "")} />
               <StatRow k="Lorebook entries" v={fmtNum(rec.loreCount)} />
               <StatRow k="Alternate greetings" v={fmtNum(rec.altCount)} />
@@ -12822,9 +12906,10 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
         {!loading && body && tab === "fields" ? (
           <Fragment>
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.6 }}>
-              Edits are stored in the vault only. The original file on disk is never modified — use
+              Edits stay in the vault until you use
+              <strong style={{ color: "var(--text-secondary)" }}> Save to card</strong>, which writes them into the card file. Use
               <strong style={{ color: "var(--text-secondary)" }}> Download copy </strong>
-              or <strong style={{ color: "var(--text-secondary)" }}>Copy to…</strong> to write a new card out.
+              or <strong style={{ color: "var(--text-secondary)" }}>Copy to…</strong> to write a new card out and leave the file as it is.
             </div>
             <Field label="Name">
               <input value={effectiveField(body, edit, "name") || ""} onChange={(e) => setField("name", e.target.value)}
@@ -12970,10 +13055,11 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
         {!loading && body && tab === "raw" ? (
           <Fragment>
             <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-              <SmallBtn color="cyan" onClick={() => {
+              <SmallBtn color="cyan" onClick={async () => {
                 if (!rawGo("Copy it")) return;
-                navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2));
-                onToast("V3 JSON copied" + (rawWarning ? " (without the file's extra fields)" : ""), rawWarning ? "warm" : "cyan");
+                const ok = await copyToClipboard(JSON.stringify(buildV3Payload(body, edit, rawCharacterBook(rawCard), rawCard), null, 2));
+                if (!ok) onToast("Couldn't copy the JSON: this browser refused. Download JSON still works", "warm");
+                else onToast("V3 JSON copied" + (rawWarning ? " (without the file's extra fields)" : ""), rawWarning ? "warm" : "cyan");
               }}>Copy V3 JSON</SmallBtn>
               <SmallBtn color="muted" onClick={() => {
                 if (!rawGo("Download it")) return;
@@ -15862,27 +15948,25 @@ function App() {
     const body = await dbGet(STORE_BODIES, rec.id);
     const res = await saveCardToFile(rec, body, edit, roots, { backup, keep });
     const newFp = await contentFingerprint(res.data);
-    const carried = {
-      fingerprint: newFp,
-      fields: {}, tags: null, vaultTags: vaultTagsOf(edit), flags: flagsOf(edit),
-      notes: edit.notes || "", rating: edit.rating || 0, favorite: !!edit.favorite,
-      updatedAt: Date.now(),
-    };
-    // Anything else on the edit record has to be listed here or it is dropped
-    // on the floor the first time a card is saved. Pending AI suggestions are
-    // kept. A field rewrite remembers the text it was made from, so one whose
-    // field this save changed simply can't be accepted any more (the
-    // proposals panel says so) rather than overwriting the saved text.
-    const pending = proposalOf(edit);
-    if (proposalCount(pending) > 0) carried.aiProposal = pending;
+    // The card as the file now has it, straight away: the rescan that follows
+    // can take a while on a big folder. Until then the inspector would show the
+    // old text with the edits gone, and whatever you typed would go to the old
+    // fingerprint and be lost.
+    await dbPut(STORE_BODIES, res.data, rec.id);
+    // Anything else on the edit record has to be listed in editAfterSave or it
+    // is dropped on the floor the first time a card is saved.
     setEditsMap((prev) => {
       const next = new Map(prev);
+      const carried = editAfterSave(edit, prev.get(rec.fp), newFp);
       if (newFp !== rec.fp) next.delete(rec.fp);
       next.set(newFp, carried);
+      dbPut(STORE_EDITS, carried);
       return next;
     });
+    setCards((prev) => prev.map((c) => (c.id === rec.id
+      ? Object.assign({}, c, { fp: newFp, scannedAt: Date.now(), name: res.data.name || c.name, tags: res.data.tags })
+      : c)));
     if (newFp !== rec.fp) await dbDel(STORE_EDITS, rec.fp);
-    await dbPut(STORE_EDITS, carried);
     // Anything else keyed by fingerprint has to move with it. Cached AI
     // answers are re-keyed and marked stale rather than left to orphan.
     await migrateAiNotes(rec.fp, newFp);
@@ -17648,7 +17732,9 @@ function App() {
         { sep: true },
         {
           label: "Copy file path", icon: "\u{1F4CE}",
-          onClick: () => navigator.clipboard && navigator.clipboard.writeText((srcRoot ? srcRoot.name : "") + "/" + rec.rel),
+          onClick: async () => {
+            if (!(await copyToClipboard((srcRoot ? srcRoot.name : "") + "/" + rec.rel))) showToast("Couldn't copy the path: this browser refused", "warm");
+          },
         },
         { sep: true },
         {

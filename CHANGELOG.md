@@ -8,6 +8,20 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.22
+
+- **The card panel shows what a save wrote.** After **Save to card**, a change to anything but the name, description or first message (personality, scenario, greetings, lorebook and the rest) went into the file, but the card panel went on showing the old text until you picked another card. And it could cost you the save: change another greeting or lorebook entry while the old ones were showing, save again, and the old text went back into the file. The panel now shows the saved card as soon as the save is done, and later edits build on it.
+- **Nothing you do while a card is saving gets lost.** A favourite, note, rating or field changed while the save was being written was dropped when it finished. And after a save that changed the name, description or first message, the card panel showed the old text and lost your favourite and notes from view until the rescan was over (a while, on a big folder), and a note written in that time was lost. All of that now stays.
+- **An emptied lorebook position is saved.** Clearing an entry's **position** looked done, but the save kept the old one in the file. It's now gone from the file. A position the file holds as a number also stays a number when another part of the book is saved, rather than turning into text.
+- **A lorebook entry's order can be negative.** Typing "-5" into the **order** box gave "05", because the box put a 0 back as soon as it held only "-". Typing into a box you'd emptied doesn't leave a 0 in front any more either. Emptying the box and leaving it now keeps the number it had.
+- **A lorebook you started and emptied again is no lorebook.** **+ Start a lorebook** followed by removing its only entry left **Save to card (1)** waiting, and saving wrote an empty lorebook into the card. The card is now back as it was.
+- **The Lorebook and Greetings tabs count what they show.** The Lorebook tab's number was the file's, so it didn't change as you added or removed entries; the Greetings tab didn't count a first message you'd just written.
+- **Keys no longer reach the card behind a full-size picture.** With a picture open, **f** favourited the card behind it, **s** sent it to your front end, "/" went to the search box, and with only one picture the arrow keys moved to another card and closed the picture. They now do nothing until it's closed.
+- **A picture opens only for the card you're on.** Clicking a card's picture and moving to another card while its file was still being read opened the first card's picture over the second.
+- **Copy path and Copy V3 JSON say so when the copy didn't work.** When the browser refused, they tried nothing else and still said it was copied. They now try the older way too, and tell you if that didn't work either. **Copy file path** in the right-click menu does the same.
+- **A card's created date in seconds with a fraction shows correctly.** The Overview showed such a card as made in January 1970.
+- **The Fields tab no longer says the file is never changed.** It said so right below the **Save to card** button. It now says what that button does.
+
 ## 1.6.21
 
 - **A deep search no longer shows cards for words you've already typed over.** With **Deep text** on, the cards found by the last words searched stayed in the grid for a moment after you typed other words, until the next search had run (a fraction of a second), along with their "deep hits" count. Only what the words in the box now find is shown.
