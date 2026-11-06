@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.22";
+const APP_VERSION = "1.6.23";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -4000,6 +4000,7 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
    ════════════════════════════════════════════ */
 
 const DIFF_WORD_CAP = 2500;   // beyond this, fall back to a paragraph diff
+const DIFF_CELL_CAP = 25000000;   // beyond this, the changed part is shown as replaced whole
 
 function tokenizeWords(s) {
   return String(s || "").split(/(\s+)/).filter((t) => t.length);
@@ -4031,7 +4032,11 @@ function diffTokens(a, b) {
   const out = [];
   if (head) out.push({ t: "same", text: a.slice(0, head).join("") });
 
-  if (A.length && B.length) {
+  // The table below is A × B: a hostile card with tens of thousands of
+  // paragraphs would freeze the tab, or run it out of memory.
+  if (A.length && B.length && A.length * B.length > DIFF_CELL_CAP) {
+    out.push({ t: "del", text: A.join("") }, { t: "add", text: B.join("") });
+  } else if (A.length && B.length) {
     const rows = A.length + 1, cols = B.length + 1;
     const dp = new Uint32Array(rows * cols);
     for (let i = A.length - 1; i >= 0; i--) {
@@ -4704,7 +4709,7 @@ function buildCardContext(rec, body, edit, cfg, fieldKeys) {
   if (greetCount) counts.push(greetCount + " alternate greeting" + (greetCount === 1 ? "" : "s"));
   if (counts.length) lines.push("", "## Also on this card (not included)", counts.join("; "));
   lines.push("</card>");
-  return { text: lines.join("\n"), trimmed, loreCount, greetCount, name, cardTags };
+  return { text: lines.join("\n"), trimmed, loreCount, greetCount, name, cardTags, budget: s.contextChars };
 }
 
 /** The one field Tighten rewrites, whole, with just the name for context. */
@@ -4786,7 +4791,7 @@ function aiBuildRequest(kind, cfg, rec, body, edit, knownTags, opts) {
     loreCount: 0, greetingCount: 0, field: "",
   };
 
-  let cardBlock, trimmed = [], original = "";
+  let cardBlock, trimmed = [], original = "", budget = 0;
   if (action.perField) {
     if (AI_TIGHTEN_FIELDS.indexOf(field) < 0) return { error: "Pick a field to tighten." };
     const fc = buildFieldContext(rec, body, edit, field);
@@ -4809,7 +4814,7 @@ function aiBuildRequest(kind, cfg, rec, body, edit, knownTags, opts) {
     // Leave about 800 tokens for the instructions and the system prompt.
     const fit = Object.assign({}, s, { contextChars: Math.min(s.contextChars, aiRoomChars(s, 800)) });
     const ctx = buildCardContext(rec, body, edit, fit, keys);
-    cardBlock = ctx.text; trimmed = ctx.trimmed;
+    cardBlock = ctx.text; trimmed = ctx.trimmed; budget = ctx.budget;
     vars.name = ctx.name; vars.loreCount = ctx.loreCount; vars.greetingCount = ctx.greetCount;
   }
 
@@ -4821,11 +4826,23 @@ function aiBuildRequest(kind, cfg, rec, body, edit, knownTags, opts) {
   if (tooBig && action.perField) return { error: tooBig + " Use a model with more context, or lower Max tokens out." };
   return {
     kind, field, system, user, original, tooBig,
-    missing: r.missing, trimmed,
+    missing: r.missing, trimmed, budget,
     estimate: aiEstimateRequest(system, user, s.maxTokens),
     hash: aiHash(kind + "\n" + field + "\n" + system + "\n" + user),
     promptVersion: AI_PROMPT_VERSION,
   };
+}
+
+/**
+ * What the ✦ AI tab says is sent for an action, from the same choices
+ * aiBuildRequest makes: your own prompts read their own fields.
+ */
+function aiSentSummary(action, ai, budget) {
+  if (action.perField) return "Sent: the name and this one field, in full.";
+  const fields = action.custom
+    ? CARD_FIELDS.filter((f) => action.allFields || (action.fields || []).indexOf(f.key) >= 0).map((f) => f.label.toLowerCase()).join(", ")
+    : "description, personality, scenario, first message" + (ai.includeExamples ? ", example dialogue" : "");
+  return "Sent: name, card tags, " + fields + ", within " + fmtNum(budget || ai.contextChars) + " characters.";
 }
 
 /* ── the answer cache ────────────────────────────────────────────────── */
@@ -5000,7 +5017,9 @@ function parseCritique(text) {
   out.verdict = typeof data.verdict === "string" ? data.verdict.trim().slice(0, 400) : "";
   for (const f of data.findings) {
     if (!f) continue;
-    const note = String((typeof f === "string" ? f : f.note) || "").trim();
+    // Only text is a note: an object would show as "[object Object]".
+    const raw = typeof f === "string" ? f : f.note;
+    const note = typeof raw === "string" || typeof raw === "number" ? String(raw).trim() : "";
     if (!note) continue;
     let flag = String((f && f.flag) || "").trim();
     if (AI_CRITIQUE_FLAGS.indexOf(flag) < 0) flag = "review";
@@ -5010,7 +5029,12 @@ function parseCritique(text) {
 }
 
 function aiCleanTag(raw) {
-  const t = String(raw == null ? "" : raw).replace(/^[\s\-*\d.)"'#]+|["'.\s]+$/g, "").trim();
+  // An object or a list isn't a tag, whatever it would turn into as text.
+  if (typeof raw !== "string" && typeof raw !== "number") return "";
+  // Bullets and quotes go. Digits go only when they number a list line:
+  // "1950s", "18+" and "3D" are tags.
+  const t = String(raw).replace(/^[\s\-*.)"'#•]+/, "").replace(/^\d+(?:\.(?=\s|\D)\s*|\)\s*)/, "")
+    .replace(/^[\s\-*"'#•]+/, "").replace(/[*"'.\s]+$/, "").trim();
   if (!t || t.length > 40 || t.split(/\s+/).length > 4) return "";
   return t;
 }
@@ -5023,8 +5047,10 @@ function aiCleanTag(raw) {
 function parseTagSuggestions(text, existing, cap) {
   const data = parseAiJson(text);
   let list;
-  if (data && Array.isArray(data.tags)) list = data.tags;
-  else {
+  if (data && Array.isArray(data.tags)) {
+    list = data.tags;
+    if (list.length && !list.some((x) => typeof x === "string" || typeof x === "number")) return null;
+  } else {
     // JSON in another shape, or cut off, isn't a list either: its pieces
     // would be tags like {"tags": ["fantasy
     if (data) return null;
@@ -5072,18 +5098,31 @@ function parseRewrite(text, original) {
   // The block is the one the closing tag ends: a reply that names the tag
   // first ("here is the <rewrite> block:") starts at its last opening tag.
   const end = s.slice(first).search(/<\/rewrite>/i);
-  const open = end < 0 ? first : first + s.slice(first, first + end).toLowerCase().lastIndexOf("<rewrite>");
+  let open = first;
+  if (end >= 0) {
+    const opener = /<rewrite>/gi;
+    const head = s.slice(first, first + end);
+    for (let m = opener.exec(head); m; m = opener.exec(head)) open = first + m.index;
+  }
   const rest = s.slice(open + "<rewrite>".length);
   const close = rest.search(/<\/rewrite>/i);
   if (close < 0) {
     return { ok: false, error: "The rewrite has no closing tag, so it was probably cut off. Nothing was proposed. Raise Max tokens out and try again." };
   }
-  const rewrite = rest.slice(0, close).replace(/^[ \t]*\n/, "").replace(/\s+$/, "");
-  const nm = rest.slice(close).match(/<notes>([\s\S]*?)(<\/notes>|$)/i);
+  const orig = String(original || "");
+  let rewrite = rest.slice(0, close).replace(/^[ \t]*\n/, "").replace(/\s+$/, "");
+  // The model read <card written as &lt;card (aiFenceText); it mustn't reach the card like that.
+  if (/<\/?card\b/i.test(orig) && !/&lt;\/?card\b/i.test(orig)) rewrite = rewrite.replace(/&lt;(\/?card\b)/gi, "<$1");
+  let nm = rest.slice(close).match(/<notes>([\s\S]*?)(<\/notes>|$)/i);
+  // Notes written before the closing tag aren't part of the field.
+  if (!/<notes>/i.test(orig)) {
+    const inner = rewrite.match(/\s*<notes>([\s\S]*?)<\/notes>$/i);
+    if (inner) { rewrite = rewrite.slice(0, inner.index); nm = nm || inner; }
+  }
   const notes = nm ? nm[1].trim().slice(0, 300) : "";
   if (!rewrite.trim()) return { ok: false, error: "The rewrite came back empty. Nothing was proposed." };
-  const orig = String(original || "");
-  if (rewrite.trim() === orig.trim()) return { ok: true, unchanged: true, rewrite, notes, warnings: [] };
+  const sameText = (x) => x.replace(/\r\n?/g, "\n").trim();
+  if (sameText(rewrite) === sameText(orig)) return { ok: true, unchanged: true, rewrite, notes, warnings: [] };
 
   const warnings = [];
   const before = aiMacrosIn(orig), after = aiMacrosIn(rewrite);
@@ -5155,6 +5194,8 @@ function interpretAiResult(acc, ctx) {
 
   if (action.output === "vaultTags") {
     const tags = parseTagSuggestions(text, c.existingTags || [], 8);
+    // A plain list cut off mid-word still reads as a list, with half a tag at the end.
+    if (tags !== null && budgetHit && !parseAiJson(text)) return fail("The answer was cut off before it finished." + budgetNote);
     if (tags === null) {
       if (budgetHit) return fail("The answer was cut off before its JSON finished." + budgetNote);
       return { ok: true, text, think, cutOff: false, parsed: { tags: [] }, proposal: null, offFormat: true };
@@ -12390,9 +12431,11 @@ function InspectorAiTab({ rec, body, edit, ai, relay, tagIndex, onRun, onClearNo
 
       {req && req.trimmed && req.trimmed.length && !busy ? (
         <div style={{ fontSize: 10, color: "var(--accent-warm)", marginBottom: 9, lineHeight: 1.6 }}>
-          Trimmed to fit the context budget ({fmtNum(ai.contextChars)} characters):{" "}
+          Trimmed to fit the context budget ({fmtNum(req.budget)} characters):{" "}
           {req.trimmed.map((t) => t.label + " " + fmtNum(t.sent) + " of " + fmtNum(t.total)).join("; ")}.
-          The model is told where each cut is. Raise the budget in the ✦ AI panel if it matters.
+          The model is told where each cut is. {req.budget < ai.contextChars
+            ? "This model's context sets that limit (Model context in the ✦ AI panel)."
+            : "Raise the budget in the ✦ AI panel if it matters."}
         </div>
       ) : null}
 
@@ -12447,10 +12490,7 @@ function InspectorAiTab({ rec, body, edit, ai, relay, tagIndex, onRun, onClearNo
       ) : null}
 
       <div style={{ fontSize: 10, color: "var(--text-muted)", lineHeight: 1.6, marginTop: 14 }}>
-        {action.perField
-          ? "Sent: the name and this one field, in full."
-          : "Sent: name, card tags, description, personality, scenario, first message" +
-            (ai.includeExamples ? ", example dialogue" : "") + ", within " + fmtNum(ai.contextChars) + " characters."}
+        {aiSentSummary(action, ai, req && req.budget)}
         {" "}Lorebooks and alternate greetings are counted, never sent. Nothing here can change the card file.
       </div>
     </Fragment>
@@ -15953,6 +15993,9 @@ function App() {
     // old text with the edits gone, and whatever you typed would go to the old
     // fingerprint and be lost.
     await dbPut(STORE_BODIES, res.data, rec.id);
+    // Cached AI answers move first: the ✦ AI tab reads them as soon as the card
+    // has its new fingerprint.
+    await migrateAiNotes(rec.fp, newFp);
     // Anything else on the edit record has to be listed in editAfterSave or it
     // is dropped on the floor the first time a card is saved.
     setEditsMap((prev) => {
@@ -15967,9 +16010,6 @@ function App() {
       ? Object.assign({}, c, { fp: newFp, scannedAt: Date.now(), name: res.data.name || c.name, tags: res.data.tags })
       : c)));
     if (newFp !== rec.fp) await dbDel(STORE_EDITS, rec.fp);
-    // Anything else keyed by fingerprint has to move with it. Cached AI
-    // answers are re-keyed and marked stale rather than left to orphan.
-    await migrateAiNotes(rec.fp, newFp);
     return res;
   }, [roots]);
 
@@ -17150,6 +17190,8 @@ function App() {
    * Returns `{ ok: true, note, outcome }` or `{ ok: false, error, raw, think }`.
    * Cancelling via `opts.signal` rejects with an AbortError.
    */
+  const recNow = useRef(recById);
+  recNow.current = recById;
   const runAi = useCallback(async (rec, body, edit, kind, opts) => {
     opts = opts || {};
     const settingsNow = aiSettings;
@@ -17202,7 +17244,11 @@ function App() {
     if (!outcome.ok) return outcome;
 
     const model = acc.model || aiRelay.model;
-    const note = makeAiNote(rec.fp, kind, aiRelay.model, req.hash, outcome.text, {
+    // The card may have been saved while the model was answering (a bulk run
+    // carries on through that), so the answer goes where the card is now. A
+    // suggestion made from the old text then shows as out of date.
+    const fpNow = (recNow.current.get(rec.id) || rec).fp;
+    const note = makeAiNote(fpNow, kind, aiRelay.model, req.hash, outcome.text, {
       field: req.field, original: req.original, answeredBy: model,
       usage: acc.usage, finish: acc.finish, cutOff: !!outcome.cutOff,
       thinkChars: outcome.think.length, estimate: req.estimate, trimmed: req.trimmed,
@@ -17217,7 +17263,7 @@ function App() {
     const prop = outcome.proposal;
     if (prop && settingsNow.writeMode !== "off") {
       const meta = Object.assign({}, prop.meta, { model });
-      patchEdit(rec.fp, (cur) => {
+      patchEdit(fpNow, (cur) => {
         const merged = Object.assign({}, cur, { aiProposal: mergeProposal(cur.aiProposal, prop.bucket, prop.value, meta) });
         // The one thing ever applied without asking: vault-only tags, which
         // never leave the vault.
@@ -17286,7 +17332,8 @@ function App() {
     let sent = 0, streak = 0;
     stopRef.current = { stop: false };
     for (let i = 0; i < recs.length; i++) {
-      const rec = recs[i];
+      // As it is when its turn comes: saving it meanwhile gives it a new fingerprint.
+      const rec = recNow.current.get(recs[i].id) || recs[i];
       if (stopRef.current.stop) { stats.stopped = true; break; }
       setScan({ running: true, done: i, total: recs.length, label: rec.name, rootName: "✦ " + action.label });
       const body = await dbGet(STORE_BODIES, rec.id);

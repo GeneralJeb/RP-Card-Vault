@@ -1316,6 +1316,143 @@ async function main() {
       t.ok(!(await rootKeys()).includes("oldbig"), "the inner registration is gone");
     });
 
+    // This one reloads its own page, which a real Edge 153 answers with its notice.
+    if (!reloadCrashes) await step("AI answers follow a card through a save", async () => {
+      // A fake model behind the real relay. A request can be held open.
+      const calls = [];
+      let hold = null;
+      let release = () => {};
+      const model = http.createServer(async (req, res) => {
+        let raw = "";
+        for await (const c of req) raw += c;
+        if (req.url === "/v1/models") { res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ data: [{ id: "mock" }] })); }
+        const user = JSON.parse(raw).messages[1].content;
+        const name = (/Name: (\w+)/.exec(user) || [])[1];
+        calls.push(name);
+        if (hold) await hold;
+        const text = /JSON only/.test(user) ? '{"tags":["' + name + 'tag"]}' : "The answer about " + name + ".";
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write("data: " + JSON.stringify({ model: "mock", choices: [{ delta: { content: text }, finish_reason: null }] }) + "\n\n");
+        res.write("data: " + JSON.stringify({ model: "mock", choices: [{ delta: {}, finish_reason: "stop" }] }) + "\n\n");
+        res.end("data: [DONE]\n\n");
+      });
+      await new Promise((r) => model.listen(0, "127.0.0.1", r));
+      const base = "http://127.0.0.1:" + model.address().port + "/v1";
+      const ctx2 = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+      const p = await ctx2.newPage();
+      p.setDefaultTimeout(15000);
+      p.on("dialog", (d) => d.accept());
+      p.on("pageerror", (e) => problems.push("page error: " + e.message));
+      await p.addInitScript(() => { window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle("Cards", { create: true }); });
+      const relayConfig = (o) => p.evaluate((o) => fetch("/__vault/ai/config", { method: "POST", headers: { "Content-Type": "application/json", "X-Vault": "1" }, body: JSON.stringify(o) }).then((r) => r.status), o);
+      try {
+        await p.goto(url);
+        await p.locator("#root[data-mounted='1']").waitFor({ timeout: 60000 });
+        await relayConfig({ baseUrl: base, model: "mock" });
+        await p.evaluate((set) => new Promise((res, rej) => {
+          const r = indexedDB.open("rpCardVault");
+          r.onerror = () => rej(r.error);
+          r.onsuccess = () => {
+            const tx = r.result.transaction("kv", "readwrite");
+            tx.objectStore("kv").put(set, "aiSettings");
+            tx.oncomplete = () => { r.result.close(); res(); };
+          };
+        }), { enabled: true, baseUrl: base, model: "mock", writeMode: "propose", contextTokens: 2048, maxTokens: 1000,
+          customPrompts: [{ id: "one", label: "Just personality", template: "Say hi.", allFields: false, fields: ["personality"] }] });
+        await p.reload();
+        await p.locator("#root[data-mounted='1']").waitFor({ timeout: 60000 });
+        await writeFiles(p, "Cards", ["Ada", "Bram", "Cora", "Dell"].map((n, i) => [n + ".png", cardPng({ name: n, description: n + " old." }, [40 + i * 30, 60, 120])]));
+        await p.getByText("Add a folder").first().click();
+        await p.getByText(/Scan complete/).first().waitFor();
+        const tile2 = (n) => p.locator(".cardTile").filter({ hasText: n }).first();
+        const aiTab = () => p.getByRole("tab", { name: /AI/ }).click();
+        const fieldsTab = () => p.getByRole("tab", { name: /^Fields/ }).click();
+        const describe = (text) => p.locator("xpath=//label[starts-with(normalize-space(), 'Description')]/following::textarea[1]").fill(text);
+        const action = (re) => p.locator("button").filter({ hasText: re }).first().click();
+        const saved = async (name) => {
+          await p.getByRole("button", { name: /Save to card \(\d+\)/ }).click();
+          await p.getByText(new RegExp("Saved into " + name)).first().waitFor();
+        };
+        const eventually = async (fn) => {
+          for (const end = Date.now() + 8000; Date.now() < end; await p.waitForTimeout(50)) {
+            if (await fn().catch(() => false)) return true;
+          }
+          return false;
+        };
+        const all = (store) => p.evaluate((store) => new Promise((res) => {
+          const r = indexedDB.open("rpCardVault");
+          r.onsuccess = () => { const g = r.result.transaction(store).objectStore(store).getAll(); g.onsuccess = () => { r.result.close(); res(g.result); }; };
+        }), store);
+
+        // What the tab says goes to the model.
+        await tile2("Dell").click();
+        await aiTab();
+        await action(/Just personality/);
+        await p.getByText(/^Sent:/).waitFor();
+        const sent = await p.getByText(/^Sent:/).innerText();
+        t.ok(/personality/.test(sent) && !/description/.test(sent), "your own prompt's line names the field it reads", sent.slice(0, 90));
+        await action(/Summarise/);
+        await fieldsTab();
+        await describe("Long sentence here. ".repeat(600));
+        await aiTab();
+        await p.getByText(/Trimmed to fit/).waitFor();
+        const trimmed = await p.getByText(/Trimmed to fit/).innerText();
+        t.ok(!/24,000/.test(trimmed) && /Model context/.test(trimmed), "the trim notice gives the limit the model's context really sets", trimmed.slice(0, 120));
+
+        // A saved card's answer is still there, without leaving the tab.
+        await tile2("Ada").click();
+        await aiTab();
+        await p.locator("button").filter({ hasText: /^Summarise$/ }).last().click();
+        await p.getByText("The answer about Ada.").first().waitFor();
+        await fieldsTab();
+        await describe("Ada new.");
+        await aiTab();
+        await p.getByText("The answer about Ada.").first().waitFor();
+        await saved("Ada");
+        t.ok(await eventually(async () => (await p.getByText("The answer about Ada.").count()) > 0 && (await p.getByText(/\d+ cached/).count()) > 0),
+          "the cached answer still shows after a save that changes the card's fingerprint");
+
+        // Bulk: one card saved while the model answers for it, one saved before its turn.
+        await p.getByRole("button", { name: "Rescan", exact: true }).waitFor();
+        await tile2("Ada").click();
+        await tile2("Cora").click({ modifiers: ["Control"] });
+        await tile2("Bram").click({ modifiers: ["Control"] });
+        hold = new Promise((r) => { release = r; });
+        const sentBefore = calls.length;
+        await p.getByRole("button", { name: "✦ Suggest tags", exact: true }).click();
+        t.ok(await eventually(async () => calls.length > sentBefore), "the bulk run's first request is out");
+        const first = calls[calls.length - 1];
+        const later = first === "Bram" ? "Ada" : "Bram";
+        for (const n of [first, later]) {
+          await tile2(n).click();
+          await fieldsTab();
+          await describe(n + " saved during the run.");
+          await saved(n);
+        }
+        hold = null;
+        release();
+        const proposedOnCards = async () => {
+          const cards = await all("cards");
+          const eds = await all("edits");
+          return ["Ada", "Bram", "Cora"].filter((n) => {
+            const c = cards.find((x) => x.name === n);
+            const e = c && eds.find((x) => x.fingerprint === c.fp);
+            return e && e.aiProposal && e.aiProposal.vaultTags.indexOf(n + "tag") >= 0;
+          });
+        };
+        await eventually(async () => (await proposedOnCards()).length === 3);
+        t.eq(await proposedOnCards(), ["Ada", "Bram", "Cora"], "every card in the run has its suggestions, saved or not");
+        const cardsNow = await all("cards");
+        const lost = (await all("aiNotes")).concat(await all("edits")).filter((x) => !cardsNow.some((c) => c.fp === x.fingerprint));
+        t.eq(lost.length, 0, "nothing is left under a fingerprint no card has any more");
+      } finally {
+        release();
+        await relayConfig({ baseUrl: "", model: "" }).catch(() => {});
+        await ctx2.close();
+        model.close();
+      }
+    });
+
     await step("a theme is applied, and is there from the first moment after a reload", async () => {
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByLabel("Theme").selectOption("parchment");
