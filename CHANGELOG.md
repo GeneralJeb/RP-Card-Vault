@@ -8,6 +8,17 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.23
+
+- **Cached AI answers stay put through a save.** After **Save to card** changed a card's name, description or first message, the ✦ AI tab said nothing was cached until you left the tab and came back.
+- **A bulk AI run survives a save.** If you saved a card while a bulk run (✦ Suggest tags, or your own prompt) was going, that card's answer and suggestions went to its old copy, where you could never see them. They now land on the card.
+- **Tags that start with a number keep it.** Suggest tags turned "1950s" into "s", "18+" into "+" and "3D" into "D". Only real list numbers ("1. fantasy") are taken off now, and markdown stars around a tag go too.
+- **A reply cut off in a plain list is refused.** When the answer hit Max tokens out partway through a comma-separated list, the half-written last tag was offered as a tag (and added straight away in auto-tags mode). It now says the answer was cut off, as it does for JSON.
+- **No more "[object Object]".** A tag or a critique note that came back as something other than text showed as "[object Object]". Those are now skipped, and a tag list with no text in it shows the model's reply instead.
+- **Tighten gives back what the card says.** Card text containing `<card>` came back as `&lt;card>` and would have gone into the card that way. Notes written inside the rewrite block no longer end up in the field, a reply with unusual letters before the block no longer loses most of the rewrite, and a rewrite that differs only in its line endings counts as unchanged.
+- **The ✦ AI tab says what's really sent.** With your own prompts, the line at the bottom always listed the usual fields, even for a prompt reading only one field, or all of them including the system prompt. It now lists what that prompt sends. The trim notice now gives the real limit, too: with Model context set, it said 24,000 characters when the model's context had cut it to about 2,000, and pointed you at the wrong setting.
+- **A diff of a huge card can't freeze the page.** A card with tens of thousands of changed paragraphs hung the tab while the diff was worked out. Past a limit, the changed part now shows as replaced whole.
+
 ## 1.6.22
 
 - **The card panel shows what a save wrote.** After **Save to card**, a change to anything but the name, description or first message (personality, scenario, greetings, lorebook and the rest) went into the file, but the card panel went on showing the old text until you picked another card. And it could cost you the save: change another greeting or lorebook entry while the old ones were showing, save again, and the old text went back into the file. The panel now shows the saved card as soon as the save is done, and later edits build on it.
