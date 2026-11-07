@@ -8,6 +8,13 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.21
+
+- **A deep search no longer shows cards for words you've already typed over.** With **Deep text** on, the cards found by the last words searched stayed in the grid for a moment after you typed other words, until the next search had run (a fraction of a second), along with their "deep hits" count. Only what the words in the box now find is shown.
+- **Escape on a right-click menu closes just the menu.** With the card panel open, Escape closed the menu and the card panel behind it. And while a menu was up, the arrow keys moved to another card and **f** and **s** acted on the card behind it. The keys now leave the cards alone until the menu is closed.
+- **A right-click menu stays open when you click inside it.** A click on its title, on a line between items, or on its scroll bar (which a long menu has in a small window) closed the menu, so the items further down couldn't be reached with the mouse.
+- **"/" in a dialog no longer jumps to the search box behind it.** In Settings or any other dialog, with no box in it being typed in, "/" moved the cursor into the vault's search box behind the dialog, so what you typed next filtered the cards out of sight. It now does that only when no dialog or menu is up.
+
 ## 1.6.20
 
 - **Adding a tag and taking it off again no longer leaves an edit behind.** In the card panel's Tags & Notes, a card tag you added and then removed left the card marked **Locally edited**, with **Save to card (1)** waiting for nothing. The card is now back as it was, the way a field, greeting or lorebook entry typed back already is.

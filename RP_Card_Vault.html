@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.20";
+const APP_VERSION = "1.6.21";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -9166,6 +9166,9 @@ function ContextMenu({ x, y, items, onClose }) {
 
   return (
     <div ref={ref} className="fadeIn"
+      // A press anywhere in the menu, its scrollbar, a header or a separator
+      // included, is in the menu: only one outside it closes it.
+      onMouseDown={(e) => e.stopPropagation()}
       style={Object.assign({}, menuStyle, { left: pos.left, top: pos.top })}>
       {renderItems(items, false)}
     </div>
@@ -9790,16 +9793,21 @@ function FolderTree({ trees, filters, patch, collapsed, setCollapsed, onDropCard
 function FilterSidebar({
   filters, setFilters, tagIndex, roots, rootCounts, total, shown,
   settings, onOpenTagManager, folderTrees, onDropCards, dragActive, onNewFolder,
-  folderRoles, onFolderMenu, flagCounts, dupeExcluder, mode, onMode, agent,
+  folderRoles, onFolderMenu, flagCounts, dupeExcluder, mode, onMode, agent, keysOff,
 }) {
   const agentMode = mode === "agent";
   const [tagQuery, setTagQuery] = useState("");
   const [tagLimit, setTagLimit] = useState(60);
   const [collapsed, setCollapsed] = useState({});
   const searchRef = useRef(null);
+  // While a dialog or a menu is up, "/" mustn't put you in the search box
+  // behind it, where what you type next filters the grid out of sight.
+  const keysOffRef = useRef(false);
+  keysOffRef.current = !!keysOff;
 
   useEffect(() => {
     const h = (e) => {
+      if (keysOffRef.current) return;
       if (e.key === "/" && document.activeElement && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
         e.preventDefault();
         searchRef.current && searchRef.current.focus();
@@ -15298,7 +15306,8 @@ function App() {
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState(null);
   const [scan, setScan] = useState({ running: false, done: 0, total: 0, label: "", rootName: "" });
-  const [deepIds, setDeepIds] = useState(null);
+  // The deep hits, with the query they are for: { q, ids }.
+  const [deepHits, setDeepHits] = useState(null);
   const [deepBusy, setDeepBusy] = useState(false);
   const [gridEl, setGridEl] = useState(null);   // a callback ref: the grid hook measures it once it appears
   const stopRef = useRef({ stop: false });
@@ -15510,14 +15519,22 @@ function App() {
 
   /* ---- deep search ---- */
   useEffect(() => {
-    if (!filters.deep || !filters.q.trim()) { setDeepIds(null); return; }
+    if (!filters.deep || !filters.q.trim()) { setDeepHits(null); return; }
     let dead = false;
     setDeepBusy(true);
+    const q = filters.q;
     const t = setTimeout(() => {
-      searchBodies(filters.q).then((ids) => { if (!dead) { setDeepIds(ids); setDeepBusy(false); } });
+      searchBodies(q).then((ids) => { if (!dead) { setDeepHits(ids ? { q, ids } : null); setDeepBusy(false); } });
     }, 320);
     return () => { dead = true; clearTimeout(t); setDeepBusy(false); };
   }, [filters.deep, filters.q]);
+
+  // Hits found for an earlier query don't count for this one: typing on
+  // waits out the pause before the next search, and in the meantime the
+  // cards the old words found in a body would show up for the new ones.
+  // (Case and spacing don't make it another query: searchBodies ignores both.)
+  const deepKey = (q) => q.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+  const deepIds = deepHits && filters.deep && deepKey(deepHits.q) === deepKey(filters.q) ? deepHits.ids : null;
 
   /* ---- filtering ---- */
   // Random is one shuffle per choice of it: favouriting a card or typing a
@@ -17672,8 +17689,9 @@ function App() {
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       // Escape closes the inspector, never a dialog: those close only from their own buttons.
       // The flag dialog is a dialog too, with its own state: while it's up, keys
-      // mustn't reach the card behind it.
-      const dialog = modal || flagModal;
+      // mustn't reach the card behind it. Nor while a right-click menu is up:
+      // Escape closes the menu (the menu sees to that), not the inspector too.
+      const dialog = modal || flagModal || ctxMenu;
       if (e.key === "Escape" && !dialog && focusId) setFocusId(null);
       if (!focusId || dialog) return;
       // Ctrl+F is the browser's find and Ctrl+S its save, Alt+arrows its back
@@ -17702,7 +17720,7 @@ function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [focusId, filtered, modal, flagModal, patchEdit, selection]);
+  }, [focusId, filtered, modal, flagModal, ctxMenu, patchEdit, selection]);
 
   /* ---- grid geometry ---- */
   const tileW = settings.tileSize;
@@ -17991,6 +18009,7 @@ function App() {
               onNewFolder={() => newFolder(null, "")}
               folderRoles={folderRoles} onFolderMenu={openFolderMenu} flagCounts={flagCounts}
               dupeExcluder={dupeExcluder}
+              keysOff={!!(modal || flagModal || ctxMenu)}
               mode={sideMode}
               onMode={(m) => { setSideMode(m); if (m === "agent") setAgentOpened(true); }}
               agent={agentOpened ? (

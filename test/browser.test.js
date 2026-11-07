@@ -229,6 +229,75 @@ async function main() {
       t.ok(true, "clearing it brings the rest back");
     });
 
+    await step("a deep search shows only what the words typed now find", async () => {
+      const box = page.getByPlaceholder(/^Search/);
+      await page.getByText("Deep text").first().click();
+      // "storm" is only in one of Bram's greetings: a deep hit, not a name or tag.
+      await box.fill("storm");
+      await page.getByText(/^1 deep hits$/).waitFor();
+      t.ok(await tile("Bram Lighthouse").isVisible(), "the deep search finds Bram by his greeting");
+      // Typed on to other words, the old hit doesn't count while the next search waits.
+      await box.fill("cora");
+      t.eq(await tile("Bram Lighthouse").count(), 0, "Bram is gone the moment the words change");
+      t.eq(await page.getByText(/deep hits$/).count(), 0, "and the old hit count with him");
+      await page.waitForFunction(() => /\b1 shown\b/.test(document.body.innerText));
+      await page.getByText(/^0 deep hits$/).waitFor();   // the deep search for "cora" has run
+      t.ok(await tile("Cora Gardener").isVisible() && !(await tile("Bram Lighthouse").count()), "and after the deep search for the new words, only Cora");
+      // The same words in other case or spacing are the same search.
+      await box.fill("storm");
+      await page.getByText(/^1 deep hits$/).waitFor();
+      await box.fill("  STORM ");
+      t.ok(await tile("Bram Lighthouse").isVisible(), "case and spaces don't drop the hit");
+      await box.fill("");
+      await page.getByText("Deep text").first().click();
+      await page.waitForFunction(() => /\b3 shown\b/.test(document.body.innerText));
+    });
+
+    await step("a right-click menu and a dialog keep the keys to themselves", async () => {
+      const menu = page.getByText("Open in inspector");
+      const inspectorOpen = () => page.getByText(/^Tags & Notes/).isVisible();
+      await tile("Ada Clockmaker").click();
+      await page.getByText(/^Tags & Notes/).waitFor();
+      await tile("Cora Gardener").click({ button: "right" });
+      await menu.waitFor();
+      const selectedNames = () => page.evaluate(() => Array.from(document.querySelectorAll(".cardTile"))
+        .filter((el) => /accent-warm\)/.test(el.style.border)).map((el) => el.innerText.split("\n")[0]));
+      t.eq(await selectedNames(), ["Cora Gardener"], "the right-clicked card is selected");
+      await page.keyboard.press("ArrowRight");
+      await page.waitForTimeout(300);
+      t.eq(await selectedNames(), ["Cora Gardener"], "an arrow key with the menu up doesn't move to another card");
+      await page.keyboard.press("Escape");
+      await menu.waitFor({ state: "detached" });
+      t.ok(await inspectorOpen(), "Escape closes the menu, not the inspector behind it");
+      // A press on the menu's own header (or scrollbar) is in the menu.
+      await tile("Cora Gardener").click({ button: "right" });
+      await menu.waitFor();
+      const header = await page.evaluate(() => {
+        const r = Array.from(document.querySelectorAll("div")).find((d) => d.style.zIndex === "300").firstElementChild.getBoundingClientRect();
+        return [r.x + 10, r.y + r.height / 2];
+      });
+      await page.mouse.click(header[0], header[1]);
+      t.ok(await menu.isVisible(), "clicking the menu's header doesn't close it");
+      await page.mouse.click(700, 15);   // the header bar, outside the menu
+      await menu.waitFor({ state: "detached" });
+      t.ok(true, "a click outside it does");
+      // "/" in a dialog stays in the dialog.
+      await page.keyboard.press("Escape");
+      await page.getByTitle("Settings", { exact: true }).click();
+      const settings = page.getByText(/ cards indexed$/);   // the dialog's subtitle
+      await settings.waitFor();
+      await settings.click();   // focus on the dialog, not a box (nor a toggle)
+      t.eq(await page.evaluate(() => document.activeElement.tagName), "BODY", "nothing in the dialog has focus");
+      await page.keyboard.press("/");
+      t.ok(!(await page.evaluate(() => document.activeElement && /^Search/.test(document.activeElement.placeholder || ""))),
+        "/ in Settings doesn't jump to the search box behind it");
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await settings.waitFor({ state: "detached" });
+      await page.keyboard.press("/");
+      t.ok(await page.evaluate(() => /^Search/.test(document.activeElement.placeholder || "")), "with nothing up, / goes to the search box");
+      await page.keyboard.press("Escape");
+    });
+
     await step("Ctrl+F and Ctrl+S are the browser's, not the card's f and s", async () => {
       const favourites = () => page.evaluate(() => new Promise((res) => {
         const r = indexedDB.open("rpCardVault");
