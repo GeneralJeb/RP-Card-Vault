@@ -8,6 +8,20 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.24
+
+- **Models that number their tool calls badly lose none of them.** Some servers mark every tool call as number 0, or don't number them at all. Two calls in one reply were then glued into one, with arguments like `{"path":"a.md"}{}`, so the first failed and the second never ran. They stay separate calls now, and two calls with the same id get an id each.
+- **`bulk_tags` no longer tags every card by mistake.** Given a filter it doesn't have (`where: { name: "Ada" }`), it ignored the filter and changed every card it could see. It now changes nothing and says which filters there are. The `duplicates` filter works there and in `random_card`, where it used to find nothing.
+- **Private folders stay private by name too.** `list_folders` sent the names of folders you keep private from the AI to the model, and a card could be created, copied or moved into one. They're left out now, along with their subfolders.
+- **`fs_edit` can't write the word "undefined".** A call with no `replace` swapped the text for the literal word "undefined" (or "null") in your file. It's refused now; an empty `replace` still takes text out.
+- **A search can't freeze the page.** A regular expression like `(a+)+$` from the model would lock up the vault until the tab was closed. `grep_cards` now refuses patterns of that kind and asks for something simpler. A plain search for the same characters is fine.
+- **A field that doesn't exist is an error, not "no matches".** `grep_cards` with a made-up field name said no card matched, and `read_card` gave back an empty card. Both now name the fields there are.
+- **Workspace errors no longer show where you keep things.** Some failed file changes (a name that's too long, a folder below a file, a folder moved into itself, a read-only file) sent the full path on your computer, user name included, to the screen and to the model. They're plain sentences now, and a failed save no longer leaves a `.tmp-` file behind.
+- **Files in an older encoding keep their accents.** A workspace file saved in Windows' old encoding read with "é" as "�", and any change, by the agent or in the Files dialog, wrote that back for good. Changing such a file is now refused, with a note to save it as UTF-8 first. It can still be read.
+- **Send pressed twice sends once.** A second press while a new chat was still reading `agent.md` sent the message twice and ran two replies at once.
+- **A condense finishes in its own chat.** During a condense you could start a new chat, open another or delete the one condensing; when it finished you were pulled back to the old chat, and a deleted one came back. Those buttons now wait, as they do during a reply.
+- **Smaller fixes for the agent.** Two chats made moments apart with the same title no longer share a handoff file. `todo_write` given plain strings keeps them instead of emptying the list. A question's options never show as "[object Object]". `edit_lorebook` given a list as `set` no longer writes nonsense keys. `list_cards` and `list_duplicates` past the end say there's nothing there, instead of "showing 51–50".
+
 ## 1.6.23
 
 - **Cached AI answers stay put through a save.** After **Save to card** changed a card's name, description or first message, the ✦ AI tab said nothing was cached until you left the tab and came back.

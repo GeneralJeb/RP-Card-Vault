@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.23";
+const APP_VERSION = "1.6.24";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -6329,7 +6329,8 @@ function agentCondenseRequest(session, settings, extra) {
 /** Where a chat's handoff is saved in the workspace. */
 function agentHandoffPath(session) {
   const slug = String(session.title || "chat").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "chat";
-  return "handoffs/" + slug + "-" + String(session.id || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 6) + ".md";
+  // The end of the id: its start is the time, the same for chats made moments apart.
+  return "handoffs/" + slug + "-" + String(session.id || "").replace(/[^A-Za-z0-9]/g, "").slice(-6) + ".md";
 }
 
 /**
@@ -6882,6 +6883,9 @@ function agentCardLine(r) {
     (r.tokensCore ? " · " + fmtTokens(r.tokensCore) : "");
 }
 
+/** The filters agentMatchCards knows. */
+const AGENT_CARD_FILTERS = ["query", "tag", "creator", "folder", "flag", "duplicates"];
+
 /**
  * Cards matching list_cards' filters ({ query, tag, creator, folder, flag },
  * all optional), sorted by name. bulk_tags uses the same filters.
@@ -6960,6 +6964,13 @@ function agentFolderList(roots) {
   return out;
 }
 
+/** The linked folders the AI may know about: a private folder is left out, name and all. */
+function agentOpenRoots(roots, isPrivate) {
+  if (!isPrivate) return roots || [];
+  return (roots || []).filter((r) => !isPrivate(r.id, "")).map((r) =>
+    Object.assign({}, r, { dirs: (r.dirs || []).filter((d) => !isPrivate(r.id, d)) }));
+}
+
 /** "Library/Victorian" → { rootId, dir } for a folder cards may be written to; throws a helpful error otherwise. */
 function agentResolveFolder(roots, spec) {
   const want = String(spec == null ? "" : spec).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").trim();
@@ -7007,6 +7018,65 @@ function agentFindCard(vault, id) {
   if (!r) throw new Error("There's no card with id " + JSON.stringify(id) + ". Use list_cards to find ids.");
   if (r.aiPrivate) throw new Error("That card is in a folder the user keeps private from the AI. You can't read or change it.");
   return r;
+}
+
+/**
+ * Why a regular expression could run for hours, or "". A search runs on the
+ * page, where nothing can stop one that's started, and a card's text reaches
+ * the model that writes the pattern. Refused: a repeat inside a repeated group,
+ * a repeated group whose choices can start alike, and three or more ".*".
+ */
+function agentRegexRisk(pattern) {
+  const p = String(pattern || "");
+  const REPEAT = /^(?:[*+]|\{\d+(?:,\d*)?\})/;
+  const stack = [{ repeats: false, branches: [""] }];
+  const top = () => stack[stack.length - 1];
+  let wild = 0, i = 0;
+  while (i < p.length) {
+    const c = p[i];
+    if (c === "(") {
+      stack.push({ repeats: false, branches: [""] });
+      const open = /^\(\?(?:[:=!]|<[=!]|<[^>]*>)/.exec(p.slice(i));
+      i += open ? open[0].length : 1;
+      continue;
+    }
+    if (c === "|") { top().branches.push(""); i++; continue; }
+    if (c === ")") {
+      i++;
+      if (stack.length < 2) continue;
+      const g = stack.pop();
+      const q = REPEAT.exec(p.slice(i));
+      if (q) {
+        if (g.repeats) return "a repeat inside a repeat";
+        const firsts = g.branches.map((x) => x.charAt(0).toLowerCase());
+        if (firsts.length > 1 && firsts.some((x, n) => !x || firsts.indexOf(x) !== n)) return "a repeated choice whose options start alike";
+        i += q[0].length;
+      }
+      if (q || g.repeats) top().repeats = true;
+      top().branches[top().branches.length - 1] += "(";
+      continue;
+    }
+    // One atom: an escape, a [set], or a character.
+    let len = 1;
+    if (c === "\\") len = 2;
+    else if (c === "[") {
+      let j = i + 1;
+      if (p[j] === "^") j++;
+      if (p[j] === "]") j++;
+      while (j < p.length && p[j] !== "]") j += p[j] === "\\" ? 2 : 1;
+      len = j - i + 1;
+    }
+    const atom = p.slice(i, i + len);
+    i += len;
+    const q = REPEAT.exec(p.slice(i));
+    if (q) {
+      i += q[0].length;
+      top().repeats = true;
+      if (atom === "." && ++wild >= 3) return "too many \".*\"";
+    }
+    top().branches[top().branches.length - 1] += atom;
+  }
+  return "";
 }
 
 function agentSnippet(text, at, len) {
@@ -7326,12 +7396,13 @@ const AGENT_TOOL_IMPL = {
   async fs_edit(a, ctx) {
     const find = String(a.find == null ? "" : a.find);
     if (!find) throw new Error("find can't be empty.");
+    if (typeof a.replace !== "string") throw new Error("Give the new text as replace (\"\" to take the text out).");
     const cur = await agentWsCurrent(ctx, a.path);
     if (!cur) throw new Error("There's no file " + a.path + ". Use fs_write to create it.");
     const count = cur.text.split(find).length - 1;
     if (!count) throw new Error("That text isn't in " + cur.path + ". Read it again and copy the text exactly.");
     if (count > 1 && !a.all) throw new Error("That text appears " + count + " times in " + cur.path + ". Include more of the surrounding text, or set all to true.");
-    const after = a.all ? cur.text.split(find).join(String(a.replace)) : cur.text.replace(find, () => String(a.replace));
+    const after = a.all ? cur.text.split(find).join(a.replace) : cur.text.replace(find, () => a.replace);
     const change = { tool: "fs_edit", path: cur.path, before: cur.text, after };
     if (!(await agentApprove(ctx, change))) return { ok: false, content: AGENT_REJECTED, display: Object.assign({ rejected: true }, change) };
     const w = await ctx.ws.write(cur.path, after, cur.ver);
@@ -7386,6 +7457,7 @@ const AGENT_TOOL_IMPL = {
     const off = Math.max(0, Math.floor(Number(a.offset) || 0));
     const page = all.slice(off, off + limit);
     if (!all.length) return { ok: true, content: "No cards match." };
+    if (!page.length) return { ok: true, content: fmtNum(all.length) + " card" + (all.length === 1 ? "" : "s") + " match, so there's nothing from offset " + off + "." };
     return { ok: true, content: fmtNum(all.length) + " card" + (all.length === 1 ? "" : "s") + " match" + (all.length === 1 ? "es" : "") +
       (all.length > page.length ? " (showing " + (off + 1) + "–" + (off + page.length) + "; use offset for more)" : "") + ".\n" +
       // The user's Description previews switch (Agent options), not the model, decides.
@@ -7398,10 +7470,12 @@ const AGENT_TOOL_IMPL = {
     const pat = String(a.pattern || "");
     if (!pat) throw new Error("Give a pattern to search for.");
     if (pat.length > 300) throw new Error("That pattern is too long.");
+    const risk = a.regex ? agentRegexRisk(pat) : "";
+    if (risk) throw new Error("That pattern could take too long to run (" + risk + "). Search for something simpler.");
     let re;
     try { re = new RegExp(a.regex ? pat : pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"); }
     catch (e) { throw new Error("That isn't a valid regular expression: " + e.message); }
-    const fields = Array.isArray(a.fields) && a.fields.length ? a.fields.map(String) : null;
+    const fields = Array.isArray(a.fields) && a.fields.length ? agentFieldsArg(a.fields, "to search") : null;
     const limit = Math.max(1, Math.min(500, Math.floor(Number(a.limit) || 40)));
     await ctx.gate("reads", 1);
     const byId = {};
@@ -7438,6 +7512,7 @@ const AGENT_TOOL_IMPL = {
     const edit = ctx.vault.edit(r.fp);
     const asked = Array.isArray(a.fields) && a.fields.length ? a.fields.map(String) : AGENT_READ_FIELDS;
     const read = AGENT_CARD_FIELD_KEYS.filter((k) => asked.indexOf(k) >= 0);
+    if (!read.length) agentFieldsArg(asked, "to read");
     // A long card comes in parts (from). Ranges shown so far are kept under
     // "#part", and a field counts as read only once all of it has been shown.
     const parts = agentCardBlockParts(r, body, edit, a.fields);
@@ -7488,6 +7563,7 @@ const AGENT_TOOL_IMPL = {
     const limit = Math.max(1, Math.min(100, Math.floor(Number(a.limit) || 20)));
     const off = Math.max(0, Math.floor(Number(a.offset) || 0));
     const page = groups.slice(off, off + limit);
+    if (!page.length) return { ok: true, content: fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + ", so there's nothing from offset " + off + "." };
     const counts = ["exact", "content", "version"].map((k) => groups.filter((g) => g.kind === k).length + " " + k).join(", ");
     return { ok: true, content: fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + " (" + counts + ")" +
       (groups.length > page.length ? "; showing " + (off + 1) + "–" + (off + page.length) + ", use offset for more" : "") + ".\n" +
@@ -7673,7 +7749,7 @@ const AGENT_TOOL_IMPL = {
       }
       i = n - 1;
     }
-    const set = a.set && typeof a.set === "object" ? a.set : {};
+    const set = a.set && typeof a.set === "object" && !Array.isArray(a.set) ? a.set : {};
     const edits = Array.isArray(a.edits) ? a.edits : [];
     let where;
     if (a.remove) {
@@ -7725,7 +7801,7 @@ const AGENT_TOOL_IMPL = {
   },
 
   async random_card(a, ctx) {
-    const all = agentMatchCards(ctx.vault.records(), a);
+    const all = agentMatchCards(ctx.vault.records(), a, agentDupeIndex(ctx.vault.dupes && ctx.vault.dupes()));
     if (!all.length) return { ok: true, content: "No cards match." };
     const want = agentCountArg(a.count, AGENT_RANDOM_MAX.cards);
     const picks = agentRandomIndexes(all.length, want, ctx.random).map((i) => all[i]);
@@ -7812,7 +7888,12 @@ const AGENT_TOOL_IMPL = {
     if (!add.length && !remove.length) throw new Error("Give tags to add or remove.");
     let cards;
     if (Array.isArray(a.ids) && a.ids.length) cards = a.ids.map((id) => agentFindCard(ctx.vault, id));
-    else if (a.where && typeof a.where === "object" && Object.keys(a.where).some((k) => String(a.where[k] || "").trim())) cards = agentMatchCards(ctx.vault.records(), a.where);
+    else if (a.where && typeof a.where === "object" && Object.keys(a.where).some((k) => String(a.where[k] || "").trim())) {
+      // A filter it doesn't know would be ignored, and every card would match.
+      const unknown = Object.keys(a.where).filter((k) => AGENT_CARD_FILTERS.indexOf(k) < 0);
+      if (unknown.length) throw new Error("where can only use " + AGENT_CARD_FILTERS.join(", ") + ". Not filters: " + unknown.join(", ") + ". Nothing was changed.");
+      cards = agentMatchCards(ctx.vault.records(), a.where, agentDupeIndex(ctx.vault.dupes && ctx.vault.dupes()));
+    }
     else throw new Error("Pick the cards: ids, or where (list_cards filters).");
     if (cards.length > AGENT_BULK_MAX) {
       throw new Error(fmtNum(cards.length) + " cards match. Change at most " + AGENT_BULK_MAX + " per call: narrow where, or work through them in parts.");
@@ -7900,7 +7981,7 @@ const AGENT_TOOL_IMPL = {
 
   async todo_write(a, ctx) {
     const items = (Array.isArray(a.items) ? a.items : []).map((x) => ({
-      text: String((x && x.text) || "").trim(), done: !!(x && x.done),
+      text: String((typeof x === "string" ? x : x && x.text) || "").trim(), done: !!(x && x.done),
     })).filter((x) => x.text).slice(0, 50);
     ctx.session.todo = items;
     return { ok: true, content: "Task list saved (" + items.filter((x) => x.done).length + " of " + items.length + " done).",
@@ -7910,7 +7991,9 @@ const AGENT_TOOL_IMPL = {
   async ask_user_question(a) {
     const q = String(a.question || "").trim();
     if (!q) throw new Error("Give the question to ask.");
-    const options = (Array.isArray(a.options) ? a.options : []).map(String).filter(Boolean).slice(0, 8);
+    // Plain strings are asked for; a model may send { label } or { value } instead.
+    const words = (x) => (x && typeof x === "object" ? x.label || x.value || x.text || "" : x);
+    const options = (Array.isArray(a.options) ? a.options : []).map(words).filter((x) => x !== "" && x != null && typeof x !== "object").map(String).slice(0, 8);
     return { ok: true, ask: true, content: "The question is on screen. The user's answer will be their next message.",
       display: { question: q, options } };
   },
@@ -10738,7 +10821,7 @@ function WorkspaceModal({ onClose, onToast, initialPath }) {
  * loop and tools, handed the workspace, the vault (read-only), the model via
  * the relay, and your approval.
  */
-function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, shuffleSeed, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, onCardFiles, dupes }) {
+function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, shuffleSeed, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, privateFolders, onCardFiles, dupes }) {
   const [sessions, setSessions] = useState([]);
   const [sess, setSess] = useState(() => newAgentSession(uid(), Date.now()));
   const [input, setInput] = useState("");
@@ -10761,7 +10844,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
   const rateLog = useRef([]);
   const listRef = useRef(null);
   const latest = useRef(null);
-  latest.current = { ai, relay, agent, records, editsMap, tagIndex, onPatchEdit, onPatchMany, roots, onCardFiles, dupes };
+  latest.current = { ai, relay, agent, records, editsMap, tagIndex, onPatchEdit, onPatchMany, roots, privateFolders, onCardFiles, dupes };
 
   const ready = aiReady(ai, relay);
 
@@ -10878,7 +10961,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
     // bulk_tags: many cards at once, straight into the vault's edits. `value` is the edit's own
     // value: card tags (null = the file's own) or vault-only tags.
     // Card files: create, copy, move (never delete), through the vault's own verified writes.
-    roots: () => latest.current.roots || [],
+    roots: () => agentOpenRoots(latest.current.roots, makePrivateTest({ privateFolders: latest.current.privateFolders })),
     createCard: (rootId, dir, fields) => latest.current.onCardFiles.create(rootId, dir, fields),
     copyCard: (rec, rootId, dir, name) => latest.current.onCardFiles.copy(rec, rootId, dir, name),
     moveCard: (rec, rootId, dir) => latest.current.onCardFiles.move(rec, rootId, dir),
@@ -11057,10 +11140,19 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
     }
   };
 
+  // Between pressing Send and the turn starting there's a file to read and a save:
+  // the buttons still look free, so a second press has to be turned away here.
+  const sendingRef = useRef(false);
   const send = async (override) => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try { await sendNow(override); }
+    finally { sendingRef.current = false; }
+  };
+  const sendNow = async (override) => {
     const text = String(override != null ? override : input).trim();
     const withAttach = override == null && (attach.images.length || attach.files.length);
-    if ((!text && !withAttach) || running || condensing) return;
+    if ((!text && !withAttach) || running || runRef.current || condensing) return;
     if (!ready) { onToast("Set up the ✦ AI panel first: the agent uses the same endpoint and model.", "warm"); return; }
     toBottom();   // sending means you want to see the reply
     const s = sessRef.current;
@@ -11221,9 +11313,10 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
 
   const stop = () => { if (runRef.current) runRef.current.abort(); };
 
-  const newChat = () => { if (!running) show(newAgentSession(uid(), Date.now())); };
+  // A condense finishes in the chat it started in, so that chat stays until it has.
+  const newChat = () => { if (!running && !condensing) show(newAgentSession(uid(), Date.now())); };
   const openSession = async (id) => {
-    if (running) return;
+    if (running || condensing) return;
     const s = await dbGet(STORE_AGENT, id);
     if (s) show(s);
   };
@@ -11231,7 +11324,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
     const m = sessions.filter((x) => x.id === id)[0];
     // The agent's turn is still writing to this chat; deleting it now would
     // send the rest of the turn into whatever chat replaced it.
-    if (running && sessRef.current.id === id) { window.alert("The agent is still working in this chat. Stop it first, then delete the chat."); return; }
+    if ((running || condensing) && sessRef.current.id === id) { window.alert("The agent is still working in this chat. Stop it first, then delete the chat."); return; }
     if (!window.confirm("Delete the chat \"" + (m ? m.title : id) + "\"? Its workspace files stay.")) return;
     deletedChats.current.add(id);
     await dbDel(STORE_AGENT, id);
@@ -11439,7 +11532,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
             {sess.title}
           </div>
           <SmallBtn color="muted" onClick={() => setModal("sessions")}>Chats{sessions.length ? " " + sessions.length : ""}</SmallBtn>
-          <SmallBtn color="blue" disabled={running} onClick={newChat}>+ New</SmallBtn>
+          <SmallBtn color="blue" disabled={running || condensing} onClick={newChat}>+ New</SmallBtn>
           <SmallBtn color="muted" onClick={() => setModal("options")} title="Agent options">⚙</SmallBtn>
           <SmallBtn color="muted" onClick={() => setFull(!full)} title={full ? "Back to the sidebar" : "Full screen"}>{full ? "⤡" : "⤢"}</SmallBtn>
         </div>
@@ -11654,7 +11747,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
       </div>
 
       {modal === "sessions" ? (
-        <AgentSessionsModal sessions={sessions} currentId={sess.id} running={running} records={records}
+        <AgentSessionsModal sessions={sessions} currentId={sess.id} running={running || condensing} records={records}
           onOpen={openSession} onDelete={deleteSession} onNew={newChat} onClose={() => setModal(null)} />
       ) : null}
       {modal === "options" ? (
@@ -18148,7 +18241,7 @@ function App() {
               agent={agentOpened ? (
                 <AgentPanel ai={aiSettings} relay={aiRelay} agent={agentSettings} onSaveAgent={patchAgentSettings}
                   records={records} editsMap={editsMap} tagIndex={tagIndex} sortKey={filters.sort} shuffleSeed={shuffleSeed} onPatchEdit={patchEdit}
-                  onPatchMany={patchManyEdits} roots={roots}
+                  onPatchMany={patchManyEdits} roots={roots} privateFolders={settings.privateFolders}
                   onCardFiles={{ create: createCardFile, copy: copyCardFile, move: moveCardFile }} dupes={dupes}
                   onOpenCard={(id) => setFocusId(id)}
                   onOpenAiSettings={() => setModal("ai")} onToast={showToast} />
