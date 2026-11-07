@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.23";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.6.24";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -602,6 +602,36 @@ function readChoice(d) {
   return out;
 }
 
+/**
+ * Add one piece of a tool call to the calls so far. Pieces of a call share an
+ * index, but some servers give every call index 0, or none at all, so a piece
+ * that can't belong to the call at its index starts a new one: a different id
+ * or tool, or the same tool again once the arguments so far are whole.
+ */
+function addToolPiece(calls, p) {
+  let c = null;
+  for (let i = calls.length - 1; i >= 0 && !c; i--) if (calls[i].index === p.index) c = calls[i];
+  const whole = (args) => { try { return !!JSON.parse(args); } catch (e) { return false; } };
+  const fresh = c && ((p.id && c.id && p.id !== c.id) || (p.name && c.name && p.name !== c.name) ||
+    (!p.id && p.name && p.args && whole(c.args)));
+  if (!c || fresh) { c = { index: p.index, id: "", name: "", args: "" }; calls.push(c); }
+  if (p.id && !c.id) c.id = p.id;
+  if (p.name && !c.name) c.name = p.name;
+  if (p.args) c.args += p.args;
+}
+
+/** An id for each call, each one different: a server's own where it can, or call_N. */
+function toolCallIds(calls) {
+  const used = new Set();
+  const given = new Set(calls.map((c) => c.id).filter(Boolean));
+  return calls.map((c, i) => {
+    let id = c.id && !used.has(c.id) ? c.id : "";
+    for (let n = i + 1; !id; n++) if (!used.has("call_" + n) && !given.has("call_" + n)) id = "call_" + n;
+    used.add(id);
+    return id;
+  });
+}
+
 /** Incremental server-sent-events reader. Calls onChunk with readChoice() output. */
 function sseParser(onChunk) {
   let buf = "";
@@ -877,13 +907,7 @@ async function aiChat(req, res, body) {
     if (d.error) throw userError(d.error);
     if (d.text) { st.textChars += d.text.length; emit({ t: "text", v: d.text }); }
     if (d.think) { st.thinkChars += d.think.length; emit({ t: "think", v: d.think }); }
-    for (const p of d.tools || []) {
-      let c = calls.find((x) => x.index === p.index);
-      if (!c) { c = { index: p.index, id: "", name: "", args: "" }; calls.push(c); }
-      if (p.id && !c.id) c.id = p.id;
-      if (p.name && !c.name) c.name = p.name;
-      if (p.args) c.args += p.args;
-    }
+    for (const p of d.tools || []) addToolPiece(calls, p);
     if (d.finish) st.finish = d.finish;
     if (d.usage) st.usage = d.usage;
     if (d.model) st.model = d.model;
@@ -916,7 +940,8 @@ async function aiChat(req, res, body) {
     }
     clearTimeout(idle);
     const whole = calls.filter((c) => c.name).sort((a, b) => a.index - b.index);
-    whole.forEach((c, i) => emit({ t: "tool", id: c.id || "call_" + (i + 1), name: c.name, args: c.args }));
+    const ids = toolCallIds(whole);
+    whole.forEach((c, i) => emit({ t: "tool", id: ids[i], name: c.name, args: c.args }));
     emit({ t: "done", finish: st.finish, usage: st.usage, model: st.model, textChars: st.textChars, thinkChars: st.thinkChars, tools: whole.length });
   } catch (e) {
     clearTimeout(idle);
@@ -1111,6 +1136,13 @@ function wsNeedVer(st, ver, rel) {
   if (ver !== st.ver) throw userError(rel + " changed since it was read (someone edited it). Read it again first.", 409);
 }
 
+/** A file in an older encoding reads with its accented letters as "�": writing that back would lose them for good. */
+function wsSafeToRewrite(st, rel) {
+  if (st && st.buf && !Buffer.from(st.buf.toString("utf8"), "utf8").equals(st.buf)) {
+    throw userError(rel + " isn't saved as UTF-8, so changing it here would garble its accented letters. Save it as UTF-8 in your editor first.");
+  }
+}
+
 function wsText(buf, rel) {
   if (buf.subarray(0, 8192).indexOf(0) >= 0) throw userError(rel + " isn't a text file.");
   return buf.toString("utf8");
@@ -1120,8 +1152,13 @@ function wsText(buf, rel) {
 function wsWriteFile(full, text) {
   fs.mkdirSync(path.dirname(full), { recursive: true });
   const tmp = full + ".tmp-" + crypto.randomBytes(4).toString("hex");
-  fs.writeFileSync(tmp, text, "utf8");
-  fs.renameSync(tmp, full);
+  try {
+    fs.writeFileSync(tmp, text, "utf8");
+    fs.renameSync(tmp, full);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (e2) { /* it never got made */ }
+    throw e;
+  }
 }
 
 function wsList(dirFull) {
@@ -1142,7 +1179,28 @@ function wsList(dirFull) {
   return out;
 }
 
+/**
+ * What a file-system error means, in words. Node's own message has the whole
+ * path in it, your user name included, and these errors go on to the model.
+ */
+function wsPlainError(e) {
+  const code = e && e.code;
+  if (code === "EEXIST" || code === "ENOTDIR") return "Part of that path is a file, so nothing can go below it.";
+  if (code === "ENOENT" || code === "ENAMETOOLONG" || code === "EINVAL") return "That name or path is too long, or can't be used on this computer.";
+  if (code === "EPERM" || code === "EACCES" || code === "EBUSY") return "That file or folder is read-only or in use, so it wasn't changed.";
+  return "The workspace couldn't do that (" + code + ").";
+}
+
 async function handleWs(req, res, route) {
+  try {
+    return await wsRoute(req, res, route);
+  } catch (e) {
+    if (e && e.syscall) throw userError(wsPlainError(e));
+    throw e;
+  }
+}
+
+async function wsRoute(req, res, route) {
   if (req.method !== "POST") return sendJson(res, 404, { error: "Unknown workspace route." });
   const body = await readJson(req, 4 * 1024 * 1024);
   wsEnsure();
@@ -1168,6 +1226,7 @@ async function handleWs(req, res, route) {
     if (Buffer.byteLength(body.text, "utf8") > WS_MAX_BYTES) throw userError("That's over " + (WS_MAX_BYTES >> 20) + " MB, too big for a workspace file.", 413);
     const st = wsStat(f.full);
     wsNeedVer(st, body.ver, f.rel);
+    wsSafeToRewrite(st, f.rel);
     wsWriteFile(f.full, body.text);
     const now = wsStat(f.full);
     return sendJson(res, 200, { path: f.rel, ver: now.ver, size: now.size, mtime: now.mtime, created: !st });
@@ -1193,6 +1252,7 @@ async function handleWs(req, res, route) {
     if (!st) throw userError("There's no " + a.rel + " in the workspace.", 404);
     if (!st.dir) wsNeedVer(st, body.ver, a.rel);
     if (fs.existsSync(b.full)) throw userError(b.rel + " already exists.", 409);
+    if (st.dir && insidePath(b.full, a.full)) throw userError("A folder can't be moved into itself.");
     fs.mkdirSync(path.dirname(b.full), { recursive: true });
     fs.renameSync(a.full, b.full);
     return sendJson(res, 200, { from: a.rel, to: b.rel });
@@ -1507,7 +1567,7 @@ if (require.main !== module) {
   module.exports = {
     normalizeAiBase, originOf, addressHint, API_BASE_HINTS,
     looksLikeHtml, describeHtmlBody, upstreamMessage, scrubSecret,
-    readChoice, sseParser, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
+    readChoice, sseParser, addToolPiece, toolCallIds, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
     cleanMessages, cleanTools, saysToolsUnsupported, saysImagesUnsupported, WS_STARTER, cookiesOf, mergeCookies,
     RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES, errorText,
   };

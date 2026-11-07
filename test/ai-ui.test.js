@@ -52,6 +52,8 @@ const relay = {
   chatCalls: [],
   titleCalls: [],
   condenseCalls: [],  // requests that ask the model for a handoff
+  condenseDelayMs: 0,
+  wsReadDelayMs: 0,   // how long reading a workspace file takes
 };
 
 /* The agent's workspace: files with a version each, like serve.js's /__vault/ws. */
@@ -159,7 +161,7 @@ function fakeFetch(url, opts) {
   }
   if (url === "/__vault/ai/chat" && body && body.messages && /You are condensing this chat/.test(body.messages[0].content)) {
     relay.condenseCalls.push(body);
-    return streamResponse(ev.answer("## Goal\nKeep tidy notes on tea-party cards.\n\n## Open tasks\n- tag them"), 0, opts && opts.signal);
+    return streamResponse(ev.answer("## Goal\nKeep tidy notes on tea-party cards.\n\n## Open tasks\n- tag them"), relay.condenseDelayMs, opts && opts.signal);
   }
   if (url === "/__vault/ai/chat") {
     relay.chatCalls.push(body);
@@ -167,7 +169,11 @@ function fakeFetch(url, opts) {
     if (r.error) return jsonResponse(r.status || 400, { error: r.error, code: r.code });
     return streamResponse(r.events, r.delayMs, opts && opts.signal);
   }
-  if (String(url).indexOf("/__vault/ws/") === 0) return wsRoute(String(url).slice("/__vault/ws/".length), body);
+  if (String(url).indexOf("/__vault/ws/") === 0) {
+    const route = String(url).slice("/__vault/ws/".length);
+    if (route === "read" && relay.wsReadDelayMs) return new Promise((r) => setTimeout(r, relay.wsReadDelayMs)).then(() => wsRoute(route, body));
+    return wsRoute(route, body);
+  }
   return jsonResponse(404, { error: "unexpected fetch: " + url });
 }
 
@@ -1626,6 +1632,90 @@ async function testCardFiles() {
   t.ok(!!exactBtn("Duplicate"), "the inspector has a Duplicate button too");
 }
 
+/* The chat while something is under way: a second press of Send, and chats changing during a condense. */
+async function testAgentRaces() {
+  console.log("\nthe agent chat while something is under way");
+  if (!exactBtn("+ New")) { click(exactBtn("✦ Agent")); await tick(300); }
+  const box = () => all("textarea").find((x) => /Message the agent|agent is working/.test(x.placeholder || ""));
+  click(exactBtn("+ New"));
+  await tick();
+
+  // Send pressed twice while a new chat is still reading agent.md.
+  relay.wsReadDelayMs = 120;
+  const n0 = relay.chatCalls.length;
+  relay.chatQueue.push({ events: ev.answer("Hello once.") });
+  type(box(), "Only once please.");
+  await tick();
+  const send = exactBtn("Send");
+  click(send);
+  await tick(20);
+  click(exactBtn("Send") || send);
+  await tick(600);
+  relay.wsReadDelayMs = 0;
+  relay.chatQueue.length = 0;
+  const chats = () => readAll("agentSessions");
+  let chat = (await chats()).filter((s) => s.messages.some((m) => m.text === "Only once please."))[0];
+  t.eq(relay.chatCalls.length - n0, 1, "Send pressed twice in a new chat makes one request");
+  t.eq(chat && chat.messages.filter((m) => m.role === "user").length, 1, "and one message");
+
+  // While a chat condenses, it stays the chat on screen.
+  const id = chat.id;
+  const meter = () => document.querySelector("button.agent-meter");
+  relay.condenseDelayMs = 80;
+  click(meter());
+  await tick(40);
+  t.ok(!exactBtn("+ New"), "+ New waits while the chat condenses");
+  click(byText("button", /^Chats/));
+  await tick();
+  const rows = all("button").filter((b) => (b.textContent || "").trim() === "Delete");
+  t.ok(rows.length > 0 && rows.filter((b) => !b.disabled).length === rows.length - 1, "and so does deleting that chat");
+  t.ok(all("button").filter((b) => (b.textContent || "").trim() === "Open").every((b) => b.disabled), "and opening another");
+  click(byText("button", /^Close$/));
+  await tick(600);
+  relay.condenseDelayMs = 0;
+  chat = (await chats()).filter((s) => s.id === id)[0];
+  t.ok(!!chat && !!chat.handoff && seen(/Condensed: everything above/), "the condense then finishes in that chat");
+  t.ok(!!exactBtn("+ New"), "and the buttons are back");
+
+  // Switching to Filters in the middle of a reply doesn't lose it: the chat carries on behind.
+  relay.chatQueue.push({ events: ev.answer("This arrives anyway."), delayMs: 60 });
+  type(box(), "Going away now.");
+  await tick();
+  click(exactBtn("Send"));
+  await tick(40);
+  click(exactBtn("Filters"));
+  await tick(500);
+  click(exactBtn("✦ Agent"));
+  await tick(100);
+  t.ok(seen(/Going away now\./) && seen(/This arrives anyway\./), "a reply that finishes while the filters are showing is there on coming back");
+
+  // A folder kept private from the AI isn't named to the model at all.
+  const folderMenu = async (label) => {
+    click(exactBtn("Filters"));
+    await tick(60);
+    const folder = all(".tagRow").find((d) => /Scratch/.test(d.textContent) && /Right-click to label/.test(d.getAttribute("title") || ""));
+    folder.dispatchEvent(new window.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+    await tick(100);
+    const item = all("div").find((el) => { const x = (el.textContent || "").trim(); return x.endsWith(label) && x.length <= label.length + 3 && el.children.length <= 3; });
+    item.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    await tick(100);
+    click(exactBtn("✦ Agent"));
+    await tick(100);
+  };
+  const askFolders = async (text) => {
+    relay.chatQueue.push({ events: [ev.tool("lf", "list_folders", {}), ev.done("tool_calls")] }, { events: ev.answer("Noted.") });
+    type(box(), text);
+    await tick();
+    click(exactBtn("Send"));
+    await tick(400);
+    return lastChat().messages.filter((m) => m.role === "tool" && m.tool_call_id === "lf").pop().content;
+  };
+  t.ok(/Scratch/.test(await askFolders("Which folders are there?")), "list_folders names an open folder");
+  await folderMenu("Keep private from the AI");
+  t.ok(!/Scratch/.test(await askFolders("And now?")), "and not one kept private");
+  await folderMenu("Allow the AI here again");
+}
+
 /* ── run ───────────────────────────────────────────────────────────────── */
 
 async function main() {
@@ -1649,7 +1739,7 @@ async function main() {
   t.ok(hard.length === 0, "no console errors during boot", hard.slice(0, 2).join(" | "));
 
   const steps = [testPanel, testSaveAndTest, testPrompts, testOpenCard, testSummarise, testThinkingOnly,
-    testCancel, testCritique, testTagsAndConcurrentEdit, testTighten, testReadOnly, testDialogs, testBulkTags, testCustomPrompts, testAgent, testAgentChanges, testTagTarget, testBatch5, testShortIds, testLorebook, testFlags, testBulk, testCardFiles, testTransport];
+    testCancel, testCritique, testTagsAndConcurrentEdit, testTighten, testReadOnly, testDialogs, testBulkTags, testCustomPrompts, testAgent, testAgentChanges, testTagTarget, testBatch5, testShortIds, testLorebook, testFlags, testBulk, testCardFiles, testTransport, testAgentRaces];
   for (const s of steps) {
     try { await s(); }
     catch (e) { t.ok(false, s.name + " threw", (e && e.stack || String(e)).split("\n").slice(0, 3).join(" | ")); }
