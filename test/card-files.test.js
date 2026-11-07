@@ -13,7 +13,7 @@ const t = require("./harness");
 const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
-  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "tagsPatch", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
+  "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "tagsPatch", "editAfterSave", "cardDateMs", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
   "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
@@ -678,6 +678,52 @@ async function main() {
     t.eq(out.extensions, { st_world: "keep me" }, "and keeps the book's own extensions");
     t.eq(V.lorebookPatch({ lorebook: null }, V.cleanLorebook({ entries: [{ content: "First." }] })).lorebook.entries[0].content, "First.",
       "a card without a lorebook can be given one");
+    t.eq(V.lorebookPatch({ lorebook: null }, V.cleanLorebook({ entries: [] })), { lorebook: null }, "and one started and emptied again is no edit: no empty book gets written");
+    t.eq(V.lorebookPatch({ lorebook: null }, V.cleanLorebook({ name: "Coast", entries: [] })).lorebook.name, "Coast", "unless it has been given a name");
+    t.eq(V.lorebookPatch({ lorebook: { name: "B", entries: [{ idx: 0, content: "x" }] } }, V.cleanLorebook({ name: "B", entries: [] })).lorebook.entries, [], "removing every entry of the file's own book is still an edit");
+  }
+
+  console.log("\na lorebook entry's position on save");
+  {
+    const rawBook = { entries: [
+      { keys: ["a"], content: "A", position: "before_char", id: 1 },
+      { keys: ["b"], content: "B", position: 1, id: 2 },
+      { keys: ["c"], content: "C", position: 0, id: 3 },
+      { keys: ["d"], content: "D", id: 4 },
+    ] };
+    const body = V.normalizeLorebook(rawBook);
+    const out = (change) => { const lb = V.cleanLorebook(body); change(lb); return V.mergeLorebookForSave(rawBook, lb).entries; };
+    t.ok(!("position" in out((b) => { b.entries[0].position = ""; })[0]), "a position emptied in the box goes from the entry");
+    t.eq(out((b) => { b.entries[0].position = "after_char"; })[0].position, "after_char", "a changed one is written");
+    t.eq(out(() => {})[0].position, "before_char", "an unchanged one stays");
+    t.eq(out(() => {})[1].position, 1, "a number stays a number when another part of the book is edited");
+    t.eq(out(() => {})[2].position, 0, "zero too");
+    t.eq(out((b) => { b.entries[1].position = "after_char"; })[1].position, "after_char", "but can be changed");
+    t.ok(!("position" in out(() => {})[3]), "an entry without one doesn't get one");
+  }
+
+  console.log("\nthe edit record after a save");
+  {
+    const saved = { fields: { personality: "New" }, tags: ["a"], greetings: ["g"], lorebook: { entries: [] }, vaultTags: ["v"], flags: [], notes: "n", rating: 2, favorite: false };
+    const plain = V.editAfterSave(saved, saved, "fp2");
+    t.eq([plain.fingerprint, plain.fields, plain.tags, "greetings" in plain, "lorebook" in plain], ["fp2", {}, null, false, false], "what was saved is no longer an edit");
+    t.eq([plain.vaultTags, plain.notes, plain.rating], [["v"], "n", 2], "and the vault's own things stay");
+    const during = Object.assign({}, saved, { fields: { personality: "New", scenario: "typed meanwhile" }, favorite: true, notes: "n2" });
+    const kept = V.editAfterSave(saved, during, "fp2");
+    t.eq(kept.fields, { scenario: "typed meanwhile" }, "a field typed while the save ran stays an edit; the saved one doesn't");
+    t.eq([kept.favorite, kept.notes], [true, "n2"], "a favourite or note changed meanwhile is kept");
+    const retyped = V.editAfterSave(saved, Object.assign({}, saved, { fields: { personality: "Newer" }, tags: ["a", "b"], greetings: ["g2"], lorebook: { entries: [{}] } }), "fp2");
+    t.eq([retyped.fields, retyped.tags, retyped.greetings, retyped.lorebook], [{ personality: "Newer" }, ["a", "b"], ["g2"], { entries: [{}] }], "and so is anything saved that changed again meanwhile");
+    t.eq(V.editAfterSave(saved, undefined, "fp2").vaultTags, ["v"], "with no record left it goes by what was saved");
+  }
+
+  console.log("\na card's created date");
+  {
+    t.eq(V.cardDateMs(1700000000), 1700000000000, "seconds");
+    t.eq(V.cardDateMs(1700000000.5), 1700000000500, "seconds with a fraction aren't taken for milliseconds");
+    t.eq(V.cardDateMs("1700000000"), 1700000000000, "seconds as text");
+    t.eq(V.cardDateMs(1700000000000), 1700000000000, "milliseconds");
+    t.ok(Number.isNaN(V.cardDateMs("2023-11-14")), "anything else isn't a date (the Overview shows a dash)");
   }
 
   console.log("\ngreeting edits in the vault");
