@@ -73,6 +73,21 @@ console.log("\nSSE parsing");
   p2.feed(": keep-alive\r\n\r\ndata: not json\r\n\r\n" + ev({ choices: [{ delta: { content: "ok" } }] }).replace(/\n/g, "\r\n"));
   p2.end();
   t.eq(got2.map((g) => g.text), ["ok"], "comments and junk lines are skipped; CRLF works");
+  // A long line arriving in many chunks used to be searched again from its
+  // start on every chunk: 64 MB took over ten seconds, with the whole server
+  // waiting on it. Now it's linear, a fraction of a second.
+  const got3 = [];
+  const p3 = S.sseParser((d) => got3.push(d));
+  const piece = "a".repeat(64 * 1024);
+  const t0 = Date.now();
+  p3.feed('data: {"choices":[{"delta":{"content":"');
+  for (let i = 0; i < 1024; i++) p3.feed(piece);
+  p3.feed('"}}]}\n\ndata: {"choices":[{"delta":{"content":"next"}}]}\n');
+  p3.end();
+  const ms = Date.now() - t0;
+  t.ok(got3.length === 2 && got3[0].text.length === 64 * 1024 * 1024 && got3[1].text === "next",
+    "a 64 MB line in 64 KB chunks still parses, with what follows it");
+  t.ok(ms < 4000, "and doesn't take seconds (" + ms + " ms)");
 }
 
 console.log("\nwho may use /__vault/");

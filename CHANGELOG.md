@@ -8,6 +8,11 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.25
+
+- **A front end can't show you its own token or password back.** When a destination refused a card or a sign-in and quoted what it was sent ("refused key abc123", "wrong password …"), that token, password or session went straight to the screen and into the problem log, where copying the log for a bug report would pass it on. The local server now hides them as `[hidden]`, as it already did for the AI key.
+- **A runaway AI reply can't stall the local server.** An endpoint that streamed one very long line made the server search the whole line again on every new piece, taking seconds per few megabytes, with every other request (pages, sends, the workspace) waiting behind it. Each piece is now looked at once.
+
 ## 1.6.24
 
 - **Models that number their tool calls badly lose none of them.** Some servers mark every tool call as number 0, or don't number them at all. Two calls in one reply were then glued into one, with arguments like `{"path":"a.md"}{}`, so the first failed and the second never ran. They stay separate calls now, and two calls with the same id get an id each.

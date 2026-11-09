@@ -242,6 +242,29 @@ async function main() {
     t.ok(r.status === 200 && gen.got.length === before + 1 && gen.got[before].path === "/api/import" && gen.got[before].hasCard,
       "while a redirect on the same server is still followed", JSON.stringify(r.body));
     for (const s of [other, away, same]) { s.closeAllConnections(); s.close(); }
+    // Front ends that quote what they were sent back in their refusal: the
+    // token or password must not reach the page (or the problem log) that way.
+    const echo = http.createServer(async (req, res) => {
+      const b = await bodyOf(req);
+      const pw = (b.match(/"password":"([^"]*)"/) || [])[1] || "";
+      res.writeHead(req.url === "/api/auth/sign-in/username" && pw === "right-pass" ? 200 : 403, { "Content-Type": "application/json", "set-auth-token": "lv-session-77" });
+      res.end(JSON.stringify(req.url === "/api/auth/sign-in/username"
+        ? (pw === "right-pass" ? { token: "lv-session-77" } : { message: "wrong password " + pw })
+        : { error: "refused key " + (req.headers["x-api-key"] || String(req.headers.authorization || "").replace(/^Bearer /, "")) }));
+    });
+    await new Promise((res) => echo.listen(0, "127.0.0.1", res));
+    const ECHO = "http://127.0.0.1:" + echo.address().port;
+    await call("POST", "/__vault/dest/connect", { id: "echo", type: "http", baseUrl: ECHO + "/api/import", header: "X-Api-Key", token: "tok-SECRET-9876" });
+    r = await send("echo", "Ada.png", card());
+    t.ok(r.status === 401 && /refused key \[hidden\]/.test(r.body.error) && r.body.error.indexOf("SECRET") < 0,
+      "an importer that quotes the token back doesn't show it", JSON.stringify(r.body));
+    r = await call("POST", "/__vault/dest/connect", { id: "echo2", type: "lumiverse", baseUrl: ECHO, username: "ann", password: "hunter2-pass" });
+    t.ok(r.status === 401 && /wrong password \[hidden\]/.test(r.body.error) && r.body.error.indexOf("hunter2") < 0,
+      "a sign-in that quotes the password back doesn't show it", JSON.stringify(r.body));
+    await call("POST", "/__vault/dest/connect", { id: "echo3", type: "lumiverse", baseUrl: ECHO, username: "ann", password: "right-pass" });
+    r = await send("echo3", "Ada.png", card());
+    t.ok(r.status === 401 && r.body.error.indexOf("lv-session-77") < 0, "nor a session token", JSON.stringify(r.body));
+    echo.closeAllConnections(); echo.close();
     r = await call("POST", "/__vault/dest/connect", { id: "x", type: "ftp", baseUrl: "http://a" });
     t.ok(r.status === 400 && /Unknown destination type/.test(r.body.error), "unknown kinds are refused");
   }

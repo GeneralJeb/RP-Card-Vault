@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.24";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.6.25";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -341,6 +341,22 @@ const DEST_IMPL = {
   http: { connect: httpConnect, send: httpSend },
 };
 
+/**
+ * Never let a destination's token, password or session echo back through an
+ * error string. scrubSecret only knows the AI key, and a front end that
+ * refuses a token often quotes it ("bad token abc123"), which the page shows
+ * and puts in the problem log. Longest first, so one inside another goes too.
+ */
+function hideDestSecrets(e, d, body) {
+  if (!e || typeof e.message !== "string") return e;
+  const list = [d.token, d.csrf, body && body.password, body && body.token];
+  for (const c of d.cookies || []) list.push(c.slice(c.indexOf("=") + 1));
+  if (typeof d.token === "string" && d.token.startsWith("cookie:")) list.push(d.token.slice(d.token.indexOf("=") + 1));
+  const secrets = list.map((s) => String(s == null ? "" : s)).filter((s) => s.length >= 4).sort((a, b) => b.length - a.length);
+  for (const s of secrets) e.message = e.message.split(s).join("[hidden]");
+  return e;
+}
+
 function destPublic(id, d) {
   return { id, type: d.type, baseUrl: d.baseUrl, user: d.user || "", connected: true, at: d.at };
 }
@@ -353,7 +369,8 @@ async function destConnect(body) {
   const baseUrl = normalizeBase(body.baseUrl);
   if (!/^https?:\/\/[^/]+/i.test(baseUrl)) throw userError("The address must start with http:// or https://");
   const d = { type, baseUrl, user: "", at: Date.now() };
-  await DEST_IMPL[type].connect(d, body);
+  try { await DEST_IMPL[type].connect(d, body); }
+  catch (e) { throw hideDestSecrets(e, d, body); }
   destinations.set(id, d);
   return destPublic(id, d);
 }
@@ -361,7 +378,8 @@ async function destConnect(body) {
 async function destSend(id, name, buf) {
   const d = destinations.get(id);
   if (!d) throw userError("Not connected to that destination. Connect it in Settings → Destinations first.", 401);
-  return Object.assign({ ok: true }, await DEST_IMPL[d.type].send(d, name, buf));
+  try { return Object.assign({ ok: true }, await DEST_IMPL[d.type].send(d, name, buf)); }
+  catch (e) { throw hideDestSecrets(e, d); }
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -634,7 +652,11 @@ function toolCallIds(calls) {
 
 /** Incremental server-sent-events reader. Calls onChunk with readChoice() output. */
 function sseParser(onChunk) {
-  let buf = "";
+  // The text since the last newline, in pieces. Only each new piece is
+  // searched for a newline: searching the whole of a long line again on every
+  // chunk took seconds per few megabytes, and held up everything else the
+  // server was doing meanwhile.
+  let parts = [];
   const line = (raw) => {
     const l = raw.replace(/\r$/, "");
     if (l.indexOf("data:") !== 0) return;
@@ -646,11 +668,17 @@ function sseParser(onChunk) {
   };
   return {
     feed(s) {
-      buf += s;
-      let i;
-      while ((i = buf.indexOf("\n")) >= 0) { line(buf.slice(0, i)); buf = buf.slice(i + 1); }
+      let start = 0, i;
+      while ((i = s.indexOf("\n", start)) >= 0) {
+        parts.push(s.slice(start, i));
+        const l = parts.join("");
+        parts = [];
+        start = i + 1;
+        line(l);
+      }
+      if (start < s.length) parts.push(s.slice(start));
     },
-    end() { if (buf) line(buf); buf = ""; },
+    end() { const rest = parts.join(""); parts = []; if (rest) line(rest); },
   };
 }
 
