@@ -8,6 +8,11 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.26
+
+- **One card with "sign" in its name no longer stops an upload.** Sending several cards to SillyTavern, Lumiverse or another importer stops early when the front end signs you out or stops running. It decided that by looking for words like "sign" in the error, and a refusal can name the card, so one refused card called "Assignment" or "Designer" (or a refusal that said "design") left every card after it unsent. The run now stops only when the local server says the sign-in is gone or the front end can't be reached.
+- **Very long card names keep their emoji when uploaded.** A name over 200 characters is shortened before it's sent, and the cut could fall in the middle of an emoji, which then reached the front end as `�`. It's now cut on whole characters.
+
 ## 1.6.25
 
 - **A front end can't show you its own token or password back.** When a destination refused a card or a sign-in and quoted what it was sent ("refused key abc123", "wrong password …"), that token, password or session went straight to the screen and into the problem log, where copying the log for a bug report would pass it on. The local server now hides them as `[hidden]`, as it already did for the AI key.
