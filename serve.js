@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.25";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.6.26";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -1363,7 +1363,8 @@ async function handleDest(req, res, route, url) {
     const full = (url.searchParams.get("name") || "card.png").replace(/[\\/]/g, "_");
     // A long name is shortened before its extension, which says what kind of card it is.
     const ext = (full.match(/\.[a-z0-9]{1,10}$/i) || [""])[0];
-    const name = full.length > 200 ? full.slice(0, 200 - ext.length) + ext : full;
+    // Cut on whole characters: half an emoji would reach the front end as "�".
+    const name = full.length > 200 ? full.slice(0, 200 - ext.length).replace(/[\uD800-\uDBFF]$/, "") + ext : full;
     const buf = await readBody(req, 64 * 1024 * 1024);
     if (!buf.length) throw userError("The card file was empty.");
     const d = destinations.get(id);

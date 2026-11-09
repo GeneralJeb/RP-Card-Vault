@@ -23,7 +23,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const children = [];
 process.on("exit", () => { for (const c of children) try { c.kill(); } catch (e) {} });
 
-const { mod: V } = loadPureRegion(["migrateDestinations", "sanitizeDestination", "defaultDestinationOf", "DEST_KINDS", "DEFAULT_SETTINGS"]);
+const { mod: V } = loadPureRegion(["migrateDestinations", "sanitizeDestination", "defaultDestinationOf", "DEST_KINDS", "DEFAULT_SETTINGS", "destSendStopsRun"]);
 
 function freePort() {
   return new Promise((resolve) => {
@@ -66,7 +66,8 @@ function fakeSillyTavern(opts) {
     if (req.url === "/api/characters/import" && req.method === "POST") {
       const b = await bodyOf(req);
       const type = (b.match(/name="file_type"\r\n\r\n([^\r]+)/) || [])[1];
-      got.push({ fields: fieldNames(b), type, hasCard: b.indexOf("CARD-BYTES") >= 0, user: sess.user });
+      const fname = Buffer.from((b.match(/filename="([^"]*)"/) || [, ""])[1], "latin1").toString("utf8");
+      got.push({ fields: fieldNames(b), type, hasCard: b.indexOf("CARD-BYTES") >= 0, user: sess.user, fname });
       if (b.indexOf("BROKEN") >= 0) return json(200, { error: true });
       return json(200, { file_name: "imported_" + got.length });
     }
@@ -162,10 +163,19 @@ async function main() {
     t.eq(st.got[1].type, "json", "a .json card goes as json");
     r = await send("st", "Broken.png", card("BROKEN"));
     t.ok(r.status === 400 && /couldn't import/.test(r.body.error), "SillyTavern's 200 {error:true} is reported as a failure");
+    t.ok(!V.destSendStopsRun(r.status, r.body.error), "and the cards after it are still sent");
+    // The refusal names the file: a name with "sign" in it ("Assignment") once stopped the whole run.
+    r = await send("st", "Assignment Desk.png", card("BROKEN"));
+    t.ok(r.status === 400 && !V.destSendStopsRun(r.status, r.body.error), "even when the card's name has \"sign\" in it", JSON.stringify(r.body));
     r = await send("st", "x.txt", Buffer.from("hi"));
     t.ok(r.status === 400 && /can't import \.txt/.test(r.body.error), "files it can't import are refused here");
     r = await send("st", "Long ".repeat(45) + "name.json", Buffer.from("{\"CARD-BYTES\":1}"));
     t.ok(r.status === 200 && st.got[st.got.length - 1].type === "json", "a .json card with a very long file name still goes as json", JSON.stringify(r.body));
+    // Shortened on whole characters: an emoji cut in half would arrive as "�".
+    r = await send("st", "a".repeat(195) + "\u{1F600}".repeat(5) + ".png", card());
+    const fname = st.got[st.got.length - 1].fname;
+    t.ok(r.status === 200 && /\.png$/.test(fname) && fname.indexOf("�") < 0 && fname.length <= 200,
+      "a long name with an emoji where it's cut is shortened without breaking the emoji", JSON.stringify(fname.slice(190)));
 
     r = await call("POST", "/__vault/dest/connect", { id: "acc", type: "sillytavern", baseUrl: "http://127.0.0.1:" + ports.stAcc, username: "ann", password: "wrong" });
     t.ok(r.status === 401 && /Sign-in failed/.test(r.body.error), "with accounts on, a wrong password is refused");
@@ -203,11 +213,16 @@ async function main() {
       "and never a password, token or cookie");
     r = await send("nobody", "Ada.png", card());
     t.ok(r.status === 401 && /Not connected/.test(r.body.error), "sending to an unconnected destination is refused");
+    t.ok(V.destSendStopsRun(r.status, r.body.error), "which stops the rest of the run");
     await call("POST", "/__vault/dest/disconnect", { id: "st" });
     r = await send("st", "Ada.png", card());
     t.eq(r.status, 401, "after Disconnect, sending is refused");
     r = await call("POST", "/__vault/dest/connect", { id: "dead", type: "sillytavern", baseUrl: "http://127.0.0.1:1" });
     t.ok(r.status === 400 && /Couldn't reach http:\/\/127\.0\.0\.1:1/.test(r.body.error), "a front end that isn't running gives a sentence", r.body.error);
+    await call("POST", "/__vault/dest/connect", { id: "deadhttp", type: "http", baseUrl: "http://127.0.0.1:1/import" });
+    r = await send("deadhttp", "Ada.png", card());
+    t.ok(r.status === 400 && /^Couldn't reach /.test(r.body.error) && V.destSendStopsRun(r.status, r.body.error),
+      "a front end that stopped running stops the rest of the run too", r.body.error);
     // One that takes the connection and never answers.
     const hang = http.createServer(() => { /* never answers */ });
     await new Promise((res) => hang.listen(0, "127.0.0.1", res));

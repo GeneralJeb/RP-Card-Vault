@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.25";
+const APP_VERSION = "1.6.26";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -873,6 +873,16 @@ function migrateDestinations(settings) {
 function defaultDestinationOf(settings) {
   const list = (settings && settings.destinations) || [];
   return list.filter((d) => d.id === settings.defaultDestination)[0] || list[0] || null;
+}
+
+/**
+ * Whether a failed upload stops the rest of a run: the destination isn't
+ * connected or its sign-in is gone (serve.js answers 401), or it can't be
+ * reached (serve.js's own "Couldn't reach …"). Not the error's other words:
+ * a refusal can quote the card's name ("couldn't import Assignment.png").
+ */
+function destSendStopsRun(status, error) {
+  return status === 401 || /^Couldn't reach /.test(String(error || ""));
 }
 async function saveSettings(s) { return dbPut(STORE_KV, s, SETTINGS_KEY); }
 
@@ -17534,7 +17544,7 @@ function App() {
       return;
     }
     setScan({ running: true, done: 0, total: recs.length, label: "Uploading…", rootName: dest.name });
-    let ok = 0, failed = 0;
+    let ok = 0, failed = 0, stop = false;
     const errs = [];
     const okIds = [];
     for (let i = 0; i < recs.length; i++) {
@@ -17548,13 +17558,15 @@ function App() {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) {
           if (r.status === 401) setDestStatus((st) => { const byId = Object.assign({}, st.byId); delete byId[dest.id]; return { available: st.available, byId }; });
-          throw new Error(d.error || ("HTTP " + r.status));
+          const msg = d.error || ("HTTP " + r.status);
+          stop = destSendStopsRun(r.status, msg);
+          throw new Error(msg);
         }
         ok++; okIds.push(rec.id);
       } catch (e) {
         failed++;
         if (errs.length < 2) errs.push(rec.name + ": " + e.message);
-        if (/not connected|sign|unauthori|couldn't reach/i.test(e.message)) break;
+        if (stop) break;
       }
     }
     setScan(SCAN_IDLE);
