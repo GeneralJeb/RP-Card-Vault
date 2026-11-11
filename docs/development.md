@@ -7,11 +7,23 @@ npm install
 npm test
 ```
 
-`test/browser.test.js` drives the real page in a headless Microsoft Edge through Playwright: it adds a folder of test cards, searches, edits and saves a card, tags, trashes, sends to a folder destination and reloads. Edge comes with Windows; without it that suite is skipped locally (and fails on GitHub). If it fails, it saves a screenshot to your temp folder.
+`test/browser.test.js` drives the real page in a headless browser through Playwright: it adds a folder of test cards, searches, edits and saves a card, tags, trashes, sends to a folder destination and reloads. If it fails, it saves a screenshot to your temp folder.
+
+The vault runs in any Chromium browser, so the test does too:
+
+```
+node test/browser.test.js           the first installed of Edge, Chrome, Brave, then Playwright's own Chromium
+node test/browser.test.js brave     that one (edge, chrome, brave, chromium, or the path to a browser's program)
+npm run test:browsers               each of those that is installed, one after the other
+```
+
+A browser you name has to be installed, or the run fails. With no browser at all the suite is skipped locally (and fails on GitHub). Playwright's own Chromium needs `npx playwright install chromium` once. Firefox and Safari aren't run, because the vault can't file cards in them; what the page says to someone who opens it in one, or in a Brave with folder access still switched off, is checked in every run.
 
 The packages are for the tests only; the vault itself needs nothing installed but Node. Keep Babel pinned to 7.23.9, the version in `lib`. The same tests run on GitHub, on Windows, for every pull request.
 
 The launcher suite (`node test/launchers.test.js`) runs each system's launchers for real: the `.bat`, `.vbs` and `.ps1` files on Windows, and `start.sh` and `stop.sh` on a Mac or Linux. GitHub runs it on all three. It needs no packages installed.
+
+On GitHub, every pull request runs: every suite on Windows (the browser test in Edge), the browser test again in Chrome and in Brave, every suite on Linux, and the launcher and browser suites on a Mac.
 
 ## Branches and releases
 

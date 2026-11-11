@@ -106,7 +106,18 @@ t.ok(/pull_request:\s*\n\s*branches: \[dev, main\]/.test(testYml), "on every pul
 t.ok(/- run: npm ci\s*\n\s*- run: npm test/.test(testYml), "installing from the lockfile, then npm test");
 t.eq(Number((testYml.match(/node-version: (\d+)/) || [])[1]), relay.NODE_MIN, "on the oldest Node the vault supports");
 t.ok(/contents: read/.test(testYml), "with read-only access");
-t.ok(/os: \[ubuntu-latest, macos-latest\]/.test(testYml) && /- run: node test\/launchers\.test\.js/.test(testYml), "and the Mac and Linux launchers are run on a Mac and on Linux");
+t.ok(/browser: \[chrome, brave\]/.test(testYml) && /- run: node test\/browser\.test\.js \$\{\{ matrix\.browser \}\}/.test(testYml),
+  "the browser test also runs in Chrome and in Brave, not only in the Edge the first job finds");
+t.ok(/if: matrix\.browser == 'brave'\s*\n\s*run: choco install brave/.test(testYml) && /continue-on-error: \$\{\{ matrix\.browser == 'brave' \}\}/.test(testYml),
+  "Brave is installed for its run, and a failed install doesn't fail the pull request");
+t.ok(/- os: ubuntu-latest\s*\n\s*run: npm test/.test(testYml), "every suite runs on Linux too");
+t.ok(/- os: macos-latest\s*\n\s*run: node test\/launchers\.test\.js && node test\/browser\.test\.js/.test(testYml), "and on a Mac, the launchers and the browser test");
+{
+  const bt = read("test/browser.test.js");
+  t.ok(/const BROWSER_ORDER = \["edge", "chrome", "brave", "chromium"\];/.test(bt), "left to itself the browser test takes the first installed of Edge, Chrome, Brave and Playwright's Chromium");
+  t.ok(!/chromium\.launch\(\{ channel: "msedge" \}\)/.test(bt), "it is no longer tied to Edge");
+  t.eq(require("../package.json").scripts["test:browsers"], "node test/browser.test.js all", "npm run test:browsers runs it in every browser that's installed");
+}
 console.log("\nthe offline copy can't keep an old library");
 {
   // sw.js serves lib/ cache-first under unchanging names. Its LIB_HASH must
