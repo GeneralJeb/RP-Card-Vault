@@ -3991,6 +3991,119 @@ function backupsToPrune(names, file, keep, newest) {
   return mine.slice(keep).map((x) => x.n);
 }
 
+/* ── lorebook checks ──────────────────────────────────────────────────────
+   Things in a lorebook worth a look before the card goes to a front end.
+   None of them is a mistake for certain (an entry may be meant to come in
+   only when you bring its subject up), so they are notes, not errors. */
+
+/**
+ * A lorebook key as a test of some text: a key written /like this/i is a
+ * regular expression, as SillyTavern takes them; anything else is looked for
+ * as it is, in any case. null for a regex that doesn't compile.
+ * The test takes the text and the same text in lower case.
+ */
+function loreKeyTest(key) {
+  const k = String(key == null ? "" : key).trim();
+  if (!k) return null;
+  const m = /^\/(.+)\/([a-z]*)$/i.exec(k);
+  if (m) {
+    let re;
+    try { re = new RegExp(m[1], m[2].replace(/[^imsu]/g, "")); } catch (e) { return null; }
+    return (text) => re.test(text);
+  }
+  const low = k.toLowerCase();
+  return (text, lower) => lower.indexOf(low) >= 0;
+}
+
+/**
+ * `lb` is a lorebook as the vault holds it; `cardText` everything else the
+ * card says (its fields and greetings), which is what a front end has to go
+ * on before you've typed a word. Returns { notes, tokens }: notes are
+ * { kind, level ("warn" | "info"), text, entries } with entries numbered from
+ * 1 as the Lorebook tab numbers them; tokens are { all, always, budget }.
+ */
+function lorebookChecks(lb, cardText) {
+  const entries = (lb && Array.isArray(lb.entries)) ? lb.entries : [];
+  const notes = [];
+  const nums = (list) => list.map((i) => i + 1);
+  const say = (kind, level, text, list) => notes.push({ kind, level, text, entries: nums(list) });
+  const plural = (n, one, many) => (n === 1 ? one : many);
+  const on = (e) => e && e.enabled !== false;
+  const text = String(cardText || ""), lower = text.toLowerCase();
+
+  const noKeys = [], badRegex = [], silent = [], empty = [], off = [];
+  const byKey = new Map(), byContent = new Map();
+  const contents = entries.map((e) => (on(e) ? String(e.content || "") : ""));
+  const contentsLower = contents.map((c) => c.toLowerCase());
+  entries.forEach((e, i) => {
+    if (!e) return;
+    if (!on(e)) { off.push(i); return; }
+    const content = String(e.content || "").trim();
+    if (!content) empty.push(i);
+    else { const k = content.replace(/\s+/g, " "); if (!byContent.has(k)) byContent.set(k, []); byContent.get(k).push(i); }
+    const keys = (e.keys || []).map((k) => String(k).trim()).filter(Boolean);
+    for (const k of new Set(keys.map((x) => x.toLowerCase()))) { if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(i); }
+    if (e.constant) return;
+    if (!keys.length) { noKeys.push(i); return; }
+    const tests = keys.map(loreKeyTest);
+    if (tests.some((t) => !t)) badRegex.push(i);
+    // Its own content doesn't count: an entry can't bring itself in.
+    if (!tests.some((t) => t && (t(text, lower) || contents.some((c, j) => j !== i && c && t(c, contentsLower[j]))))) silent.push(i);
+  });
+
+  if (noKeys.length) say("nokeys", "warn", plural(noKeys.length, "This entry has", "These entries have") + " no keys and " + plural(noKeys.length, "isn't", "aren't") + " always on, so nothing can ever bring " + plural(noKeys.length, "it", "them") + " in.", noKeys);
+  if (badRegex.length) say("badregex", "warn", plural(badRegex.length, "This entry has", "These entries have") + " a key written as a /regular expression/ that isn't a valid one, so it will never match.", badRegex);
+  if (empty.length) say("empty", "warn", plural(empty.length, "This entry is", "These entries are") + " turned on but " + plural(empty.length, "has", "have") + " no text.", empty);
+  for (const [, list] of byContent) if (list.length > 1) say("duplicate", "warn", "These entries have the same text, so it can come in " + (list.length === 2 ? "twice" : list.length + " times") + ".", list);
+  const shared = Array.from(byKey).filter((x) => x[1].length > 1);
+  for (const [k, list] of shared.slice(0, 12)) say("shared", "info", "\"" + k + "\" is a key of " + list.length + " entries, so they come in together.", list);
+  if (shared.length > 12) say("shared", "info", (shared.length - 12) + " more keys are shared between entries.", []);
+  if (silent.length) say("silent", "info", "None of " + plural(silent.length, "this entry's", "these entries'") + " keys appears in the card's own text or in another entry: " + plural(silent.length, "it comes", "they come") + " in only once the chat brings one up.", silent);
+  if (off.length) say("off", "info", off.length + " " + plural(off.length, "entry is", "entries are") + " turned off.", off);
+
+  const live = entries.filter(on);
+  const tokens = {
+    all: live.reduce((a, e) => a + estimateTokens(e.content), 0),
+    always: live.filter((e) => e.constant).reduce((a, e) => a + estimateTokens(e.content), 0),
+    budget: lb && lb.tokenBudget != null && Number(lb.tokenBudget) > 0 ? Number(lb.tokenBudget) : 0,
+  };
+  if (tokens.budget) {
+    if (tokens.always > tokens.budget) say("budget", "warn", "The always-on entries alone come to about " + fmtNum(tokens.always) + " tokens, over the book's budget of " + fmtNum(tokens.budget) + ": some of them will be left out.", []);
+    else if (tokens.all > tokens.budget) say("budget", "info", "Every entry at once would come to about " + fmtNum(tokens.all) + " tokens, over the book's budget of " + fmtNum(tokens.budget) + ": when many are brought in together, some are left out.", []);
+  }
+  return { notes, tokens };
+}
+
+/* ── a greeting as a front end shows it ───────────────────────────────── */
+
+/**
+ * Card text with its placeholders filled in: {{char}} and {{user}} (and the
+ * older <BOT> and <USER>) become the names, a few that stand for nothing are
+ * taken out, and a {{random:…}} shows its first choice. Any other {{…}} is
+ * left as written, since what it becomes is up to the front end.
+ */
+function fillPlaceholders(text, names) {
+  const n = names || {};
+  const char = String(n.char || "Character"), user = String(n.user || "You");
+  let trimmed = false;
+  let s = String(text == null ? "" : text)
+    .replace(/\{\{\/\/[\s\S]*?\}\}/g, "")
+    .replace(/\{\{\s*char\s*\}\}|<BOT>/gi, () => char)
+    .replace(/\{\{\s*user\s*\}\}|<USER>/gi, () => user)
+    .replace(/\{\{\s*(?:noop|original)\s*\}\}/gi, "")
+    .replace(/\{\{\s*newline\s*\}\}/gi, "\n")
+    .replace(/\{\{\s*(?:random|pick)\s*::?([\s\S]*?)\}\}/gi, (m, list) => String(list.indexOf("::") >= 0 ? list.split("::")[0] : list.split(",")[0]).trim())
+    .replace(/\s*\{\{\s*trim\s*\}\}\s*/gi, () => { trimmed = true; return ""; });
+  return trimmed ? s.trim() : s;
+}
+
+/** The placeholders left in some text after fillPlaceholders: the ones only a front end can fill. */
+function placeholdersLeft(text) {
+  const out = [];
+  for (const m of String(text || "").matchAll(/\{\{[^{}\n]{1,60}\}\}/g)) if (out.indexOf(m[0]) < 0) out.push(m[0]);
+  return out;
+}
+
 /* ── a card's history ─────────────────────────────────────────────────────
    Two ways a card's file changes without the vault's doing: you edit it in
    your front end, or you go back to an earlier copy. The vault notes the
@@ -13145,6 +13258,70 @@ const LoreEntryRow = React.memo(function LoreEntryRow({ e, i, rowApi }) {
  * vault's edits like any field (the file changes on Save to card, which
  * keeps every lorebook field the vault doesn't show).
  */
+/** What's worth a look in a lorebook, above its entries. Worked out a moment after you stop typing. */
+function LoreChecks({ body, edit }) {
+  const [open, setOpen] = useState(false);
+  const [res, setRes] = useState(null);
+  const first = useRef(true);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const cardText = agentCardTexts(body, edit).filter((x) => x.key !== "lorebook").map((x) => x.text).join("\n");
+      setRes(lorebookChecks(effectiveLorebook(body, edit), cardText));
+    }, first.current ? 0 : 400);
+    first.current = false;
+    return () => clearTimeout(t);
+  }, [body, edit && edit.lorebook, edit && edit.fields, edit && edit.greetings]);
+  if (!res) return null;
+  const warn = res.notes.filter((n) => n.level === "warn").length;
+  const color = warn ? "warm" : res.notes.length ? "blue" : "green";
+  return (
+    <div className="lore-checks" style={{ marginBottom: 10, borderRadius: "var(--radius-sm)", border: "1px solid " + acRgba(color, 0.3), background: acRgba(color, 0.06) }}>
+      <div className="no-sel" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(!open)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(!open); } }}
+        style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 9px", cursor: "pointer", fontSize: 11.5, color: "var(--text-secondary)" }}>
+        <span style={{ color: ac(color), fontWeight: 600 }}>Checks</span>
+        <span style={{ flex: 1 }}>
+          {res.notes.length ? (warn ? warn + " to fix" + (res.notes.length > warn ? ", " + (res.notes.length - warn) + " to know" : "") : res.notes.length + " to know") : "nothing to note"}
+          {" · always on " + fmtTokens(res.tokens.always) + " · everything " + fmtTokens(res.tokens.all) + (res.tokens.budget ? " · budget " + fmtNum(res.tokens.budget) : "")}
+        </span>
+        <span style={{ color: "var(--text-muted)" }}>{open ? "▾" : "▸"}</span>
+      </div>
+      {open ? (
+        <div style={{ padding: "2px 9px 8px" }}>
+          {res.notes.length ? res.notes.map((n, i) => (
+            <div key={i} style={{ display: "flex", gap: 7, fontSize: 11, lineHeight: 1.55, padding: "3px 0", color: "var(--text-secondary)" }}>
+              <span style={{ color: n.level === "warn" ? "var(--accent-warm)" : "var(--accent-blue)" }}>{n.level === "warn" ? "⚠" : "·"}</span>
+              <span>{n.text}{n.entries.length ? <span style={{ color: "var(--text-muted)" }}>{" "}({n.entries.length > 12 ? "entries " + n.entries.slice(0, 12).join(", ") + " and " + (n.entries.length - 12) + " more" : (n.entries.length === 1 ? "entry " : "entries ") + n.entries.join(", ")})</span> : null}</span>
+            </div>
+          )) : <div style={{ fontSize: 11, color: "var(--text-muted)" }}>Every entry has keys and text, and none repeats another.</div>}
+          <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 5, lineHeight: 1.5 }}>
+            Token counts are estimates (about four characters to a token). Entries are numbered as they are listed below.
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// The name used for {{user}} in a greeting's preview, remembered while the page is open.
+let PREVIEW_USER_NAME = "You";
+
+/** A greeting as a front end shows it: placeholders filled in, markdown drawn. Card text stays text: no HTML is run. */
+function GreetingPreview({ text, names }) {
+  const filled = fillPlaceholders(text, names);
+  const left = placeholdersLeft(filled);
+  return (
+    <div className="greeting-preview" style={{ padding: "9px 11px", borderRadius: "var(--radius-sm)", background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+      {filled.trim() ? <Markdown text={filled} /> : <div style={{ fontSize: 11, color: "var(--text-muted)" }}>(empty)</div>}
+      {left.length ? (
+        <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.5 }}>
+          Left as written, for the front end to fill: {left.slice(0, 6).join(" ")}{left.length > 6 ? " …" : ""}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function LorebookEditor({ body, edit, onPatchEdit }) {
   const lb = effectiveLorebook(body, edit);
   const edited = !!(edit && edit.lorebook);
@@ -13182,6 +13359,7 @@ function LorebookEditor({ body, edit, onPatchEdit }) {
         <StatRow k="Scan depth" v={lb.scanDepth === null || lb.scanDepth === undefined ? "—" : asStr(lb.scanDepth)} />
         <StatRow k="Token budget" v={lb.tokenBudget === null || lb.tokenBudget === undefined ? "—" : fmtNum(lb.tokenBudget)} />
       </div>
+      <LoreChecks body={body} edit={edit} />
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
         {edited ? <Pill color="warm">edited</Pill> : null}
         <span style={{ fontSize: 10, color: "var(--text-muted)", flex: 1, minWidth: 160 }}>
@@ -13217,6 +13395,8 @@ function Inspector({ history, sendStatus, rec, roots, edit, tagIndex, onPatchEdi
   }, [rec.id, rec.fp, rec.scannedAt]);
 
   useEffect(() => { setTab("overview"); }, [rec.id]);
+  const [greetPreview, setGreetPreview] = useState(false);
+  const [previewUser, setPreviewUser] = useState(PREVIEW_USER_NAME);
 
   // The full-size picture: the card's own, with its embedded ones a step away.
   // `owned` items were loaded for the viewer and go when it closes.
@@ -13546,6 +13726,35 @@ function Inspector({ history, sendStatus, rec, roots, edit, tagIndex, onPatchEdi
 
         {!loading && body && tab === "greet" ? (
           <Fragment>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+              <SmallBtn color="cyan" active={greetPreview} onClick={() => setGreetPreview(!greetPreview)}
+                title="Show the greetings as a front end would: names filled in for {{char}} and {{user}}, and *markdown* drawn">{greetPreview ? "Back to editing" : "Preview"}</SmallBtn>
+              {greetPreview ? (
+                <label style={{ fontSize: 10.5, color: "var(--text-muted)", display: "flex", gap: 6, alignItems: "center" }}>
+                  {"{{user}} is"}
+                  <input value={previewUser} aria-label="Name shown for {{user}}" onChange={(e) => { PREVIEW_USER_NAME = e.target.value; setPreviewUser(e.target.value); }}
+                    style={Object.assign({}, inputBase, { width: 110, padding: "3px 7px", fontSize: 11 })} />
+                </label>
+              ) : null}
+            </div>
+            {greetPreview ? (
+              <Fragment>
+                <label style={tinyLabel}>First message</label>
+                <GreetingPreview text={effectiveField(body, edit, "first_mes")} names={{ char: body.nickname || effectiveField(body, edit, "name") || rec.name, user: previewUser }} />
+                <label style={Object.assign({}, tinyLabel, { marginTop: 14 })}>Alternate greetings ({greetings.length})</label>
+                {greetings.length === 0 ? <div style={{ fontSize: 11, color: "var(--text-muted)" }}>None.</div> : null}
+                {greetings.map((g, i) => (
+                  <div key={i} style={{ marginBottom: 10 }}>
+                    <div style={Object.assign({}, monoTiny, { color: "var(--text-muted)", marginBottom: 3 })}>#{i + 1} · {fmtTokens(estimateTokens(g))}</div>
+                    <GreetingPreview text={g} names={{ char: body.nickname || effectiveField(body, edit, "name") || rec.name, user: previewUser }} />
+                  </div>
+                ))}
+                <div style={{ fontSize: 9.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                  A preview, not a promise: each front end draws text its own way. Card text is shown as text, so any HTML in it appears as written.
+                </div>
+              </Fragment>
+            ) : null}
+            {greetPreview ? null : (<Fragment>
             <Field label="First message">
               <EditableText value={effectiveField(body, edit, "first_mes")} original={body.first_mes || ""} rows={7}
                 onChange={(v) => setField("first_mes", v)} onRevert={() => setField("first_mes", body.first_mes || "")} />
@@ -13569,6 +13778,7 @@ function Inspector({ history, sendStatus, rec, roots, edit, tagIndex, onPatchEdi
             {edit && edit.greetings ? (
               <SmallBtn color="muted" onClick={() => onPatchEdit({ greetings: null })}>revert all greetings</SmallBtn>
             ) : null}
+            </Fragment>)}
           </Fragment>
         ) : null}
 

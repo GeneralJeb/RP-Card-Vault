@@ -18,6 +18,7 @@ const { mod: V } = loadPureRegion([
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
   "writeCardFile", "cardFormatOf", "pngWithoutCard", "reusableRecord",
+  "lorebookChecks", "loreKeyTest", "fillPlaceholders", "placeholdersLeft",
   "cardChanges", "cardCompareParts", "cardBackupsOf", "backupStampTime", "listCardBackups", "readCardBackup", "restoreCardBackup", "prevBodyKey",
 ]);
 
@@ -346,6 +347,64 @@ async function main() {
     try { await V.moveCardTo(rec, { id: "s", name: "Inbox", role: "inbox", handle: src.handle }, { id: "d", name: "Library", role: "library", handle: dst.handle }, ""); } catch (e) { err = e; }
     t.ok(err && /content mismatch/.test(err.message) && /source left untouched/.test(err.message), "a copy damaged in the middle of a big file is caught", err && err.message);
     t.ok(src.get("big.png") && V.sameBytes(src.get("big.png"), big), "and the original stays where it was");
+  }
+
+  console.log("\nlorebook checks");
+  {
+    const e = (keys, content, more) => Object.assign({ keys, secondaryKeys: [], content, comment: "", enabled: true, constant: false, selective: false, insertionOrder: 0 }, more || {});
+    const cardText = "Ada keeps a workshop by the harbour. The Engine hums under the floor.";
+    const lb = { tokenBudget: 20, entries: [
+      e(["engine"], "The engine is older than the town."),                 // 1: its key is in the card's text
+      e(["gull", "tern"], "Seabirds nest in the rafters."),                // 2: no key anywhere: only the chat brings it in
+      e([], "Never reachable."),                                           // 3: no keys, not always on
+      e([], "Always here.", { constant: true }),                           // 4: always on, so no keys needed
+      e(["Engine", "boiler"], "The boiler feeds the engine."),             // 5: shares "engine" with 1
+      e(["rafters"], "The rafters are oak."),                              // 6: its key is in entry 2's text
+      e(["/har(bour|bor)/i"], "The harbour freezes in winter."),           // 7: a regex key that matches the card
+      e(["/un(closed/"], "Broken key."),                                   // 8: a regex that isn't one
+      e(["oak"], ""),                                                      // 9: on, but empty
+      e(["x"], "Seabirds nest in the rafters."),                           // 10: the same text as 2
+      e(["ghost"], "Turned off.", { enabled: false }),                     // 11: off
+    ] };
+    const res = V.lorebookChecks(lb, cardText);
+    const of = (kind) => res.notes.filter((n) => n.kind === kind);
+    t.eq(of("nokeys")[0].entries, [3], "an entry with no keys that isn't always on is flagged: nothing can bring it in (an always-on one is fine)");
+    t.eq(of("badregex")[0].entries, [8], "so is a key written as a regular expression that isn't a valid one");
+    t.eq(of("empty")[0].entries, [9], "and an entry that's on but has no text");
+    t.eq(of("duplicate")[0].entries, [2, 10], "two entries with the same text are named together");
+    t.eq(of("shared").map((n) => n.entries), [[1, 5]], "a key two entries share is noted, in any case, with both entries");
+    t.eq(of("silent")[0].entries, [2, 8, 10], "entries whose keys appear nowhere in the card's text or another entry are listed: only the chat can bring them in");
+    t.ok(of("silent")[0].entries.indexOf(1) < 0 && of("silent")[0].entries.indexOf(6) < 0 && of("silent")[0].entries.indexOf(7) < 0,
+      "not one whose key is in the card's text, in another entry's text, or matched by its regex");
+    t.eq(of("off")[0].entries, [11], "entries turned off are counted, and take no part in the rest");
+    t.ok(res.tokens.budget === 20 && res.tokens.always === 3 && res.tokens.all > 20 && of("budget").length === 1 && of("budget")[0].level === "info",
+      "the budget note says when everything at once wouldn't fit", res.tokens);
+    t.ok(res.notes.every((n) => n.level === "warn" || n.level === "info") && res.notes.filter((n) => n.level === "warn").length === 4, "four of the notes are things to fix; the rest are things to know");
+    const self = V.lorebookChecks({ entries: [e(["moon"], "The moon is bright tonight.")] }, "A card about the sea.");
+    t.eq(self.notes.filter((n) => n.kind === "silent")[0].entries, [1], "an entry's own text doesn't count: it can't bring itself in");
+    const clean = V.lorebookChecks({ entries: [e(["sea"], "The sea is cold."), e([], "Always.", { constant: true })] }, "A card about the sea.");
+    t.eq([clean.notes.length, clean.tokens.budget], [0, 0], "a tidy book has nothing to note");
+    t.eq(V.lorebookChecks(null, "x").notes.length, 0, "and no book at all is no trouble");
+    const big = { entries: Array.from({ length: 2000 }, (_, i) => e(["key" + i], "Entry number " + i + " mentions key" + ((i + 1) % 2000) + ".")) };
+    const t0 = Date.now();
+    V.lorebookChecks(big, "nothing relevant");
+    t.ok(Date.now() - t0 < 4000, "a 2,000-entry book is checked quickly", (Date.now() - t0) + " ms");
+    t.ok(V.loreKeyTest("/Gulls?/")("two Gulls", "two gulls") && !V.loreKeyTest("/Gulls?/")("two gulls", "two gulls") && V.loreKeyTest("GULL")("x", "a gull") && V.loreKeyTest("") === null,
+      "a plain key matches in any case; a regex key matches as written");
+  }
+
+  console.log("\na greeting as a front end shows it");
+  {
+    const names = { char: "Ada", user: "Jeb" };
+    t.eq(V.fillPlaceholders("{{char}} looks at {{user}}. <BOT> nods to <USER>, and {{ Char }} smiles.", names), "Ada looks at Jeb. Ada nods to Jeb, and Ada smiles.",
+      "{{char}} and {{user}} become the names, in any case, and so do the older <BOT> and <USER>");
+    t.eq(V.fillPlaceholders("One.{{// a note to self}} Two.{{noop}}{{newline}}Three.", names), "One. Two.\nThree.", "comments and placeholders that stand for nothing are taken out; {{newline}} is a line break");
+    t.eq(V.fillPlaceholders("  Hello.  {{trim}}  ", names), "Hello.", "{{trim}} trims");
+    t.eq(V.fillPlaceholders("A {{random:red,green,blue}} door and a {{pick::oak::elm}} table.", names), "A red door and a oak table.", "a {{random}} or {{pick}} shows its first choice");
+    t.eq(V.fillPlaceholders("It is {{time}}, {{char}}.", names), "It is {{time}}, Ada.", "anything else in braces is left as written, for the front end");
+    t.eq(V.placeholdersLeft("It is {{time}} on {{date}}; {{time}} again."), ["{{time}}", "{{date}}"], "and those are listed once each");
+    t.eq(V.fillPlaceholders("{{user}}", { char: "$& and $1", user: "$`x" }), "$`x", "a name with a dollar sign in it is only a name");
+    t.eq([V.fillPlaceholders(null, names), V.fillPlaceholders("{{char}}", null)], ["", "Character"], "no text is no text, and no names are stand-ins");
   }
 
   console.log("\na card's history: what changed, its backups, and going back to one");
