@@ -24,6 +24,7 @@ const { mod: V } = loadPureRegion([
   "vaultDataFileName", "vaultDataFilesToPrune", "autoBackupDue", "autoBackupTarget", "dirKey", "startupSort",
   "vaultDataBackupNames", "vaultDataBackupDate", "vaultDataWeight", "backupOutweighs",
   "editsFollowingCards", "changedFingerprints", "mergeEditRecords", "editHolds",
+  "cleanFilters", "sameFilters", "sanitizeSavedViews", "savedViewsWith", "viewFiltersFor", "suggestViewName", "SAVED_VIEWS_MAX", "DEFAULT_SETTINGS",
 ], { indexedDB, IDBKeyRange });
 
 async function main() {
@@ -84,6 +85,29 @@ async function main() {
     t.eq(V.handleCrashVersion(""), 0, "an empty user agent is fine");
     t.eq(V.browserUpdatePage("Edge"), "edge://settings/help", "Edge users are sent to Edge's update page");
     t.eq(V.browserUpdatePage("Chrome"), "chrome://settings/help", "Chrome users to Chrome's");
+  }
+
+  console.log("\nsaved views: the sidebar as you had it, by name");
+  {
+    const now = { q: "sea", deep: false, sort: "tokensDesc", tagsInc: ["fantasy"], tagsExc: [], tagMode: "or", dirs: ["r1::Inbox", "gone::Old"], specs: ["v3"], flags: { favorite: true, hasLore: false }, flagKeys: ["keeper"], tokenMin: 100, tokenMax: 0 };
+    const c = V.cleanFilters(now);
+    t.eq([c.q, c.sort, c.tagMode, c.flags, c.tokenMin, c.dirs.length], ["sea", "tokensDesc", "or", { favorite: true }, 100, 2], "a view keeps the search, sort, tags, flags, folders and limits; a flag that's off isn't kept");
+    t.eq(V.cleanFilters({ sort: "nonsense", tagsInc: "x", flags: null, tokenMin: -5, extra: 1 }), V.cleanFilters(null), "anything that isn't a filter comes out as no filter at all");
+    t.ok(V.sameFilters(now, Object.assign({}, now, { flags: { hasLore: false, favorite: true } })) && !V.sameFilters(now, Object.assign({}, now, { sort: "name" })),
+      "two filter states are the same view when they pick the same things, whatever order they were picked in");
+
+    let views = V.savedViewsWith([], "  Sea  cards ", now, "v1");
+    t.eq([views.length, views[0].id, views[0].name], [1, "v1", "Sea cards"], "a view is saved under its name, tidied");
+    views = V.savedViewsWith(views, "Long ones", { sort: "tokensDesc" }, "v2");
+    views = V.savedViewsWith(views, "sea CARDS", { q: "harbour" }, "v3");
+    t.eq([views.map((v) => v.id + ":" + v.name), views[0].filters.q], [["v1:sea CARDS", "v2:Long ones"], "harbour"], "saving under a name already used (in any case) replaces that view, where it was");
+    t.eq(V.savedViewsWith(views, "   ", now, "v4").length, 2, "a view with no name isn't saved");
+    t.eq(V.viewFiltersFor(V.savedViewsWith([], "x", now, "v9")[0], [{ id: "r1" }]).dirs, ["r1::Inbox"], "a folder that isn't linked any more is left out when the view is shown");
+    t.eq(V.sanitizeSavedViews([{ id: "a", name: "A", filters: now }, { id: "a", name: "Twice" }, { name: "No id" }, null, "x", { id: "b", name: "" }]).map((v) => v.name), ["A"],
+      "views from a backup are checked: no name, no id, or an id twice, and it's dropped");
+    t.eq(V.sanitizeSavedViews(Array.from({ length: 60 }, (_, i) => ({ id: "v" + i, name: "View " + i }))).length, V.SAVED_VIEWS_MAX, "and there's a limit to how many are kept");
+    t.eq([V.suggestViewName(now), V.suggestViewName({})], ["\"sea\" + fantasy + favorite + Inbox", "My view"], "a name is offered from what the view filters by");
+    t.eq(V.DEFAULT_SETTINGS.savedViews, [], "a new vault has none");
   }
 
   console.log("\na card edited somewhere else keeps its notes, favourite and flags");

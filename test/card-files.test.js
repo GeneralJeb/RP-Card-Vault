@@ -19,6 +19,8 @@ const { mod: V } = loadPureRegion([
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
   "writeCardFile", "cardFormatOf", "pngWithoutCard", "reusableRecord",
   "lorebookChecks", "loreKeyTest", "fillPlaceholders", "placeholdersLeft",
+  "renameBase", "planRename", "renameCardFile", "RENAME_PATTERNS",
+  "similarityText", "textShingles", "minHashSignature", "signatureSimilarity", "similarGroups", "SIMILAR_MIN",
   "cardChanges", "cardCompareParts", "cardBackupsOf", "backupStampTime", "listCardBackups", "readCardBackup", "restoreCardBackup", "prevBodyKey",
 ]);
 
@@ -347,6 +349,89 @@ async function main() {
     try { await V.moveCardTo(rec, { id: "s", name: "Inbox", role: "inbox", handle: src.handle }, { id: "d", name: "Library", role: "library", handle: dst.handle }, ""); } catch (e) { err = e; }
     t.ok(err && /content mismatch/.test(err.message) && /source left untouched/.test(err.message), "a copy damaged in the middle of a big file is caught", err && err.message);
     t.ok(src.get("big.png") && V.sameBytes(src.get("big.png"), big), "and the original stays where it was");
+  }
+
+  console.log("\ncards that read alike");
+  {
+    const base = "Ada is a clockmaker who keeps a narrow workshop by the harbour. She repairs watches for sailors and builds automata in the back room when the tide is out. " +
+      "She is dry, patient and exact, and hates being kept waiting. Her left hand is brass from the wrist down, the work of her own bench. " +
+      "The town thinks her strange, and she lets it, because strange people are left alone to work. She keeps a ledger of every promise made to her.";
+    const sigOf = (text) => V.minHashSignature(V.textShingles(text));
+    const card = (id, fp, text) => ({ id, fp, sig: sigOf(text) });
+    const rework = base.replace("narrow workshop", "cramped workshop").replace("dry, patient and exact", "dry, patient and precise") + " Lately she has taken an apprentice.";
+    const other = "Bram keeps the lighthouse at the end of the northern breakwater. He is slow to speak and quick to notice weather. He has not left the rock in eleven years, " +
+      "and the supply boat brings him books that he reads aloud to the lamp. Gulls nest in the gallery and he knows each of them by the way it lands.";
+
+    t.ok(V.signatureSimilarity(sigOf(base), sigOf(base)) === 1, "a text is wholly like itself");
+    const alike = V.signatureSimilarity(sigOf(base), sigOf(rework)), unlike = V.signatureSimilarity(sigOf(base), sigOf(other));
+    t.ok(alike >= V.SIMILAR_MIN && alike < 1, "a reworked card still shares most of its wording with the original", alike);
+    t.ok(unlike < 0.15, "a different card shares next to none", unlike);
+    t.eq(V.textShingles("Too short to say anything."), null, "a card with only a few words isn't compared at all");
+    t.ok(V.signatureSimilarity(sigOf(base), sigOf(base.toUpperCase().replace(/\./g, " !! "))) === 1, "capitals and punctuation make no difference");
+    t.ok(V.signatureSimilarity(sigOf(base), sigOf(base.replace(/Ada/g, "{{char}}").replace(/She/g, "{{char}}"))) > 0.5, "nor much, a name swapped for a placeholder");
+    t.eq(V.similarityText({ description: "d", personality: "p", scenario: "s", first_mes: "f", creator_notes: "ignored" }), "d\np\ns\nf", "cards are compared by what they say about the character");
+
+    const groups = V.similarGroups([card("a", "fp-a", base), card("b", "fp-b", rework), card("c", "fp-c", other), card("a2", "fp-a", base)]);
+    t.eq(groups.length, 1, "the original and its rework make one group; the unrelated card is in none");
+    t.eq(groups[0].ids.slice().sort(), ["a", "a2", "b"], "an exact copy of the original joins it there, through the rework");
+    t.ok(groups[0].score >= V.SIMILAR_MIN && groups[0].score <= 1, "with how alike they are", groups[0].score);
+    t.eq(V.similarGroups([card("a", "fp-a", base), card("a2", "fp-a", base)]).length, 0, "two copies of one card are duplicates already, not a group of similar cards");
+    t.eq(V.similarGroups([card("a", "fp-a", base), card("c", "fp-c", other)]).length, 0, "and unlike cards make no group");
+    t.eq(V.similarGroups([]).length, 0, "nor does an empty library");
+
+    // Thousands of cards: found through their signatures, not by comparing each with every other.
+    const rnd = (() => { let x = 12345; return () => { x = (Math.imul(x, 1103515245) + 12345) >>> 0; return x; }; })();
+    const vocab = Array.from({ length: 4000 }, (_, i) => "w" + i);
+    const many = Array.from({ length: 3000 }, (_, i) => card("n" + i, "fp" + i, Array.from({ length: 150 }, () => vocab[rnd() % vocab.length]).join(" ")));
+    many.push(card("x1", "fpx1", base), card("x2", "fpx2", rework));
+    const t0 = Date.now();
+    const found = V.similarGroups(many);
+    t.ok(Date.now() - t0 < 5000, "3,000 cards are compared in a moment", (Date.now() - t0) + " ms");
+    t.eq(found.map((g) => g.ids.slice().sort().join()), ["x1,x2"], "and the one pair that reads alike is the only group found");
+  }
+
+  console.log("\nrenaming card files from a pattern");
+  {
+    const rec = (file, name, creator, more) => Object.assign({ id: "r:" + file, rootId: "r", dir: "", rel: file, file, ext: file.split(".").pop(), ok: true, name, creator: creator || "", version: "", spec: "v3", tags: [], mtime: 0 }, more || {});
+    const ada = rec("download (3).png", "Ada Clockmaker", "someone", { version: "2", tags: ["victorian"] });
+    t.eq(V.renameBase("{creator} - {name}", ada), "someone - Ada Clockmaker", "a pattern names a file after its card");
+    t.eq(V.renameBase("{name} v{version} [{tag}] ({spec})", ada), "Ada Clockmaker v2 [victorian] (v3)", "with its version, first tag and format");
+    const bare = rec("x.png", "Lune", "");
+    t.eq([V.renameBase("{creator} - {name}", bare), V.renameBase("{name} ({creator})", bare), V.renameBase("{name} v{version}", bare)], ["Lune", "Lune", "Lune"],
+      "a card with no creator or version doesn't come out as \" - Lune\", \"Lune ()\" or \"Lune v\"");
+    t.eq([V.renameBase("{name}", rec("x.png", "What? A/B: \"C\"", "")), V.renameBase("{name}", rec("x.png", "CON", "")), V.renameBase("{nonsense}", bare), V.renameBase("", bare)],
+      ["What_ A_B_ _C_", "_CON", "{nonsense}", "card"], "characters a file name can't have are replaced, a device name is avoided, and an unknown {word} stays as typed");
+
+    const lib = [ada, rec("Bram.png", "Bram Lighthouse", "tidewriter"), rec("bram2.png", "Bram Lighthouse", "tidewriter"), rec("Cora.json", "Cora", ""), rec("someone - Dora.png", "Dora", "someone"),
+      rec("broken.png", "broken", "", { ok: false }), rec("locked.png", "Eve", "x", { rootId: "ref", id: "ref:locked.png" }), rec("tidewriter - bram lighthouse.png", "Other", "z", { id: "r:other" })];
+    const plan = V.planRename(lib.slice(0, 7), "{creator} - {name}", lib, (r) => (r.rootId === "ref" ? "reference" : ""));
+    const row = (file) => plan.find((p) => p.from === file);
+    t.eq([row("download (3).png").to, row("download (3).png").action], ["someone - Ada Clockmaker.png", "rename"], "each card is given its new name, keeping its file type");
+    t.eq([row("Bram.png").to, row("bram2.png").to], ["tidewriter - Bram Lighthouse (2).png", "tidewriter - Bram Lighthouse (3).png"],
+      "a name another file in the folder already has (in any case), or an earlier card in the plan took, gets a number");
+    t.eq([row("Cora.json").to, row("someone - Dora.png").action], ["Cora.json", "same"], "a card already named that is left alone");
+    t.ok(row("broken.png").action === "skip" && /not readable/.test(row("broken.png").why) && row("locked.png").action === "skip" && /Reference/.test(row("locked.png").why),
+      "a file that isn't a card, or is in a read-only folder, is skipped, saying why");
+    t.eq(V.planRename([rec("ada.png", "Ada", "")], "{name}", [], null)[0].action, "same", "a name that differs only in its capitals counts as the same name");
+
+    // The rename itself, on a folder that ignores case.
+    const fsys = memFs("Library");
+    const bytes = V.solidPng(4, 4, [1, 2, 3]);
+    fsys.put("people/download.png", bytes);
+    fsys.put("people/taken.png", V.solidPng(4, 4, [9, 9, 9]));
+    const root = { id: "r", name: "Library", role: "library", handle: fsys.handle };
+    const file = { id: "r:people/download.png", rootId: "r", dir: "people", rel: "people/download.png", file: "download.png", ext: "png", name: "Ada" };
+    const done = await V.renameCardFile(file, root, "someone - Ada.png");
+    t.ok(!done.skipped && done.name === "someone - Ada.png" && fsys.get("people/download.png") === null && V.sameBytes(fsys.get("people/someone - Ada.png"), bytes),
+      "the file is there under its new name, byte for byte, and gone under the old one");
+    const second = await V.renameCardFile(Object.assign({}, file, { file: "someone - Ada.png", rel: "people/someone - Ada.png" }), root, "TAKEN.png");
+    t.ok(second.name === "TAKEN (2).png" && fsys.get("people/taken.png") && V.sameBytes(fsys.get("people/TAKEN (2).png"), bytes), "a name a different file has is never written over: the renamed file gets a number");
+    t.ok((await V.renameCardFile(Object.assign({}, file, { file: "TAKEN (2).png" }), root, "taken (2).png")).skipped, "the same name in other capitals is no rename");
+    const refused = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message; } };
+    t.ok(/file's type/.test(await refused(() => V.renameCardFile(Object.assign({}, file, { file: "TAKEN (2).png" }), root, "ada.json"))), "a rename can't change the file's type");
+    V.setFolderRolesNow({ "r::people": "reference" });
+    try { t.ok(/Reference folder/.test(await refused(() => V.renameCardFile(Object.assign({}, file, { file: "TAKEN (2).png" }), root, "ada.png"))), "and nothing is renamed in a Reference folder"); }
+    finally { V.setFolderRolesNow({}); }
   }
 
   console.log("\nlorebook checks");

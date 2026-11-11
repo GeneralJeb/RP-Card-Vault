@@ -809,6 +809,7 @@ const DEFAULT_SETTINGS = {
   lastSort: "name",              // kept up to date while startSort is "last"
   accentColor: "",               // "#rrggbb" replaces the theme's main accent; "" keeps it
   customFlags: [],               // flags of your own: see sanitizeCustomFlags
+  savedViews: [],                // the sidebar as you had it, by name: see sanitizeSavedViews
   viewMode: "grid",              // grid | list
   autoRescan: false,
   trashKey: "",                  // "rootId::dir" - where "move to trash" sends things
@@ -3989,6 +3990,275 @@ function backupsToPrune(names, file, keep, newest) {
   }
   mine.sort((a, b) => (a.k < b.k ? 1 : a.k > b.k ? -1 : 0));
   return mine.slice(keep).map((x) => x.n);
+}
+
+/* ── cards that read alike ────────────────────────────────────────────────
+   The duplicate finder knows two cards are one when their name, description
+   and first message match to the letter. A rework, a touched-up repost or the
+   same character under another name gets past that. This compares wording
+   instead: every run of three words in a card's text, and how many of those
+   runs two cards share. So that thousands of cards needn't each be compared
+   with every other, each card is boiled down to a short signature (MinHash)
+   that lets likely pairs be found directly. All of it runs on this computer. */
+const SIMILAR_HASHES = 63, SIMILAR_ROWS = 3;
+const SIMILAR_MIN = 0.6;          // how much of their wording two cards share to count as alike
+const SIMILAR_MIN_WORDS = 12;     // a card with less text than this says too little to compare
+
+/** The text a card is compared by: what it says about the character. */
+function similarityText(body) {
+  const b = body || {};
+  return [b.description, b.personality, b.scenario, b.first_mes].map((x) => String(x || "")).join("\n");
+}
+
+/** A piece of text as the set of its three-word runs, each as a number; null when there's too little of it. */
+function textShingles(text) {
+  const words = String(text || "").toLowerCase().replace(/\{\{[^}]*\}\}/g, " ").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (words.length < SIMILAR_MIN_WORDS) return null;
+  const out = new Set();
+  for (let i = 0; i + 2 < words.length; i++) {
+    const run = words[i] + " " + words[i + 1] + " " + words[i + 2];
+    let h = 0x811c9dc5;
+    for (let k = 0; k < run.length; k++) { h ^= run.charCodeAt(k); h = Math.imul(h, 0x01000193); }
+    out.add(h >>> 0);
+  }
+  return out;
+}
+
+const SIMILAR_SEEDS = (function () {
+  const a = new Uint32Array(SIMILAR_HASHES), b = new Uint32Array(SIMILAR_HASHES);
+  let x = 0x9e3779b9;
+  const next = () => { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x; };
+  for (let i = 0; i < SIMILAR_HASHES; i++) { a[i] = next() | 1; b[i] = next(); }
+  return { a, b };
+})();
+
+/** A set of runs boiled down to a signature: for each of a fixed set of scramblings, the smallest value any run takes. */
+function minHashSignature(shingles) {
+  const sig = new Uint32Array(SIMILAR_HASHES).fill(0xffffffff);
+  const { a, b } = SIMILAR_SEEDS;
+  for (const h of shingles) {
+    for (let i = 0; i < SIMILAR_HASHES; i++) {
+      const v = (Math.imul(h, a[i]) + b[i]) >>> 0;
+      if (v < sig[i]) sig[i] = v;
+    }
+  }
+  return sig;
+}
+
+/** How alike two signatures are, 0 to 1: about the share of three-word runs the two texts have in common. */
+function signatureSimilarity(x, y) {
+  let same = 0;
+  for (let i = 0; i < SIMILAR_HASHES; i++) if (x[i] === y[i]) same++;
+  return same / SIMILAR_HASHES;
+}
+
+/**
+ * Groups of cards that read alike. `items` are { id, fp, sig }; cards with
+ * the same fingerprint are already known duplicates, so a pair of those
+ * doesn't make a group by itself. Returns [{ ids, score }], most alike first:
+ * score is the likeness of the pairs that hold the group together, averaged.
+ */
+function similarGroups(items, min) {
+  const floor = min || SIMILAR_MIN;
+  const list = items || [];
+  const buckets = new Map();
+  list.forEach((it, idx) => {
+    for (let b = 0; b + SIMILAR_ROWS <= SIMILAR_HASHES; b += SIMILAR_ROWS) {
+      let key = b + ":";
+      for (let r = 0; r < SIMILAR_ROWS; r++) key += it.sig[b + r] + ",";
+      const got = buckets.get(key);
+      if (got) got.push(idx); else buckets.set(key, [idx]);
+    }
+  });
+  const parent = list.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const seen = new Set(), links = [];
+  for (const group of buckets.values()) {
+    if (group.length < 2 || group.length > 200) continue;   // a bucket that big is boilerplate, not likeness
+    for (let i = 0; i < group.length; i++) for (let j = i + 1; j < group.length; j++) {
+      const x = group[i], y = group[j], pair = x * list.length + y;
+      if (seen.has(pair)) continue;
+      seen.add(pair);
+      if (list[x].fp && list[x].fp === list[y].fp) continue;
+      const score = signatureSimilarity(list[x].sig, list[y].sig);
+      if (score < floor) continue;
+      links.push({ x, y, score });
+      parent[find(x)] = find(y);
+    }
+  }
+  const groups = new Map();
+  for (const l of links) {
+    const root = find(l.x);
+    if (!groups.has(root)) groups.set(root, { members: new Set(), total: 0, n: 0 });
+    const g = groups.get(root);
+    g.members.add(l.x); g.members.add(l.y); g.total += l.score; g.n++;
+  }
+  return Array.from(groups.values())
+    .map((g) => ({ ids: Array.from(g.members).sort((p, q) => p - q).map((i) => list[i].id), score: g.total / g.n }))
+    .sort((p, q) => q.score - p.score || q.ids.length - p.ids.length);
+}
+
+/* ── renaming card files from a pattern ───────────────────────────────────
+   "{creator} - {name}" names each file after its card. The plan is worked
+   out first and shown, so nothing is renamed that you haven't seen. */
+const RENAME_TOKENS = [
+  { key: "name", what: "the card's name" }, { key: "creator", what: "its creator" }, { key: "version", what: "its version" },
+  { key: "tag", what: "its first tag" }, { key: "spec", what: "its format (v2, v3)" }, { key: "date", what: "the file's date" },
+];
+const RENAME_PATTERNS = ["{name}", "{creator} - {name}", "{name} ({creator})", "{name} v{version}"];
+
+/** The file name, without its extension, that a pattern gives a card. */
+function renameBase(pattern, rec) {
+  const r = rec || {};
+  const vals = {
+    name: r.name || baseName(r.file || ""), creator: r.creator || "", version: r.version || "", spec: r.spec && r.spec !== "none" ? r.spec : "",
+    tag: (r.tags || [])[0] || "", date: r.mtime ? fmtDateShort(r.mtime) : "",
+  };
+  let out = String(pattern || "").replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(vals, k.toLowerCase()) ? String(vals[k.toLowerCase()]) : m));
+  // A card with no creator mustn't come out as " - Ada" or "Ada ()".
+  out = out.replace(/\(\s*\)|\[\s*\]/g, "").replace(/\bv(?=\s|$)/g, "").replace(/\s+/g, " ")
+    .replace(/(\s[-–_,]\s)(?:[-–_,]\s)+/g, "$1").replace(/^[\s\-–_.,]+|[\s\-–_.,]+$/g, "");
+  return safeFileName(out);
+}
+
+/**
+ * What a pattern would do to some cards: [{ id, from, to, action, why }], with
+ * action "rename", "same" (already named that), or "skip" (and why). Names
+ * stay unique within a folder, whatever their case, as Windows needs: a name
+ * taken by another file there, or by an earlier card in the plan, gets " (2)".
+ * `others` are every card in the index; `lockOf(rec)` says why a card's file
+ * can't be changed ("" when it can).
+ */
+function planRename(recs, pattern, others, lockOf) {
+  const folderKey = (r) => dirKey(r.rootId, r.dir || "");
+  const moving = new Set((recs || []).map((r) => r.id));
+  const taken = new Map();
+  const names = (k) => { if (!taken.has(k)) taken.set(k, new Set()); return taken.get(k); };
+  for (const r of others || []) if (!moving.has(r.id)) names(folderKey(r)).add(String(r.file).toLowerCase());
+  const plan = [], pending = [];
+  for (const r of recs || []) {
+    const lock = lockOf ? lockOf(r) : "";
+    if (lock) { plan.push({ id: r.id, from: r.file, to: r.file, action: "skip", why: lock === "imported" ? "in an imported, read-only folder" : "in a Reference folder" }); names(folderKey(r)).add(String(r.file).toLowerCase()); continue; }
+    if (!r.ok) { plan.push({ id: r.id, from: r.file, to: r.file, action: "skip", why: "not readable as a card, so there's nothing to name it from" }); names(folderKey(r)).add(String(r.file).toLowerCase()); continue; }
+    const item = { id: r.id, from: r.file, to: r.file, action: "same", why: "" };
+    plan.push(item);
+    pending.push({ r, item });
+  }
+  // Cards that keep their name hold on to it before any other card is given one.
+  const want = pending.map((p) => renameBase(pattern, p.r) + (p.r.ext ? "." + p.r.ext : ""));
+  pending.forEach((p, i) => { if (want[i].toLowerCase() === String(p.r.file).toLowerCase()) names(folderKey(p.r)).add(want[i].toLowerCase()); });
+  pending.forEach((p, i) => {
+    if (want[i].toLowerCase() === String(p.r.file).toLowerCase()) return;
+    const set = names(folderKey(p.r));
+    const base = baseName(want[i]), ext = p.r.ext ? "." + p.r.ext : "";
+    let name = want[i];
+    for (let n = 2; set.has(name.toLowerCase()); n++) name = base + " (" + n + ")" + ext;
+    set.add(name.toLowerCase());
+    p.item.to = name;
+    p.item.action = "rename";
+  });
+  return plan;
+}
+
+/**
+ * Give one card's file a new name, in its own folder. Like a move: the file is
+ * copied under the new name, the copy is compared with it byte for byte, and
+ * only then is the old one removed. Returns { skipped } or { name }: the name
+ * it got, which is numbered if a different file already had the one asked for.
+ */
+async function renameCardFile(rec, root, newName) {
+  if (!root) throw new Error("Folder for this card is no longer registered");
+  if (isImportRoot(root)) throw new Error("Imported folders are read-only");
+  const ref = referenceFolderError(root, rec.dir);
+  if (ref) throw new Error(ref);
+  const clean = safeFileName(baseName(newName)) + (extOf(newName) ? "." + extOf(newName) : "");
+  if (extOf(clean) !== extOf(rec.file)) throw new Error("A rename can't change the file's type");
+  if (clean.toLowerCase() === String(rec.file).toLowerCase()) return { skipped: true, reason: "already named that" };
+  if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
+  const dirs = rec.dir ? rec.dir.split("/") : [];
+  const dir = await getDirByPath(root.handle, dirs, false);
+  const srcFh = await dir.getFileHandle(rec.file, { create: false });
+  const srcFile = await srcFh.getFile();
+  const bytes = new Uint8Array(await srcFile.arrayBuffer());
+  const written = await copyIntoRoot(root, dirs, clean, new Blob([bytes]), await byteSignature(srcFile));
+  // The "copy" may be the file itself under another spelling: then there is nothing to remove.
+  if (await written.fh.isSameEntry(srcFh)) return { skipped: true, reason: "already named that" };
+  if (!sameBytes(bytes, new Uint8Array(await (await written.fh.getFile()).arrayBuffer()))) {
+    throw new Error("Copy verification failed (content mismatch) — the file keeps its name");
+  }
+  await dir.removeEntry(rec.file);
+  await logOp("rename", { card: rec.name, path: root.name + "/" + rec.rel, to: written.name });
+  return { skipped: false, name: written.name };
+}
+
+/* ── saved views ──────────────────────────────────────────────────────────
+   A view is the sidebar as you had it: the search, the sort, the tags, flags,
+   folders and limits picked. Views are kept in your settings (so vault-data
+   backups carry them), by name. */
+const SAVED_VIEWS_MAX = 40;
+
+/** A filter state with only its own fields, each of the kind it should be. */
+function cleanFilters(f) {
+  const x = f && typeof f === "object" ? f : {};
+  const list = (v) => (Array.isArray(v) ? v.map(String) : []);
+  const flags = {};
+  for (const k of Object.keys(x.flags && typeof x.flags === "object" ? x.flags : {}).sort()) if (x.flags[k]) flags[k] = true;
+  return {
+    q: String(x.q || ""), deep: !!x.deep, sort: SORTS.some((o) => o.key === x.sort) ? x.sort : "name",
+    tagsInc: list(x.tagsInc), tagsExc: list(x.tagsExc), tagMode: x.tagMode === "or" ? "or" : "and",
+    dirs: list(x.dirs), specs: list(x.specs), flags, flagKeys: list(x.flagKeys),
+    tokenMin: Number(x.tokenMin) > 0 ? Number(x.tokenMin) : 0, tokenMax: Number(x.tokenMax) > 0 ? Number(x.tokenMax) : 0,
+  };
+}
+
+/** Whether two filter states show the same cards in the same order. */
+function sameFilters(a, b) {
+  return JSON.stringify(cleanFilters(a)) === JSON.stringify(cleanFilters(b));
+}
+
+/** The saved views in some settings, checked: [{ id, name, filters }]. */
+function sanitizeSavedViews(list) {
+  const out = [], seen = new Set();
+  for (const v of Array.isArray(list) ? list : []) {
+    if (!v || typeof v !== "object") continue;
+    const name = String(v.name || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    const id = String(v.id || "");
+    if (!name || !id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name, filters: cleanFilters(v.filters) });
+    if (out.length >= SAVED_VIEWS_MAX) break;
+  }
+  return out;
+}
+
+/** The views with one more saved under `name`: a view of that name (in any case) is replaced, where it was. */
+function savedViewsWith(list, name, filters, newId) {
+  const views = sanitizeSavedViews(list);
+  const clean = String(name || "").replace(/\s+/g, " ").trim().slice(0, 40);
+  if (!clean) return views;
+  const at = views.findIndex((v) => v.name.toLowerCase() === clean.toLowerCase());
+  const view = { id: at >= 0 ? views[at].id : String(newId), name: clean, filters: cleanFilters(filters) };
+  if (at >= 0) views[at] = view; else views.push(view);
+  return views.slice(0, SAVED_VIEWS_MAX);
+}
+
+/** A saved view's filters, ready to use: folders that aren't linked any more are left out. */
+function viewFiltersFor(view, roots) {
+  const f = cleanFilters(view && view.filters);
+  const known = new Set((roots || []).map((r) => r.id));
+  f.dirs = f.dirs.filter((k) => known.has(parseDirKey(k).rootId));
+  return f;
+}
+
+/** A name to offer for the view on screen, from what it filters by. */
+function suggestViewName(filters) {
+  const f = cleanFilters(filters);
+  const parts = [];
+  if (f.q) parts.push("\"" + f.q + "\"");
+  for (const t of f.tagsInc.slice(0, 2)) parts.push(t);
+  for (const k of Object.keys(f.flags).slice(0, 2)) parts.push(k);
+  for (const d of f.dirs.slice(0, 1)) parts.push(parseDirKey(d).dir.split("/").pop() || "folder");
+  return parts.join(" + ").slice(0, 40) || "My view";
 }
 
 /* ── lorebook checks ──────────────────────────────────────────────────────
@@ -10453,7 +10723,7 @@ function FolderTree({ trees, filters, patch, collapsed, setCollapsed, onDropCard
 function FilterSidebar({
   filters, setFilters, tagIndex, roots, rootCounts, total, shown,
   settings, onOpenTagManager, folderTrees, onDropCards, dragActive, onNewFolder,
-  folderRoles, onFolderMenu, flagCounts, dupeExcluder, mode, onMode, agent, keysOff,
+  folderRoles, onFolderMenu, flagCounts, dupeExcluder, mode, onMode, agent, keysOff, onSaveViews,
 }) {
   const agentMode = mode === "agent";
   const [tagQuery, setTagQuery] = useState("");
@@ -10497,12 +10767,45 @@ function FilterSidebar({
     filters.specs.length + filters.dirs.length + (filters.flagKeys || []).length +
     (filters.tokenMin ? 1 : 0) + (filters.tokenMax ? 1 : 0);
 
+  const views = sanitizeSavedViews(settings && settings.savedViews);
+  const saveView = () => {
+    const name = window.prompt("Save this view (the search, sort, tags, flags and folders picked now) as:", suggestViewName(filters));
+    if (name === null || !String(name).trim()) return;
+    if (onSaveViews) onSaveViews(savedViewsWith(views, name, filters, "v" + uid()));
+  };
   const sortBlock = (
     <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--border-subtle)", flexShrink: 0 }}>
       <label style={tinyLabel}>Sort</label>
       <select value={filters.sort} onChange={(e) => patch({ sort: e.target.value })} style={selectStyle}>
         {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
       </select>
+      <div className="saved-views" style={{ marginTop: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <label style={Object.assign({}, tinyLabel, { marginBottom: 0 })}>Views</label>
+          <SmallBtn color="cyan" onClick={saveView} title="Keep the search, sort, tags, flags and folders picked now, under a name">+ save this view</SmallBtn>
+        </div>
+        {views.length === 0 ? (
+          <div style={{ fontSize: 9.5, color: "var(--text-muted)", lineHeight: 1.5 }}>None yet. Set the filters up the way you like them, then save the view to come back to it.</div>
+        ) : views.map((v) => {
+          const on = sameFilters(filters, viewFiltersFor(v, roots));
+          return (
+            <div key={v.id} className="saved-view" style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 0" }}>
+              <div role="button" tabIndex={0} aria-pressed={on} className="no-sel" title={"Show this view" + (on ? " (showing now)" : "")}
+                onClick={() => setFilters(viewFiltersFor(v, roots))}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setFilters(viewFiltersFor(v, roots)); } }}
+                style={{ flex: 1, minWidth: 0, cursor: "pointer", fontSize: 11.5, padding: "2px 6px", borderRadius: "var(--radius-sm)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  color: on ? "var(--accent-warm)" : "var(--text-secondary)", background: on ? acRgba("warm", 0.12) : "transparent" }}>
+                {v.name}
+              </div>
+              <span role="button" tabIndex={0} aria-label={"Delete the view " + v.name} title="Delete this view" className="no-sel"
+                onClick={() => { if (window.confirm("Delete the view \"" + v.name + "\"?\n\nOnly the saved view goes; no cards are touched.")) onSaveViews && onSaveViews(views.filter((x) => x.id !== v.id)); }}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.click(); }}
+                style={{ cursor: "pointer", color: "var(--text-muted)", fontSize: 11, padding: "0 4px" }}>✕</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 
@@ -13258,6 +13561,45 @@ const LoreEntryRow = React.memo(function LoreEntryRow({ e, i, rowApi }) {
  * vault's edits like any field (the file changes on Save to card, which
  * keeps every lorebook field the vault doesn't show).
  */
+/** Rename the selected cards' files from a pattern, after showing what each would become. */
+function RenameModal({ recs, allRecs, lockOf, onClose, onRename }) {
+  const [pattern, setPattern] = useState(RENAME_PATTERNS[1]);
+  const plan = useMemo(() => planRename(recs, pattern, allRecs, lockOf), [recs, pattern, allRecs, lockOf]);
+  const todo = plan.filter((p) => p.action === "rename");
+  const same = plan.filter((p) => p.action === "same").length;
+  const skipped = plan.filter((p) => p.action === "skip");
+  const shown = todo.concat(skipped).slice(0, 300);
+  return (
+    <Modal title="Rename card files" icon={"\u270E"} width={720} onClose={onClose}
+      subtitle={fmtNum(recs.length) + " selected · " + fmtNum(todo.length) + " would be renamed" + (same ? " · " + fmtNum(same) + " already named that" : "") + (skipped.length ? " · " + fmtNum(skipped.length) + " can't be" : "")}
+      footer={<SmallBtn color="warm" disabled={!todo.length} onClick={() => onRename(todo)}>Rename {fmtNum(todo.length)} file{todo.length === 1 ? "" : "s"}</SmallBtn>}>
+      <label style={tinyLabel}>Name each file</label>
+      <input value={pattern} onChange={(e) => setPattern(e.target.value)} aria-label="File name pattern" spellCheck={false}
+        style={Object.assign({}, inputBase, { fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: "7px 9px" })} />
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", margin: "7px 0 4px" }}>
+        {RENAME_PATTERNS.map((p) => <SmallBtn key={p} color="cyan" active={p === pattern} onClick={() => setPattern(p)}>{p}</SmallBtn>)}
+      </div>
+      <div style={{ fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 10 }}>
+        {RENAME_TOKENS.map((t) => "{" + t.key + "} " + t.what).join(" · ")}. The file keeps its type and its folder.
+        Only the file's name changes: the card inside, and your notes and tags, are untouched. Each file is copied
+        under its new name and checked before the old one is removed. A name already taken gets a number.
+      </div>
+      <div className="vault-scroll rename-plan" style={{ maxHeight: 340, overflowY: "auto", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", background: "var(--bg-input)" }}>
+        {shown.length === 0 ? <div style={{ padding: 12, fontSize: 11.5, color: "var(--text-muted)" }}>Every selected card is already named that.</div> : null}
+        {shown.map((p) => (
+          <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr 18px 1fr", gap: 6, padding: "4px 9px", fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+            borderBottom: "1px solid rgba(42,47,61,0.5)", color: "var(--text-secondary)", wordBreak: "break-word" }}>
+            <span>{p.from}</span>
+            <span style={{ color: "var(--text-muted)" }}>{p.action === "rename" ? "→" : "✕"}</span>
+            <span style={{ color: p.action === "rename" ? "var(--accent-green)" : "var(--text-muted)" }}>{p.action === "rename" ? p.to : p.why}</span>
+          </div>
+        ))}
+        {todo.length + skipped.length > shown.length ? <div style={{ padding: "6px 9px", fontSize: 10.5, color: "var(--text-muted)" }}>… and {fmtNum(todo.length + skipped.length - shown.length)} more</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
 /** What's worth a look in a lorebook, above its entries. Worked out a moment after you stop typing. */
 function LoreChecks({ body, edit }) {
   const [open, setOpen] = useState(false);
@@ -14480,7 +14822,7 @@ function IngestModal({ roots, records, settings, tagMeta, folderRoles, dupeExclu
   );
 }
 
-function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, onRestore, onToast, onResolve, onCompare, externalKeepers }) {
+function DupesModal({ similar, onFindSimilar, dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, onRestore, onToast, onResolve, onCompare, externalKeepers }) {
   const [tab, setTab] = useState("exact");
   const [keepers, setKeepers] = useState(externalKeepers || {});
   useEffect(() => { if (externalKeepers) setKeepers((k) => Object.assign({}, k, externalKeepers)); }, [externalKeepers]);
@@ -14488,8 +14830,11 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
   const groups = tab === "exact" ? dupes.exact
     : tab === "content" ? dupes.content
     : tab === "versions" ? dupes.versions
+    : tab === "similar" ? ((similar && similar.groups) || [])
     : dupes.dismissed;
-  const isDismissedTab = tab === "dismissed";
+  // Cards that only read alike aren't copies: nothing there is marked to keep, trashed or deleted in bulk.
+  const isSimilarTab = tab === "similar";
+  const isDismissedTab = tab === "dismissed" || isSimilarTab;
   const kindOf = (g) => (g.kind === "version" ? "versions" : g.kind);
 
   const keeperOf = (g) => keepers[g.kind + g.key] || (defaultKeeper(g.items, roots) || {}).id;
@@ -14527,6 +14872,7 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
     exact:   { label: "Exact copies", n: dupes.exact.length, hint: "Byte-identical files. Safe to thin out — these are literally the same file in more than one place, which is exactly what an Archive folder is for." },
     content: { label: "Same content", n: dupes.content.length, hint: "Same name, description and greeting, but the files differ — usually a re-encoded PNG or a JSON/PNG pair of the same card." },
     versions:{ label: "Version drift", n: dupes.versions.length, hint: "Same character and creator, different content. One of these is probably a newer edit of the other — but this is also where false positives live, since two unrelated cards can share a name. Mark those as not duplicates and they'll stay out of the way." },
+    similar: { label: "Similar text", n: similar ? similar.groups.length : "?", hint: "Cards whose description, personality, scenario and first message share most of their wording without being the same card: a rework, a touched-up repost, the same character under another name. Each group shows how alike its cards are. These aren't copies, so nothing here is trashed for you: compare them and decide. Worked out when you ask, on this computer; nothing is sent anywhere." },
     dismissed:{ label: "Not duplicates", n: dupes.dismissed.length, hint: "Groups you've marked as false positives. They no longer count as duplicates anywhere in the vault. Restore one if you change your mind." },
   };
 
@@ -14558,15 +14904,16 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
             </Fragment>
           ) : null}
           <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-muted)", maxWidth: 220, lineHeight: 1.4 }}>
-            {isDismissedTab
+            {isSimilarTab ? "Alike, not copies: nothing here is removed for you."
+              : isDismissedTab
               ? "Restore a group to have it counted again."
               : "One copy of every card always survives — the one marked KEEP."}
           </span>
         </Fragment>
       }>
       <div style={{ display: "flex", gap: 5, marginBottom: 12, flexWrap: "wrap" }}>
-        {["exact", "content", "versions", "dismissed"].map((k) => (
-          <SmallBtn key={k} color={k === "versions" ? "warm" : k === "content" ? "blue" : k === "dismissed" ? "green" : "red"}
+        {["exact", "content", "versions", "similar", "dismissed"].map((k) => (
+          <SmallBtn key={k} color={k === "versions" ? "warm" : k === "content" ? "blue" : k === "dismissed" ? "green" : k === "similar" ? "purple" : "red"}
             active={tab === k} onClick={() => setTab(k)}>
             {TAB_INFO[k].label} ({TAB_INFO[k].n})
           </SmallBtn>
@@ -14574,9 +14921,19 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
       </div>
       <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 12 }}>{TAB_INFO[tab].hint}</div>
 
+      {isSimilarTab ? (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+          <SmallBtn color="purple" onClick={onFindSimilar}>{similar ? "Look again" : "Find similar cards"}</SmallBtn>
+          <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>
+            {similar ? fmtNum(similar.compared) + " cards compared " + fmtDate(similar.at) + (similar.short ? " · " + fmtNum(similar.short) + " had too little text to compare" : "")
+              : "Reads every card's text once. A few seconds for a few thousand cards."}
+          </span>
+        </div>
+      ) : null}
       {!groups.length ? (
         <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-          {isDismissedTab ? "You haven't marked anything as a false positive yet." : "Nothing in this category."}
+          {isSimilarTab ? (similar ? "No two cards read alike, beyond the duplicates on the other tabs." : "")
+            : isDismissedTab ? "You haven't marked anything as a false positive yet." : "Nothing in this category."}
         </div>
       ) : null}
 
@@ -14584,8 +14941,8 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
         <div key={g.kind + g.key} style={{
           marginBottom: 8, padding: 9, background: "var(--bg-tertiary)",
           borderRadius: "var(--radius-sm)",
-          border: "1px solid " + (isDismissedTab ? acRgba("green", 0.28) : "var(--border-subtle)"),
-          opacity: isDismissedTab ? 0.85 : 1,
+          border: "1px solid " + (isSimilarTab ? acRgba("purple", 0.28) : isDismissedTab ? acRgba("green", 0.28) : "var(--border-subtle)"),
+          opacity: isDismissedTab && !isSimilarTab ? 0.85 : 1,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <div style={{ width: 24, height: 32, flexShrink: 0 }}>
@@ -14594,14 +14951,15 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
             <span style={{ fontSize: 12.5, fontWeight: 500 }}>{g.items[0].name}</span>
             <Pill color="muted">{g.items.length} files</Pill>
             {g.items[0].creator ? <Pill color="blue">@{g.items[0].creator}</Pill> : null}
-            {isDismissedTab ? <Pill color="green">{TAB_INFO[kindOf(g)] ? TAB_INFO[kindOf(g)].label : g.kind}</Pill> : null}
+            {isSimilarTab ? <Pill color="purple" title="About how much of their wording these cards share">{Math.round(g.score * 100)}% alike</Pill>
+              : isDismissedTab ? <Pill color="green">{TAB_INFO[kindOf(g)] ? TAB_INFO[kindOf(g)].label : g.kind}</Pill> : null}
             <span style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
               {g.items.length > 1 ? (
                 <SmallBtn color="cyan" onClick={() => onCompare(g)} title="See exactly how these copies differ">
                   ⧉ compare
                 </SmallBtn>
               ) : null}
-              {isDismissedTab ? (
+              {isSimilarTab ? null : isDismissedTab ? (
                 <SmallBtn color="warm" onClick={() => { onRestore(kindOf(g), g.key); onToast && onToast("Restored — counted as a duplicate again", "warm"); }}>
                   treat as duplicate again
                 </SmallBtn>
@@ -17699,6 +18057,64 @@ function App() {
     return { moved, skipped, failed, label, errs };
   }, [recById, roots, showToast, folderRoles]);
 
+  /* ---- cards that read alike ---- */
+  const [similar, setSimilar] = useState(null);   // { groups, compared, at } once looked for
+  const findSimilar = useCallback(async () => {
+    if (scan.running) { showToast("Wait for the current job to finish first", "warm"); return; }
+    setScan({ running: true, done: 0, total: 0, label: "Reading every card's text…", rootName: "Similar cards" });
+    try {
+      const items = [];
+      let short = 0;
+      await scanAllBodies((id, body) => {
+        const r = recById.get(id);
+        if (!r || !r.ok || r.inTrash || (dupeExcluder && dupeExcluder(r))) return;
+        const runs = textShingles(similarityText(body));
+        if (!runs) { short++; return; }
+        items.push({ id, fp: r.fp, sig: minHashSignature(runs) });
+      });
+      setScan({ running: true, done: 0, total: 0, label: "Comparing " + fmtNum(items.length) + " cards…", rootName: "Similar cards" });
+      await new Promise((r) => setTimeout(r, 30));
+      const groups = similarGroups(items, SIMILAR_MIN).map((g, i) => ({
+        key: "sim" + i + ":" + g.ids[0], kind: "similar", score: g.score,
+        items: g.ids.map((id) => recById.get(id)).filter(Boolean),
+      })).filter((g) => g.items.length > 1);
+      setSimilar({ groups, compared: items.length, short, at: Date.now() });
+      showToast(groups.length ? fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + " of cards that read alike" : "No two cards read alike beyond the duplicates already found", groups.length ? "cyan" : "green");
+    } catch (e) {
+      showToast("Couldn't compare the cards: " + ((e && e.message) || String(e)), "red");
+    }
+    setScan(SCAN_IDLE);
+  }, [scan.running, recById, dupeExcluder, showToast]);
+
+  /* ---- rename from a pattern ---- */
+  const [renameIds, setRenameIds] = useState(null);
+  const renameCards = useCallback(async (todo) => {
+    setRenameIds(null);
+    if (!todo.length) return;
+    setScan({ running: true, done: 0, total: todo.length, label: "Renaming…", rootName: "Rename" });
+    let done = 0, skipped = 0, failed = 0;
+    const errs = [], touched = new Set();
+    for (let i = 0; i < todo.length; i++) {
+      const rec = recById.get(todo[i].id);
+      if (!rec) { skipped++; continue; }
+      const root = roots.find((x) => x.id === rec.rootId);
+      setScan({ running: true, done: i, total: todo.length, label: rec.file, rootName: "Rename" });
+      try {
+        const res = await renameCardFile(rec, root, todo[i].to);
+        if (res.skipped) { skipped++; continue; }
+        done++;
+        touched.add(rec.rootId);
+        // The card keeps its short id under its new name.
+        if (rec.sid) sidHintsRef.current[rec.rootId + ":" + (rec.dir ? rec.dir + "/" : "") + res.name] = rec.sid;
+      } catch (e) { failed++; if (errs.length < 3) errs.push(rec.file + ": " + e.message); }
+    }
+    setScan(SCAN_IDLE);
+    await logOp("bulkRename", { renamed: done, skipped, failed });
+    showToast(done + " file" + (done === 1 ? "" : "s") + " renamed" + (skipped ? ", " + skipped + " left as they were" : "") + (failed ? ", " + failed + " failed — " + errs.join(" | ") : ""), failed ? "red" : "green");
+    setSelection(new Set());
+    if (touched.size) runScanRef.current(Array.from(touched), false, { quiet: true });
+  }, [recById, roots, showToast]);
+
   /* ---- trash + delete ---- */
 
   // Drop cards out of the in-memory index and the caches immediately, so the
@@ -18762,7 +19178,7 @@ function App() {
       // The flag dialog is a dialog too, with its own state: while it's up, keys
       // mustn't reach the card behind it. Nor while a right-click menu is up:
       // Escape closes the menu (the menu sees to that), not the inspector too.
-      const dialog = modal || flagModal || ctxMenu;
+      const dialog = modal || flagModal || ctxMenu || renameIds;
       if (e.key === "Escape" && !dialog && focusId) setFocusId(null);
       if (!focusId || dialog) return;
       // Ctrl+F is the browser's find and Ctrl+S its save, Alt+arrows its back
@@ -18791,7 +19207,7 @@ function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [focusId, filtered, modal, flagModal, ctxMenu, patchEdit, selection]);
+  }, [focusId, filtered, modal, flagModal, ctxMenu, renameIds, patchEdit, selection]);
 
   /* ---- grid geometry ---- */
   const tileW = settings.tileSize;
@@ -19099,11 +19515,12 @@ function App() {
               filters={filters} setFilters={setFilters} tagIndex={tagIndex}
               roots={roots} rootCounts={rootCounts} total={records.length} shown={filtered.length}
               settings={settings} onOpenTagManager={() => setModal("tags")}
+              onSaveViews={(list) => patchSettings({ savedViews: list })}
               folderTrees={folderTrees} onDropCards={onDropCards} dragActive={dragActive}
               onNewFolder={() => newFolder(null, "")}
               folderRoles={folderRoles} onFolderMenu={openFolderMenu} flagCounts={flagCounts}
               dupeExcluder={dupeExcluder}
-              keysOff={!!(modal || flagModal || ctxMenu)}
+              keysOff={!!(modal || flagModal || ctxMenu || renameIds)}
               mode={sideMode}
               onMode={(m) => { setSideMode(m); if (m === "agent") setAgentOpened(true); }}
               agent={agentOpened ? (
@@ -19183,6 +19600,7 @@ function App() {
                         {writableRoots.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                       </select>
                     ) : null}
+                    <SmallBtn color="cyan" onClick={() => setRenameIds(Array.from(selection))} title="Rename these cards' files from a pattern, like {creator} - {name}">Rename…</SmallBtn>
                     <SmallBtn color="warm" onClick={() => trashCards(Array.from(selection))} title="Relocate to your trash folder">{"\u{1F5D1}"}</SmallBtn>
                     <SmallBtn color="red" onClick={() => deleteCards(Array.from(selection))} title="Delete permanently from disk">✕</SmallBtn>
                     <SmallBtn color="muted" onClick={() => setSelection(new Set())}>clear</SmallBtn>
@@ -19292,8 +19710,14 @@ function App() {
           onDone={(ids) => runScan(ids, false, { quiet: true })} />
       ) : null}
 
+      {renameIds ? (
+        <RenameModal recs={renameIds.map((id) => recById.get(id)).filter(Boolean)} allRecs={records}
+          lockOf={(r) => cardFileLock(r, roots, folderRoles)} onClose={() => setRenameIds(null)} onRename={renameCards} />
+      ) : null}
+
       {modal === "dupes" ? (
         <DupesModal dupes={dupes} roots={roots} onClose={() => setModal(null)}
+          similar={similar} onFindSimilar={findSimilar}
           onSelectIds={(ids) => setSelection(new Set(ids))}
           onResolve={resolveDupeGroups}
           onCompare={(g) => setCompare(g)}
