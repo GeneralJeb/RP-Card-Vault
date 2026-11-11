@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.7.1";
+const APP_VERSION = "1.8.0";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -540,6 +540,7 @@ function orphanCardIds(cards, roots) {
 async function dbDelCardRecords(ids) {
   for (const id of ids) {
     await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
+    await dbDel(STORE_BODIES, id + "\u0000before");   // prevBodyKey(id): its text before an outside change, if kept
   }
 }
 
@@ -886,6 +887,79 @@ function migrateDestinations(settings) {
   if (!s.destinations.some((d) => d.id === s.defaultDestination)) s.defaultDestination = s.destinations[0] ? s.destinations[0].id : "";
   delete s.frontendKey; delete s.frontendMode; delete s.frontendApiUrl; delete s.frontendApiUser;
   return s;
+}
+
+/* ── where a card stands with a front end ────────────────────────────────
+   The vault never asks a front end what it holds. It goes by two things it
+   knows for itself:
+
+   - A folder destination is a folder you've linked, so it is in the index
+     like any other: a card is "there" when a file with the same bytes is in
+     it, and a "different version" is there when one with the same name,
+     description and first message (or the same name and creator) is.
+   - An upload leaves a mark on the card's record: when, and which file it
+     was (its byte signature). The card is "sent" while its file is still one
+     that was sent, and "changed since sent" once it isn't. So a copy of a sent
+     card that was reworked doesn't pass for the one the front end has.
+
+   The mark says what the vault sent, not what the front end did with it since:
+   a card deleted or edited there still reads as sent. */
+const SENT_STATES = {
+  home:    { label: "The front end's own copy", short: "in front end", color: "cyan",  in: true },
+  there:   { label: "In the front end",          short: "in front end", color: "green", in: true },
+  sent:    { label: "Sent",                      short: "sent",         color: "green", in: true },
+  changed: { label: "Changed since it was sent", short: "changed since sent", color: "warm", in: false, changed: true },
+  differs: { label: "A different version is there", short: "different version there", color: "warm", in: false, changed: true },
+  gone:    { label: "Sent before, not there now", short: "no longer there", color: "muted", in: false },
+  none:    { label: "Not sent",                  short: "not sent",     color: "muted", in: false },
+};
+const SENT_SIGS_KEPT = 8;
+
+/** The patch that marks a card's record as sent to a destination: when, and which file. */
+function sentPatch(edit, destId, sig, now) {
+  const all = Object.assign({}, (edit && edit.sent) || {});
+  const was = all[destId] || {};
+  const sigs = [sig].concat((was.sigs || []).filter((x) => x && x !== sig)).filter(Boolean).slice(0, SENT_SIGS_KEPT);
+  all[destId] = { at: now, sigs };
+  return { sent: all };
+}
+
+/** The mark a destination left on a record, or null. */
+function sentMarkOf(edit, destId) {
+  const m = edit && edit.sent && edit.sent[destId];
+  return m && typeof m === "object" ? m : null;
+}
+
+/** What a folder destination holds, from the index: its files' signatures and its cards' fingerprints. */
+function destinationFolderIndex(records, rootId, dir) {
+  const out = { rootId, dir: dir || "", bySig: new Set(), byFp: new Set(), byLfp: new Set() };
+  for (const r of records || []) {
+    if (!recInDir(r, rootId, dir || "")) continue;
+    if (r.sig) out.bySig.add(r.sig);
+    if (r.ok && r.fp) out.byFp.add(r.fp);
+    if (r.ok && r.hasName && r.lfp) out.byLfp.add(r.lfp);
+  }
+  return out;
+}
+
+/**
+ * Where a card stands with one destination: { state, at }, state a key of
+ * SENT_STATES. `folder` is destinationFolderIndex for a folder destination
+ * (null when its folder isn't linked any more).
+ */
+function destinationStatus(rec, edit, dest, folder) {
+  const mark = dest ? sentMarkOf(edit, dest.id) : null;
+  const at = mark ? mark.at || 0 : 0;
+  if (!dest || !rec) return { state: "none", at: 0 };
+  if (dest.type === "folder") {
+    if (!folder) return { state: mark ? "gone" : "none", at };
+    if (recInDir(rec, folder.rootId, folder.dir)) return { state: "home", at };
+    if (rec.sig && folder.bySig.has(rec.sig)) return { state: "there", at };
+    if (rec.ok && ((rec.fp && folder.byFp.has(rec.fp)) || (rec.hasName && rec.lfp && folder.byLfp.has(rec.lfp)))) return { state: "differs", at };
+    return { state: mark ? "gone" : "none", at };
+  }
+  if (!mark) return { state: "none", at: 0 };
+  return { state: rec.sig && (mark.sigs || []).indexOf(rec.sig) >= 0 ? "sent" : "changed", at };
 }
 
 /** The destination Send uses when you don't pick one. */
@@ -3489,6 +3563,9 @@ function editAfterSave(saved, live, fp) {
   if (cur.lorebook && cur.lorebook !== saved.lorebook) out.lorebook = cur.lorebook;
   const pending = proposalOf(cur);
   if (proposalCount(pending) > 0) out.aiProposal = pending;
+  // Where it was sent, and as which file: the saved file is a new one, so it
+  // reads as changed since then until it's sent again.
+  if (cur.sent && Object.keys(cur.sent).length) out.sent = cur.sent;
   return out;
 }
 
@@ -3912,6 +3989,126 @@ function backupsToPrune(names, file, keep, newest) {
   }
   mine.sort((a, b) => (a.k < b.k ? 1 : a.k > b.k ? -1 : 0));
   return mine.slice(keep).map((x) => x.n);
+}
+
+/* ── a card's history ─────────────────────────────────────────────────────
+   Two ways a card's file changes without the vault's doing: you edit it in
+   your front end, or you go back to an earlier copy. The vault notes the
+   first when a scan finds it (rec.changedOutside, with the card's text as it
+   was kept beside the new one, to show what changed), and offers the second
+   from the backups every Save to card leaves in "_vault backups". */
+
+/** Where the card's text as it was before an outside change is kept, beside its current text. */
+const PREV_BODY_SUFFIX = "\u0000before";
+function prevBodyKey(id) { return id + PREV_BODY_SUFFIX; }
+
+/** A card as named pieces of text, for comparing two versions of it: [{ key, label, text }]. */
+function cardCompareParts(body) {
+  const b = body || {};
+  const out = [{ key: "name", label: "Name", text: String(b.name || "") }];
+  for (const f of CARD_FIELDS) out.push({ key: f.key, label: f.label, text: String(b[f.key] || "") });
+  out.push({ key: "tags", label: "Tags", text: (b.tags || []).join(", ") });
+  out.push({ key: "alternate_greetings", label: "Alternate greetings",
+    text: (b.alternate_greetings || []).map((g, i) => "— greeting " + (i + 1) + " —\n" + g).join("\n\n") });
+  out.push({ key: "lorebook", label: "Lorebook", text: agentLoreText(b.lorebook) });
+  return out;
+}
+
+/** What differs between two versions of a card: [{ key, label, before, after }]. */
+function cardChanges(before, after) {
+  const a = cardCompareParts(before), b = cardCompareParts(after);
+  const out = [];
+  for (let i = 0; i < a.length; i++) if (a[i].text !== b[i].text) out.push({ key: a[i].key, label: a[i].label, before: a[i].text, after: b[i].text });
+  return out;
+}
+
+/** A backup's time from its stamp ("20261107-090503"), as a number of milliseconds, or 0. */
+function backupStampTime(stamp) {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(String(stamp || ""));
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : 0;
+}
+
+/** One card file's backups among a backup folder's file names, newest first: [{ name, stamp, at }]. */
+function cardBackupsOf(names, file) {
+  const ext = extOf(file);
+  const re = new RegExp("^" + reEscape(baseName(file)) + " (\\d{8}-\\d{6})(?: \\((\\d+)\\))?" + (ext ? "\\." + reEscape(ext) : "") + "$", "i");
+  const out = [];
+  for (const n of names || []) {
+    const m = re.exec(n);
+    if (m) out.push({ name: n, stamp: m[1], at: backupStampTime(m[1]), k: m[1] + "." + String(m[2] || 1).padStart(4, "0") });
+  }
+  out.sort((x, y) => (x.k < y.k ? 1 : x.k > y.k ? -1 : 0));
+  return out.map((x) => ({ name: x.name, stamp: x.stamp, at: x.at }));
+}
+
+/** The folder a card's backups are in, or null when there is none yet. */
+async function cardBackupDir(rec, root) {
+  const dirs = [BACKUP_FOLDER_NAME].concat(rec.dir ? rec.dir.split("/") : []);
+  try { return await getDirByPath(root.handle, dirs, false); } catch (e) { return null; }
+}
+
+/** The backups Save to card has left of one card, newest first: [{ name, stamp, at, size }]. */
+async function listCardBackups(rec, root) {
+  if (!root || isImportRoot(root) || !root.handle) return [];
+  if (!(await verifyPermission(root.handle, false))) throw new Error("Permission denied for " + root.name);
+  const dir = await cardBackupDir(rec, root);
+  if (!dir) return [];
+  const sizes = new Map();
+  for await (const [n, e] of dir.entries()) {
+    if (e.kind !== "file") continue;
+    let size = 0;
+    try { size = (await e.getFile()).size; } catch (x) { size = 0; }
+    sizes.set(n, size);
+  }
+  return cardBackupsOf(Array.from(sizes.keys()), rec.file).map((b) => Object.assign({ size: sizes.get(b.name) }, b));
+}
+
+/** One backup's bytes, and the card in it: { bytes, parsed }. */
+async function readCardBackup(rec, root, name) {
+  const dir = await cardBackupDir(rec, root);
+  if (!dir || !cardBackupsOf([name], rec.file).length) throw new Error("That isn't a backup of this card");
+  const bytes = new Uint8Array(await (await (await dir.getFileHandle(name, { create: false })).getFile()).arrayBuffer());
+  return { bytes, parsed: await parseCardBytes(bytes, rec.file) };
+}
+
+/**
+ * Put a backup back as the card's file. The file as it is now is backed up
+ * first (so going back can itself be undone), the backup must read as a card,
+ * and what was written is read back and compared, byte for byte; if it isn't
+ * what the backup holds, the file is put back as it was.
+ */
+async function restoreCardBackup(rec, root, name, opts) {
+  opts = opts || {};
+  if (!root) throw new Error("Folder for this card is no longer registered");
+  if (isImportRoot(root)) throw new Error("Imported folders are read-only");
+  const ref = referenceFolderError(root, rec.dir);
+  if (ref) throw new Error(ref);
+  if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
+  const backup = await readCardBackup(rec, root, name);
+  if (!backup.parsed || !backup.parsed.ok) throw new Error("That backup can't be read as a card" + (backup.parsed && backup.parsed.err ? " (" + backup.parsed.err + ")" : "") + ", so it wasn't put back");
+  const dirs = rec.dir ? rec.dir.split("/") : [];
+  const fh = await (await getDirByPath(root.handle, dirs, false)).getFileHandle(rec.file, { create: false });
+  const current = new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  if (sameBytes(current, backup.bytes)) return { same: true, data: backup.parsed.data, backupPath: "" };
+  let backupPath = "";
+  if (opts.backup !== false) {
+    const bName = baseName(rec.file) + " " + stampNow() + (rec.ext ? "." + rec.ext : "");
+    const res = await copyIntoRoot(root, [BACKUP_FOLDER_NAME].concat(dirs), bName, new Blob([current]), "");
+    backupPath = [root.name, BACKUP_FOLDER_NAME].concat(dirs, [res.name]).join("/");
+  }
+  const write = async (bytes) => { const w = await fh.createWritable(); await w.write(new Blob([bytes])); await w.close(); };
+  try { await write(backup.bytes); }
+  catch (e) { try { await write(current); } catch (e2) { /* the copy just made is the way back */ } throw new Error("Couldn't write the file: " + e.message); }
+  const back = new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  if (!sameBytes(back, backup.bytes)) {
+    let ok = true;
+    try { await write(current); } catch (e) { ok = false; }
+    throw new Error("The file read back isn't what the backup holds. " + (ok ? "It has been put back as it was." : backupPath ? "Recover it from " + backupPath + "." : "It could not be put back."));
+  }
+  await logOp("restoreBackup", { card: rec.name, path: root.name + "/" + rec.rel, from: name, backup: backupPath || "(none)" });
+  let sig = "";
+  try { sig = await byteSignature(await fh.getFile()); } catch (e) { sig = ""; }
+  return { same: false, data: backup.parsed.data, backupPath, sig };
 }
 
 /* ── automatic backups of vault data ──────────────────────────────────────
@@ -9892,6 +10089,7 @@ function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, 
           position: "absolute", top: 5, left: 5, display: "flex", gap: 3, flexWrap: "wrap", maxWidth: tileW - 10,
         }}>
           {rec.animated ? <Pill color="green" style={onArt("green")} title="Animated picture">{"▶"}</Pill> : null}
+          {rec.changedOutside ? <Pill color="warm" style={onArt("warm")} title={"Changed outside the vault: " + (rec.changedOutside.fields || []).join(", ") + ". The card's History tab shows what changed."}>{"✎"}</Pill> : null}
           {/* Only on cards whose format differs from most of the library: a v3 badge on every card says nothing. */}
           {rec.spec !== commonSpec || rec.spec === "none" ? (
             <Pill color={SPEC_COLOR[rec.spec] || "red"} style={onArt(SPEC_COLOR[rec.spec] || "red")} title={rec.spec === "none" ? "No card data found" : "Card format " + rec.spec}>{rec.spec === "none" ? "?" : rec.spec}</Pill>
@@ -10007,8 +10205,15 @@ const FLAGS = [
   { key: "flagged",    label: "Flagged",          color: "warm" },
   { key: "unsaved",    label: "Unsaved edits",    color: "purple" },
   { key: "aiPending",  label: "AI suggestions",   color: "blue" },
+  { key: "changedOutside", label: "Changed outside", color: "warm" },
   // Not a narrowing filter: it brings trashed cards back into view.
   { key: "trash",      label: "Show trash",       color: "muted" },
+];
+// Where cards stand with the destination Send uses; shown once there is one.
+const SENT_FLAGS = [
+  { key: "sentIn",      label: "In front end",        color: "green" },
+  { key: "sentNot",     label: "Not sent",            color: "muted" },
+  { key: "sentChanged", label: "Changed since sent",  color: "warm" },
 ];
 
 function SectionHead({ children, right }) {
@@ -10278,7 +10483,7 @@ function FilterSidebar({
 
           <SectionHead>Flags</SectionHead>
           <div style={{ display: "flex", gap: 5, padding: "0 12px", flexWrap: "wrap" }}>
-            {FLAGS.map((f) => {
+            {FLAGS.slice(0, -1).concat(settings && (settings.destinations || []).length ? SENT_FLAGS : [], FLAGS.slice(-1)).map((f) => {
               const on = !!filters.flags[f.key];
               return (
                 <div key={f.key} onClick={() => {
@@ -11941,8 +12146,107 @@ const TABS = [
   { key: "tags",     label: "Tags & Notes" },
   { key: "ai",       label: "✦ AI" },
   { key: "gallery",  label: "Gallery" },
+  { key: "history",  label: "History" },
   { key: "raw",      label: "Raw" },
 ];
+
+/**
+ * A card's History tab: what changed in its file outside the vault (when a
+ * scan found that), and the backups Save to card has left of it, each of which
+ * can be compared with the card as it is now, or put back.
+ * `history` is { prev(), list(), read(name), restore(name), dismiss() }.
+ */
+function CardHistory({ rec, body, history, locked }) {
+  const [was, setWas] = useState(undefined);     // the card's text before the outside change: undefined while it's fetched, null if it isn't kept
+  const [backups, setBackups] = useState(null);  // null while loading
+  const [err, setErr] = useState("");
+  const [open, setOpen] = useState(null);        // { name, changes } | { name, error }
+  const [busy, setBusy] = useState("");
+  const changed = rec.changedOutside;
+  const changedAt = changed ? changed.at : 0;
+
+  useEffect(() => {
+    let live = true;
+    setWas(undefined);
+    if (changedAt) history.prev().then((b) => { if (live) setWas(b || null); }, () => { if (live) setWas(null); });
+    return () => { live = false; };
+  }, [rec.id, changedAt]);
+
+  useEffect(() => {
+    let live = true;
+    setBackups(null); setErr(""); setOpen(null);
+    history.list().then((l) => { if (live) setBackups(l); }, (e) => { if (live) { setBackups([]); setErr((e && e.message) || String(e)); } });
+    return () => { live = false; };
+  }, [rec.id, rec.sig]);
+
+  const compare = async (name) => {
+    if (open && open.name === name) { setOpen(null); return; }
+    setBusy(name);
+    try {
+      const b = await history.read(name);
+      setOpen(b ? { name, changes: cardChanges(b, body) } : { name, error: "That backup can't be read as a card." });
+    } catch (e) { setOpen({ name, error: (e && e.message) || String(e) }); }
+    setBusy("");
+  };
+  const outside = changed && was ? cardChanges(was, body) : [];
+  const note = { fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.6 };
+  const diffs = (list, labels) => list.map((c) => (
+    <div key={c.key} style={{ marginBottom: 10 }}>
+      <label style={tinyLabel}>{c.label}</label>
+      <DiffView before={c.before} after={c.after} labels={labels} />
+    </div>
+  ));
+
+  return (
+    <div>
+      {changed ? (
+        <div style={{ marginBottom: 16, padding: 10, borderRadius: "var(--radius-sm)", background: acRgba("warm", 0.08), border: "1px solid " + acRgba("warm", 0.3) }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 8 }}>
+            <div style={{ flex: 1, fontSize: 11.5, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+              <strong style={{ color: "var(--accent-warm)" }}>This card's file was changed outside the vault</strong> (found {fmtDate(changed.at)}):{" "}
+              {(changed.fields || []).join(", ")}. Your notes, tags and unsaved changes stayed with it.
+            </div>
+            <SmallBtn color="muted" onClick={history.dismiss} title="Stop marking this card as changed, and forget its earlier text">Dismiss</SmallBtn>
+          </div>
+          {was === undefined ? <div style={note}>Fetching its earlier text…</div>
+            : outside.length ? diffs(outside, ["Before", "Now"])
+            : <div style={note}>{was === null ? "Its earlier text isn't kept any more, so there is nothing to compare with." : "It reads the same as before now."}</div>}
+        </div>
+      ) : null}
+
+      <label style={tinyLabel}>Backups from Save to card</label>
+      {backups === null ? <div style={note}>Looking in {BACKUP_FOLDER_NAME}…</div> : null}
+      {err ? <div style={Object.assign({}, note, { color: "var(--accent-red)" })}>{err}</div> : null}
+      {backups && !backups.length && !err ? (
+        <div style={note}>
+          None yet. Each Save to card keeps a copy of the file as it was in {BACKUP_FOLDER_NAME}, in this card's folder
+          (unless backups are turned off in Settings), and they are listed here.
+        </div>
+      ) : null}
+      {(backups || []).map((b) => (
+        <div key={b.name} style={{ borderBottom: "1px solid rgba(42,47,61,0.5)", padding: "6px 0" }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{b.at ? fmtDate(b.at) : b.stamp}</div>
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", fontFamily: "'JetBrains Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={b.name}>{fmtBytes(b.size)} · {b.name}</div>
+            </div>
+            <SmallBtn color="cyan" disabled={!!busy} active={!!(open && open.name === b.name)} onClick={() => compare(b.name)}
+              title="What differs between this backup and the card as it is now">{busy === b.name ? "…" : "Compare"}</SmallBtn>
+            <SmallBtn color="warm" disabled={!!busy || !!locked} onClick={() => history.restore(b.name)}
+              title={locked ? "This card's file can't be changed here (an imported or Reference folder)" : "Put this backup back as the card's file. The file as it is now is backed up first."}>Restore</SmallBtn>
+          </div>
+          {open && open.name === b.name ? (
+            <div style={{ marginTop: 8 }}>
+              {open.error ? <div style={Object.assign({}, note, { color: "var(--accent-red)" })}>{open.error}</div>
+                : open.changes.length ? diffs(open.changes, ["This backup", "Now"])
+                : <div style={note}>This backup's card reads the same as the card does now.</div>}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function StatRow({ k, v, color }) {
   return (
@@ -12893,7 +13197,7 @@ function LorebookEditor({ body, edit, onPatchEdit }) {
   );
 }
 
-function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate, writeBlock, onPlay }) {
+function Inspector({ history, sendStatus, rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate, writeBlock, onPlay }) {
   const [tab, setTab] = useState("overview");
   const [body, setBody] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -13102,6 +13406,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             : t.key === "tags" ? tags.length + vaultTags.length + flags.length
             : t.key === "ai" ? proposalCount(edit && edit.aiProposal)
             : t.key === "gallery" ? rec.assetCount
+            : t.key === "history" ? (rec.changedOutside ? 1 : 0)
             : 0;
           return (
             <div key={t.key} onClick={() => setTab(t.key)} className="no-sel inspector-tab" role="tab" aria-selected={on} tabIndex={0}
@@ -13160,6 +13465,20 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
               <StatRow k="Embedded assets" v={fmtNum(rec.assetCount)} />
               <StatRow k="Content fingerprint" v={rec.fp.slice(0, 16)} />
             </div>
+
+            {sendStatus && sendStatus.length ? (
+              <div style={{ marginBottom: 14 }}>
+                <label style={tinyLabel}>Front end</label>
+                {sendStatus.map((x) => (
+                  <StatRow key={x.id} k={x.name} color={SENT_STATES[x.state].color}
+                    v={SENT_STATES[x.state].label + (x.at && x.state !== "none" ? " · " + fmtDateShort(x.at) : "")} />
+                ))}
+                <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 5, lineHeight: 1.5 }}>
+                  What the vault knows for itself: the files in a folder destination, and what it has uploaded.
+                  It never asks a front end what it holds, so a card changed or removed there still reads as sent.
+                </div>
+              </div>
+            ) : null}
 
             {body.source && body.source.length ? (
               <div style={{ marginBottom: 14 }}>
@@ -13344,6 +13663,10 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
 
         {tab === "gallery" ? (
           <CardGallery rec={rec} roots={roots} still={!onPlay} onView={(items, start) => setViewer({ items, start, owned: false })} />
+        ) : null}
+
+        {!loading && body && tab === "history" && history ? (
+          <CardHistory rec={rec} body={body} history={history} locked={readOnlyRoot || !!writeBlock} />
         ) : null}
 
         {!loading && body && tab === "raw" ? (
@@ -15667,6 +15990,9 @@ function App() {
   // The edits as they are now, for work that outlives a render (a scan).
   const editsRef = useRef(editsMap);
   editsRef.current = editsMap;
+  // Card files the vault has just written itself (a save, a backup put back),
+  // by record id: the scan that follows doesn't take them for outside changes.
+  const ownWritesRef = useRef(new Set());
   // Edits saved in another window of the vault come in here (see announceEdits).
   useEffect(() => {
     const ch = vaultEditsChannel();
@@ -15807,6 +16133,17 @@ function App() {
     });
   }, []);
 
+  /* ---- where each card stands with the destination Send uses ---- */
+  const sendDest = useMemo(() => defaultDestinationOf(settings), [settings.destinations, settings.defaultDestination]);
+  /** A folder destination's place in the index, or null (an upload destination, or a folder no longer linked). */
+  const destFolderIndex = useCallback((dest) => {
+    if (!dest || dest.type !== "folder" || !dest.folderKey) return null;
+    const k = parseDirKey(dest.folderKey);
+    if (!roots.some((r) => r.id === k.rootId)) return null;
+    return destinationFolderIndex(cards, k.rootId, k.dir);
+  }, [cards, roots]);
+  const sendDestIndex = useMemo(() => destFolderIndex(sendDest), [destFolderIndex, sendDest]);
+
   /* ---- merged records ---- */
   const records = useMemo(() => {
     const inTrash = makeTrashTest(settings);
@@ -15830,11 +16167,12 @@ function App() {
         aiPending: proposalCount(e && e.aiProposal) > 0,
         inTrash: inTrash(c.rootId, c.dir),
         aiPrivate: isPrivate(c.rootId, c.dir),
+        sentState: sendDest ? destinationStatus(c, e, sendDest, sendDestIndex).state : "",
       });
       r.search = searchBlobFor(r);
       return r;
     });
-  }, [cards, editsMap, settings.trashKey, settings.privateFolders]);
+  }, [cards, editsMap, settings.trashKey, settings.privateFolders, sendDest, sendDestIndex]);
 
   const recById = useMemo(() => {
     const m = new Map();
@@ -15961,6 +16299,10 @@ function App() {
       if (fl.flagged && !r.flags.length) return false;
       if (fl.unsaved && !r.pending) return false;
       if (fl.aiPending && !r.aiPending) return false;
+      if (fl.changedOutside && !r.changedOutside) return false;
+      if (fl.sentIn && !(SENT_STATES[r.sentState] || {}).in) return false;
+      if (fl.sentNot && (!r.sentState || (SENT_STATES[r.sentState] || {}).in || (SENT_STATES[r.sentState] || {}).changed)) return false;
+      if (fl.sentChanged && !(SENT_STATES[r.sentState] || {}).changed) return false;
 
       if (flagSel && !r.flags.some((f) => flagSel.has(f.key))) return false;
 
@@ -16244,6 +16586,7 @@ function App() {
   const writeCardEdits = useCallback(async (rec, edit, backup, keep) => {
     const body = await dbGet(STORE_BODIES, rec.id);
     const res = await saveCardToFile(rec, body, edit, roots, { backup, keep });
+    ownWritesRef.current.add(rec.id);
     const newFp = await contentFingerprint(res.data);
     // The card as the file now has it, straight away: the rescan that follows
     // can take a while on a big folder. Until then the inspector would show the
@@ -16269,6 +16612,49 @@ function App() {
     if (newFp !== rec.fp) await dbDel(STORE_EDITS, rec.fp);
     return res;
   }, [roots]);
+
+  /** Put one of a card's backups back as its file, after asking. */
+  const restoreBackup = useCallback(async (rec, name) => {
+    const root = roots.find((r) => r.id === rec.rootId);
+    const keep = settings.backupBeforeSave !== false;
+    const pending = pendingEditCount(editsRef.current.get(rec.fp));
+    if (!window.confirm(
+      "Put this backup back as the card's file?\n\n" + name + "\n→ " + (root ? root.name + "/" : "") + rec.rel + "\n\n" +
+      (keep ? "The file as it is now is copied to " + BACKUP_FOLDER_NAME + "/ first, so you can go back again."
+        : "BACKUPS ARE OFF, so the file as it is now will be gone.") +
+      (pending ? "\n\nThis card has " + pending + " change(s) waiting for Save to card. They stay waiting, on top of the backup's text." : "")
+    )) return;
+    try {
+      const res = await restoreCardBackup(rec, root, name, { backup: keep });
+      if (res.same) { showToast("That backup is the same as the file is now: nothing to put back", "warm"); return; }
+      ownWritesRef.current.add(rec.id);
+      showToast("Put back " + name + (res.backupPath ? " · the file as it was is in " + BACKUP_FOLDER_NAME + "/" : ""), "green");
+      runScanRef.current(rec.rootId, false, { quiet: true });
+    } catch (e) {
+      showToast("Couldn't put the backup back: " + e.message, "red");
+    }
+  }, [roots, settings.backupBeforeSave, showToast]);
+
+  /** Stop marking a card as changed outside the vault, and forget its earlier text. */
+  const dismissChanged = useCallback(async (rec) => {
+    const strip = (c) => { const x = Object.assign({}, c); delete x.changedOutside; return x; };
+    const raw = await dbGet(STORE_CARDS, rec.id);
+    if (raw) await dbPut(STORE_CARDS, strip(raw));
+    await dbDel(STORE_BODIES, prevBodyKey(rec.id));
+    setCards((prev) => prev.map((c) => (c.id === rec.id ? strip(c) : c)));
+  }, []);
+
+  /** What a card's History tab works with. */
+  const cardHistoryFor = useCallback((rec) => {
+    const root = roots.find((r) => r.id === rec.rootId);
+    return {
+      prev: () => dbGet(STORE_BODIES, prevBodyKey(rec.id)),
+      list: () => listCardBackups(rec, root),
+      read: async (name) => { const b = await readCardBackup(rec, root, name); return b.parsed && b.parsed.ok ? b.parsed.data : null; },
+      restore: (name) => restoreBackup(rec, name),
+      dismiss: () => dismissChanged(rec),
+    };
+  }, [roots, restoreBackup, dismissChanged]);
 
   const saveToCard = useCallback(async (rec) => {
     const edit = editsMap.get(rec.fp);
@@ -16414,11 +16800,30 @@ function App() {
         for (const r of res.records) delete sidHintsRef.current[r.id];
         if (a.next !== sidNextRef.current) { sidNextRef.current = a.next; await dbPut(STORE_KV, a.next, SID_KEY); }
       }
+      // A card whose file changed, and not by the vault's own hand, is marked
+      // so, with its text as it was kept beside the new (see "a card's history").
+      {
+        const bodyOf = new Map(res.bodies.map((b) => [b.__key, b.__val]));
+        for (let i = 0; i < res.records.length; i++) {
+          const r = res.records[i], prev = existing.get(r.id);
+          const own = ownWritesRef.current.has(r.id);
+          ownWritesRef.current.delete(r.id);
+          if (!prev || !prev.ok || !r.ok || !prev.sig || !r.sig || prev.sig === r.sig || !bodyOf.has(r.id)) continue;
+          if (own) { await dbDel(STORE_BODIES, prevBodyKey(r.id)); continue; }
+          // Changed twice before you looked: compared with what you last saw.
+          const was = (prev.changedOutside && await dbGet(STORE_BODIES, prevBodyKey(r.id))) || await dbGet(STORE_BODIES, r.id);
+          const changes = was ? cardChanges(was, bodyOf.get(r.id)) : [];
+          if (!changes.length) { await dbDel(STORE_BODIES, prevBodyKey(r.id)); continue; }
+          res.records[i] = Object.assign({}, r, { changedOutside: { at: Date.now(), fields: changes.map((c) => c.label) } });
+          await dbPut(STORE_BODIES, was, prevBodyKey(r.id));
+        }
+      }
       await dbPutMany(STORE_CARDS, res.records);
       await dbPutMany(STORE_BODIES, res.bodies);
       await dbPutMany(STORE_THUMBS, res.thumbs);
       for (const id of res.removed) {
         await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
+        await dbDel(STORE_BODIES, prevBodyKey(id));
       }
       working = working.filter((c) => c.rootId !== root.id).concat(res.records);
       // A card edited somewhere else has a new fingerprint: its notes, favourite,
@@ -17733,6 +18138,18 @@ function App() {
     return moveCards(movable, root, dir, { noConfirm: true, silent: true });
   }, [settings.autoFileAfterSend, settings.afterSendKey, roots, recById, moveCards, showToast]);
 
+  /** Mark the cards a send reached: when, and which file each was. Done before any filing away moves them. */
+  const markSent = useCallback((ids, dest) => {
+    const now = Date.now(), list = [], seen = new Set();
+    for (const id of ids) {
+      const rec = recById.get(id);
+      if (!rec || !rec.fp || !rec.sig || seen.has(rec.fp + rec.sig)) continue;
+      seen.add(rec.fp + rec.sig);
+      list.push({ fp: rec.fp, patch: (cur) => sentPatch(cur, dest.id, rec.sig, now) });
+    }
+    if (list.length) patchManyEdits(list);
+  }, [recById, patchManyEdits]);
+
   /** Upload into a front end with an import API (SillyTavern, Lumiverse, any HTTP importer). */
   const sendViaApi = useCallback(async (ids, dest) => {
     const recs = ids.map((id) => recById.get(id)).filter(Boolean);
@@ -17773,6 +18190,7 @@ function App() {
       }
     }
     setScan(SCAN_IDLE);
+    markSent(okIds, dest);
     await logOp("apiImport", { count: recs.length, to: dest.name, ok, failed });
     const filed = await autoFileAfterSend(okIds);
     showToast(
@@ -17781,7 +18199,7 @@ function App() {
       (failed ? " · " + failed + " failed — " + errs.join(" | ") : ""),
       failed ? "red" : "green"
     );
-  }, [recById, roots, destStatus, showToast, autoFileAfterSend]);
+  }, [recById, roots, destStatus, showToast, autoFileAfterSend, markSent]);
 
   /** Copy into a folder destination. */
   const sendToFolder = useCallback(async (ids, dest) => {
@@ -17797,7 +18215,7 @@ function App() {
     if (!(await verifyPermission(root.handle, true))) { showToast("Write permission denied for " + root.name, "red"); return; }
     setScan({ running: true, done: 0, total: recs.length, label: "Sending…", rootName: root.name });
     let sent = 0, already = 0, failed = 0;
-    const okIds = [], errs = [];
+    const okIds = [], errs = [], reached = [];
     for (let i = 0; i < recs.length; i++) {
       const rec = recs[i];
       setScan({ running: true, done: i, total: recs.length, label: rec.file, rootName: root.name });
@@ -17805,6 +18223,7 @@ function App() {
         const { bytes } = await readOriginalBytes(rec, roots);
         const out = await copyIntoRoot(root, dir ? dir.split("/") : [], rec.file, new Blob([bytes]), rec.sig);
         if (out.skipped) already++; else sent++;
+        reached.push(rec.id);
         // "Already there" can be the card's own file, when it lives in the
         // destination folder. It's the front end's copy, so it isn't filed away.
         let own = false;
@@ -17813,6 +18232,7 @@ function App() {
       } catch (e) { failed++; errs.push(rec.file + ": " + ((e && e.message) || String(e))); }
     }
     setScan(SCAN_IDLE);
+    markSent(reached, dest);
     await logOp("sendToFrontend", { count: recs.length, to: root.name + (dir ? "/" + dir : ""), sent, already, failed });
     const filed = await autoFileAfterSend(okIds);
     showToast(
@@ -17824,7 +18244,7 @@ function App() {
       failed ? "red" : "green"
     );
     runScanRef.current(root.id, false, { quiet: true });
-  }, [folderTargetOf, recById, roots, showToast, autoFileAfterSend]);
+  }, [folderTargetOf, recById, roots, showToast, autoFileAfterSend, markSent]);
 
   // Cards that left the vault (moved, filed away after a send, renamed and
   // rescanned) leave the selection too, so S and Send never act on ghosts.
@@ -18627,6 +19047,8 @@ function App() {
 
             {focusRec ? (
               <Inspector rec={focusRec} roots={roots} edit={focusEdit} tagIndex={tagIndex}
+                history={cardHistoryFor(focusRec)}
+                sendStatus={(settings.destinations || []).map((d) => Object.assign({ id: d.id, name: d.name }, destinationStatus(focusRec, focusEdit, d, destFolderIndex(d))))}
                 dupeGroup={focusDupeGroup}
                 onSaveToCard={() => saveToCard(focusRec)} onPlay={playPicture}
                 writeBlock={referenceFolderError(roots.find((r) => r.id === focusRec.rootId), focusRec.dir, folderRoles)}

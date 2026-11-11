@@ -18,6 +18,7 @@ const { mod: V } = loadPureRegion([
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
   "writeCardFile", "cardFormatOf", "pngWithoutCard", "reusableRecord",
+  "cardChanges", "cardCompareParts", "cardBackupsOf", "backupStampTime", "listCardBackups", "readCardBackup", "restoreCardBackup", "prevBodyKey",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -345,6 +346,63 @@ async function main() {
     try { await V.moveCardTo(rec, { id: "s", name: "Inbox", role: "inbox", handle: src.handle }, { id: "d", name: "Library", role: "library", handle: dst.handle }, ""); } catch (e) { err = e; }
     t.ok(err && /content mismatch/.test(err.message) && /source left untouched/.test(err.message), "a copy damaged in the middle of a big file is caught", err && err.message);
     t.ok(src.get("big.png") && V.sameBytes(src.get("big.png"), big), "and the original stays where it was");
+  }
+
+  console.log("\na card's history: what changed, its backups, and going back to one");
+  {
+    const card = (over) => V.newCardPayload(Object.assign({ name: "Ada", description: "A clockmaker.", personality: "Dry.", first_mes: "You're late.", tags: ["victorian"] }, over || {}));
+    const pngOf = (c) => V.writeCardIntoPng(PNG_1PX, c, V.buildV2Payload(c));
+    const bodyOf = async (bytes) => (await V.parseCardBytes(bytes, "ada.png")).data;
+
+    const v1 = await bodyOf(pngOf(card()));
+    const v2c = card({ description: "A clockmaker who lost her hand.", tags: ["victorian", "inventor"] });
+    v2c.data.alternate_greetings = ["Mind the gears."];
+    const v2 = await bodyOf(pngOf(v2c));
+    const ch = V.cardChanges(v1, v2);
+    t.eq(ch.map((c) => c.label), ["Description", "Tags", "Alternate greetings"], "two versions of a card are compared part by part, and only the parts that differ are listed");
+    t.eq([ch[0].before, ch[0].after, ch[1].after], ["A clockmaker.", "A clockmaker who lost her hand.", "victorian, inventor"], "each with its text before and after");
+    t.eq(V.cardChanges(v1, await bodyOf(pngOf(card()))).length, 0, "the same card twice differs in nothing");
+    t.ok(V.cardCompareParts(v1).some((p) => p.key === "lorebook") && V.prevBodyKey("r:a.png") !== "r:a.png", "the lorebook is one of the parts, and the earlier text has a key of its own");
+
+    const names = ["ada 20261101-090000.png", "ada 20261103-101500.png", "ada 20261103-101500 (2).png", "adam 20261102-000000.png", "ada.png", "ada 20261102-120000.json", "ADA 20261104-080000.PNG"];
+    t.eq(V.cardBackupsOf(names, "ada.png").map((b) => b.name), ["ADA 20261104-080000.PNG", "ada 20261103-101500 (2).png", "ada 20261103-101500.png", "ada 20261101-090000.png"],
+      "a card's backups are picked out by name, newest first: not another card's, and not another format's");
+    t.eq(new Date(V.backupStampTime("20261107-090503")).getHours() + ":" + new Date(V.backupStampTime("20261107-090503")).getMinutes(), "9:5", "a backup's stamp is its date and time");
+    t.eq(V.backupStampTime("nonsense"), 0, "and nothing, when it isn't one");
+
+    // A card saved twice, then taken back to how it first was.
+    const fsys = memFs("Library");
+    fsys.put("people/ada.png", pngOf(card()));
+    const root = { id: "r", name: "Library", role: "library", handle: fsys.handle };
+    const rec = { id: "r:people/ada.png", rootId: "r", rel: "people/ada.png", dir: "people", file: "ada.png", ext: "png", name: "Ada" };
+    t.eq(await V.listCardBackups(rec, root), [], "a card never saved has no backups");
+    const original = fsys.get("people/ada.png");
+    await V.saveCardToFile(rec, v1, { fields: { description: "First edit." } }, [root], { keep: 5 });
+    const list1 = await V.listCardBackups(rec, root);
+    t.ok(list1.length === 1 && list1[0].size === original.length && list1[0].at > 0, "Save to card leaves a backup, which is listed with its size and time", list1);
+    const got = await V.readCardBackup(rec, root, list1[0].name);
+    t.ok(got.parsed.ok && got.parsed.data.description === "A clockmaker." && V.sameBytes(got.bytes, original), "the backup holds the card as it was");
+    t.eq(V.cardChanges(got.parsed.data, await bodyOf(fsys.get("people/ada.png"))).map((c) => c.label), ["Description"], "and comparing it with the card now shows what the save changed");
+
+    const edited = fsys.get("people/ada.png");
+    const res = await V.restoreCardBackup(rec, root, list1[0].name, { backup: true });
+    t.ok(!res.same && V.sameBytes(fsys.get("people/ada.png"), original) && res.data.description === "A clockmaker.", "restoring puts the backup's bytes back as the card's file");
+    const list2 = await V.listCardBackups(rec, root);
+    t.ok(list2.length === 2 && /^Library\/_vault backups\/people\/ada \d{8}-\d{6}( \(2\))?\.png$/.test(res.backupPath), "and first keeps the file as it was, so going back can be undone", res.backupPath);
+    t.ok((await Promise.all(list2.map((b) => V.readCardBackup(rec, root, b.name)))).some((b) => V.sameBytes(b.bytes, edited)), "that copy is the edited card");
+    t.ok(res.sig === await V.byteSignature(new File([original], "ada.png")), "the restore gives back the file's signature");
+    t.ok((await V.restoreCardBackup(rec, root, list1[0].name, {})).same, "restoring what the file already is changes nothing");
+
+    const refused = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message; } };
+    t.ok(/isn't a backup of this card/.test(await refused(() => V.restoreCardBackup(rec, root, "../ada.png", {}))) &&
+      /isn't a backup of this card/.test(await refused(() => V.readCardBackup(rec, root, "bram 20261101-090000.png"))), "only this card's own backups can be read or put back");
+    fsys.put("_vault backups/people/ada 20200101-000000.png", new Uint8Array([1, 2, 3]));
+    t.ok(/can't be read as a card/.test(await refused(() => V.restoreCardBackup(rec, root, "ada 20200101-000000.png", {}))) && V.sameBytes(fsys.get("people/ada.png"), original),
+      "a backup that isn't a card any more is refused, and the card is left alone");
+    V.setFolderRolesNow({ "r::people": "reference" });
+    try {
+      t.ok(/Reference folder/.test(await refused(() => V.restoreCardBackup(rec, root, list1[0].name, {}))), "and nothing is put back into a Reference folder");
+    } finally { V.setFolderRolesNow({}); }
   }
 
   console.log("\nReference folders are never written to");

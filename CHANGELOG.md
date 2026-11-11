@@ -8,6 +8,16 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.0
+
+- **New: where a card stands with your front end.** The card panel's Overview has a **Front end** block with a line for each destination, and the sidebar has three new filters for the destination that Send uses: **In front end**, **Not sent** and **Changed since sent**. The vault works this out from what it knows itself, and never asks a front end what it holds:
+  - **A folder destination** is a folder you've linked, so the vault can see into it. A card is *in the front end* when its very file is there, and *a different version is there* when a card with the same name and creator, or the same name, description and first message, is.
+  - **An upload** (SillyTavern, Lumiverse, another importer) leaves a mark on the card: when it was sent, and which file it was. The card reads as *sent* while its file is still one that was sent, and *changed since it was sent* once you've saved changes into it.
+  - **A copy you've reworked doesn't pass for the card you sent.** It may share the original's notes and tags, but it's a different file, so it reads as changed, or as not sent if you gave it a new name, description or first message.
+  - The mark says what the vault sent, not what happened in the front end afterwards: a card you deleted or edited there still reads as sent. It's kept with your notes, so it's in your vault-data backups too.
+- **New: a card changed outside the vault is marked, and shows what changed.** When a scan finds that a card's file has changed and the vault didn't write it (you edited the card in your front end, say), the card gets a ✎ badge, the new **Changed outside** filter finds it, and the card panel's new **History** tab shows the change side by side: the description, greetings, tags, lorebook and the rest, as they were and as they are. **Dismiss** takes the mark off. This is where a **Save to card** that was held back (see 1.7.1) sends you to look before you save.
+- **New: a card's backups, to compare and to go back to.** Every **Save to card** already left a copy of the file as it was in `_vault backups`. The **History** tab now lists a card's backups with their dates. **Compare** shows what differs between a backup and the card now. **Restore** puts a backup back as the card's file: the file as it is now is backed up first, so going back can itself be undone, and what's written is read back and checked. Changes waiting for Save to card stay waiting.
+
 ## 1.7.1
 
 - **Notes, favourites, ratings, flags and vault-only tags stay on a card that was edited somewhere else.** They're kept under a fingerprint of the card's name, description and first message, so that copies of one card share them. But when a card's description was changed in your front end, the next scan saw a new fingerprint, and everything you'd put on the card dropped out of sight (it was still stored, under the old one). A scan now carries a card's record over when its file has changed. A copy that wasn't edited keeps the record too, and if the card now matches one that already has notes, the two are joined. Changes waiting for **Save to card** follow the card as well.
