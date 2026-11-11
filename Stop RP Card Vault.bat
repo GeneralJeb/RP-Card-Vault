@@ -1,5 +1,7 @@
 @echo off
-setlocal enabledelayedexpansion
+rem No delayed expansion: with it on, a ! in this folder's name is dropped from
+rem %~dp0, so vault.local isn't found and the wrong port (8790) is stopped.
+setlocal
 cd /d "%~dp0"
 
 rem Stops the vault server on this copy's port (8790, or the port set in
@@ -63,14 +65,14 @@ for /f "tokens=2,5" %%a in ('netstat -ano -p TCP ^| findstr /c:":%VAULT_PORT% "'
   )
 )
 
-if "!FOUND!"=="1" (
+if "%FOUND%"=="1" (
   rem Give Windows a moment to release the socket before anything rebinds it.
   ping -n 2 127.0.0.1 >nul 2>nul
 )
 
 if "%QUIET%"=="1" goto :eof
 
-if "!FOUND!"=="0" (
+if "%FOUND%"=="0" (
   echo   Nothing was listening on %VAULT_PORT%.
   echo.
   echo   If the vault is still reachable in your browser, something other than

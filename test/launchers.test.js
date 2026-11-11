@@ -207,7 +207,7 @@ console.log("\nthe launchers use port " + DEFAULT_PORT + ", or the one in vault.
   // A portable Node on the drive comes before an installed one.
   if (start) {
     const text = start.toString("latin1");
-    const portable = text.indexOf('if exist "%~dp0node\\node.exe" set NODE_EXE=');
+    const portable = text.indexOf('if exist "%~dp0node\\node.exe" set "NODE_EXE=');
     t.ok(portable > 0 && portable < text.indexOf("where node"), "Start uses node\\node.exe next to it before looking for an installed Node");
     t.ok(/"%NODE_EXE%" "%~dp0serve\.js" %VAULT_PORT% --restart/.test(text), "and runs serve.js with it, on the same port");
   }
@@ -229,8 +229,8 @@ console.log("\nthe launchers use port " + DEFAULT_PORT + ", or the one in vault.
     t.ok(!/taskkill[^\r\n]*\/IM/i.test(text),
       "it never kills by image name — that would take SillyTavern with it");
     t.ok(/taskkill\s+\/PID/i.test(text), "it kills by PID");
-    t.ok(/enabledelayedexpansion/i.test(text),
-      "delayed expansion is on — a flag set inside a for loop reads as empty without it");
+    t.ok(!/enabledelayedexpansion/i.test(text) && !/!FOUND!/.test(text),
+      "delayed expansion is off (it drops a ! from the folder's path), and the found flag is read after the loop");
     t.ok(/\/quiet/i.test(text), "it has a /quiet mode for Start to call");
     t.ok(/goto :eof/i.test(text), "which returns instead of pausing");
     const announce = text.slice(0, text.indexOf("taskkill"));
@@ -267,7 +267,7 @@ else {
       const f = path.join(dir, "vault.local");
       if (local == null) { if (fs.existsSync(f)) fs.unlinkSync(f); } else fs.writeFileSync(f, local);
       fs.writeFileSync(path.join(dir, "probe.bat"), "@echo off\r\n" + batPart[0].replace(/%~dp0/g, dir + "\\") + "for /f \"delims=\" %%x in (\"%VAULT_PORT%|%VAULT_LABEL%\") do echo %%x\r\n");
-      fs.writeFileSync(path.join(dir, "stop.bat"), "@echo off\r\nsetlocal enabledelayedexpansion\r\n" + stopPart[0].replace(/%~dp0/g, dir + "\\") + "echo %VAULT_PORT%\r\n");
+      fs.writeFileSync(path.join(dir, "stop.bat"), "@echo off\r\nsetlocal\r\n" + stopPart[0].replace(/%~dp0/g, dir + "\\") + "echo %VAULT_PORT%\r\n");
       fs.writeFileSync(path.join(dir, "probe.vbs"), "Option Explicit\r\nDim fso, base, PORT\r\nSet fso = CreateObject(\"Scripting.FileSystemObject\")\r\nbase = \"" + dir + "\"\r\n" +
         vbsFn[0] + "\r\n" + vbsPort[0] + "\r\nWScript.Echo PORT & \"|\" & LocalSetting(\"label\", \"\")\r\n");
       fs.writeFileSync(path.join(dir, "probe.ps1"), "$base = \"" + dir + "\"\r\n" + psPart[0] + "Write-Output \"$port|$label\"\r\n");
@@ -293,6 +293,91 @@ else {
     t.ok(false, "running the probes", String(e && e.message || e).slice(0, 200));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+console.log("\nthe launchers work from a folder whose name has ( ) & ! or [ ] in it (run for real on Windows)");
+if (process.platform !== "win32") t.skip("running the launchers from an odd folder", "not on Windows");
+else {
+  const os = require("os");
+  const { spawnSync } = require("child_process");
+  // "RP-Card-Vault (1)" is what Windows names a second download of the zip.
+  const top = fs.mkdtempSync(path.join(os.tmpdir(), "vault-odd-"));
+  const dir = path.join(top, "RP-Card-Vault (1) & co! [2]");
+  // As Explorer runs a double-clicked .bat: cmd /c ""full path"".
+  const runBat = (file) => {
+    const r = spawnSync("cmd.exe", ["/d", "/s", "/c", "\"\"" + file + "\"\""],
+      { cwd: top, encoding: "latin1", windowsHide: true, timeout: 30000, input: "", windowsVerbatimArguments: true,
+        env: Object.assign({}, process.env, { PATH: path.dirname(process.execPath) + ";" + process.env.PATH }) });
+    return (r.stdout + (r.stderr ? "ERROR " + r.stderr : "")).trim();
+  };
+  try {
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "vault.local"), "port=8799\r\n");
+    const start = read("Start RP Card Vault.bat");
+    const stop = read("Stop RP Card Vault.bat");
+    const ps1 = read("Create Shortcut.ps1");
+    t.ok(!!(start && stop && ps1), "the launchers were found");
+    if (start && stop && ps1) {
+      // Start, the whole file, with a serve.js that only says where it ran.
+      fs.writeFileSync(path.join(dir, "Start RP Card Vault.bat"), start);
+      fs.writeFileSync(path.join(dir, "serve.js"), "console.log('PROBE ' + process.cwd() + ' ' + process.argv.slice(2).join(' '));\n");
+      let out = runBat(path.join(dir, "Start RP Card Vault.bat"));
+      t.ok(/RP_Card_Vault\.html is not in this folder/.test(out) && out.indexOf("    " + dir + "\\") >= 0 && !/ERROR/.test(out),
+        "Start without the page says so and shows the whole folder", out.slice(0, 300));
+      fs.writeFileSync(path.join(dir, "RP_Card_Vault.html"), "x");
+      out = runBat(path.join(dir, "Start RP Card Vault.bat"));
+      t.ok(out.indexOf("PROBE " + dir + " 8799 --restart") >= 0 && !/ERROR/.test(out),
+        "Start runs serve.js from that folder on vault.local's port", out.slice(0, 300));
+
+      // Its portable Node lookup: only the lines that pick NODE_EXE, so no Node is copied.
+      const nodePart = start.toString("latin1").match(/set NODE_EXE=\r\n(?:if [^\r\n]*\r\n){2}/);
+      t.ok(!!nodePart, "Start's portable Node lookup was found");
+      if (nodePart) {
+        fs.mkdirSync(path.join(dir, "node"));
+        fs.writeFileSync(path.join(dir, "node", "node.exe"), "");
+        fs.writeFileSync(path.join(dir, "node-probe.bat"), "@echo off\r\n" + nodePart[0] + "for /f \"delims=\" %%x in (\"[%NODE_EXE%]\") do echo %%x\r\n");
+        out = runBat(path.join(dir, "node-probe.bat"));
+        t.eq(out, "[" + dir + "\\node\\node.exe]", "and finds a portable node\\node.exe there");
+      }
+
+      // Stop, up to where it would look for a server, so nothing is ever stopped.
+      const head = stop.toString("latin1");
+      const cut = head.indexOf("set FOUND=0\r\n");
+      t.ok(cut > 0, "Stop's vault.local code was found");
+      if (cut > 0) {
+        fs.writeFileSync(path.join(dir, "stop-probe.bat"), head.slice(0, cut) + "for /f \"delims=\" %%x in (\"%VAULT_PORT%|%CD%\") do echo %%x\r\n");
+        t.eq(runBat(path.join(dir, "stop-probe.bat")), "8799|" + dir, "Stop reads that folder's vault.local, so it looks on the right port");
+      }
+
+      // The shortcut script, up to where it would make shortcuts.
+      const ps = ps1.toString("latin1");
+      const psCut = ps.indexOf("function New-VaultShortcut");
+      t.ok(psCut > 0, "the shortcut script's setup was found");
+      if (psCut > 0) {
+        fs.writeFileSync(path.join(dir, "RP Card Vault.vbs"), "' probe\r\n");
+        fs.writeFileSync(path.join(dir, "RP_Card_Vault.ico"), "x");
+        fs.writeFileSync(path.join(dir, "sc-probe.ps1"), ps.slice(0, psCut) + "Write-Output \"$port|$(Test-Path -LiteralPath $icon)\"\r\n");
+        const r = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(dir, "sc-probe.ps1")],
+          { encoding: "latin1", windowsHide: true, timeout: 60000, input: "" });
+        t.eq((r.stdout || "").trim(), "8799|True", "the shortcut script finds the launcher, the icon and vault.local's port", (r.stdout + r.stderr).slice(0, 300));
+      }
+    }
+  } catch (e) {
+    t.ok(false, "running the launchers from an odd folder", String(e && e.message || e).slice(0, 200));
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true });
+  }
+}
+
+console.log("\nserve.js refuses a port it can't use, in plain words");
+{
+  const { spawnSync } = require("child_process");
+  for (const bad of ["99999", "8791.5", "-5"]) {
+    const r = spawnSync(process.execPath, [path.join(ROOT, "serve.js"), bad, "--no-open"], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+    const said = (r.stdout || "") + (r.stderr || "");
+    t.ok(r.status === 1 && said.indexOf(bad) >= 0 && /vault\.local/.test(said) && !/RangeError|\n\s+at /.test(said),
+      "port " + bad + ": exits with a message naming it, not a stack trace", said.slice(0, 200));
   }
 }
 
