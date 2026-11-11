@@ -30,7 +30,7 @@ Ideas, complaints and advice are all welcome as issues. For a bigger change, ope
 - Work goes into the **`dev`** branch; `main` holds releases. Open pull requests against `dev`.
 - Run the tests first: `npm install`, then `npm test`. The same tests run on GitHub for every pull request, on Windows.
 - Keep to what's there: the page is a single file (`RP_Card_Vault.html`), the server has no dependencies (`serve.js`), and nothing may load from the internet.
-- Never weaken the safety rules: the vault doesn't delete card files, the API key lives only in the server's memory, and the AI only suggests changes the user approves. [SECURITY.md](SECURITY.md) lists the rest.
+- Never weaken the safety rules: the vault only deletes a card file when the user asks it to, the API key lives only in the server's memory, and the AI only suggests changes the user approves. [SECURITY.md](SECURITY.md) lists the rest.
 - [docs/development.md](docs/development.md) covers the tests, the version number and the changelog.
 
 By submitting a pull request, you agree that your contribution is licensed under the project's [MIT License](LICENSE).

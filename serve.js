@@ -75,7 +75,7 @@ const { execFileSync, spawn } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.7.0";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.7.1";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -1136,8 +1136,19 @@ function wsResolve(p, allowRoot) {
  */
 const WS_TEXT_EXT = ["md", "markdown", "txt", "text", "json", "jsonl", "csv", "tsv", "yaml", "yml", "toml", "ini", "log"];
 
+/**
+ * A file name's extension as Windows sees it: what follows the last dot, even
+ * when the name starts with that dot. ".bat" is a batch file there, though
+ * Node's own path.extname says a name like that has no extension at all.
+ */
+function wsExt(rel) {
+  const name = String(rel).split("/").pop();
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
+}
+
 function wsWritable(f) {
-  const ext = path.extname(f.rel).slice(1).toLowerCase();
+  const ext = wsExt(f.rel);
   if (ext && WS_TEXT_EXT.indexOf(ext) < 0) {
     throw userError("The workspace holds text files only (" + WS_TEXT_EXT.map((x) => "." + x).join(", ") + "), so " + f.rel + " can't be written.");
   }
@@ -1670,7 +1681,7 @@ if (require.main !== module) {
     readChoice, sseParser, addToolPiece, toolCallIds, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
     cleanMessages, cleanTools, saysToolsUnsupported, saysImagesUnsupported, WS_STARTER, cookiesOf, mergeCookies,
     RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES, errorText,
-    browserCommands, macDefaultBrowser, isChromiumDesktopEntry,
+    browserCommands, macDefaultBrowser, isChromiumDesktopEntry, wsExt,
   };
   return;
 }

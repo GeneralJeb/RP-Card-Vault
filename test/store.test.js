@@ -22,6 +22,8 @@ const { mod: V } = loadPureRegion([
   "chromiumMajor", "handleCrashVersion", "browserUpdatePage", "osKindOf", "startScriptFor", "unopenedFileMessage",
   "orphanCardIds", "dbDelCardsOfRoot", "dbAll", "STORE_CARDS", "STORE_THUMBS",
   "vaultDataFileName", "vaultDataFilesToPrune", "autoBackupDue", "autoBackupTarget", "dirKey", "startupSort",
+  "vaultDataBackupNames", "vaultDataBackupDate", "vaultDataWeight", "backupOutweighs",
+  "editsFollowingCards", "changedFingerprints", "mergeEditRecords", "editHolds",
 ], { indexedDB, IDBKeyRange });
 
 async function main() {
@@ -82,6 +84,37 @@ async function main() {
     t.eq(V.handleCrashVersion(""), 0, "an empty user agent is fine");
     t.eq(V.browserUpdatePage("Edge"), "edge://settings/help", "Edge users are sent to Edge's update page");
     t.eq(V.browserUpdatePage("Chrome"), "chrome://settings/help", "Chrome users to Chrome's");
+  }
+
+  console.log("\na card edited somewhere else keeps its notes, favourite and flags");
+  {
+    const rec = (id, fp, ok) => ({ id, fp, ok: ok !== false });
+    const before = new Map([["r:a.png", rec("r:a.png", "old")], ["r:b.png", rec("r:b.png", "same")], ["r:c.png", rec("r:c.png", "nofp:x", false)]]);
+    t.eq(V.changedFingerprints(before, [rec("r:a.png", "new"), rec("r:b.png", "same"), rec("r:c.png", "c2"), rec("r:d.png", "d")]), [{ from: "old", to: "new" }],
+      "a scan notes the files it knew whose card changed: not unchanged ones, new ones or ones it couldn't read before");
+
+    const mine = { fingerprint: "old", fields: { scenario: "Edited here." }, tags: null, vaultTags: ["keeper"], flags: [{ key: "review", note: "check", at: 1 }], notes: "Good one.", rating: 4, favorite: true, updatedAt: 1 };
+    const edits = new Map([["old", mine]]);
+    const moved = V.editsFollowingCards([{ from: "old", to: "new" }], (fp) => edits.get(fp), () => false, 99);
+    t.eq([moved.puts.length, moved.puts[0].fingerprint, moved.puts[0].notes, moved.puts[0].favorite, moved.puts[0].rating, moved.puts[0].vaultTags.join(), moved.puts[0].flags.length, moved.puts[0].fields.scenario],
+      [1, "new", "Good one.", true, 4, "keeper", 1, "Edited here."], "the record goes to the card's new fingerprint whole: notes, favourite, rating, tags, flags and unsaved changes");
+    t.eq([moved.dels, moved.moved], [["old"], [["old", "new"]]], "and leaves the old one, which is no card's any more");
+
+    const shared = V.editsFollowingCards([{ from: "old", to: "new" }], (fp) => edits.get(fp), (fp) => fp === "old", 99);
+    t.eq([shared.puts.length, shared.dels.length, shared.moved.length], [1, 0, 0], "when a copy of the card wasn't edited, it keeps the record too");
+
+    const both = new Map([["old", mine], ["new", { fingerprint: "new", fields: { scenario: "Edited there." }, vaultTags: ["Keeper", "sea"], flags: [], notes: "Already here.", rating: 0, favorite: false }]]);
+    const merged = V.editsFollowingCards([{ from: "old", to: "new" }], (fp) => both.get(fp), () => false, 99).puts[0];
+    t.eq([merged.notes, merged.vaultTags.join(), merged.rating, merged.favorite, merged.flags.length, merged.fields.scenario],
+      ["Already here.\n\nGood one.", "Keeper,sea", 4, true, 1, "Edited there."],
+      "when the card it now matches has a record of its own, the two are joined and nothing is lost");
+
+    t.eq(V.editsFollowingCards([{ from: "none", to: "new" }, { from: "old", to: "old" }, { from: "blank", to: "new" }], (fp) => (fp === "blank" ? { fingerprint: "blank", fields: {}, flags: [], vaultTags: [], notes: " " } : edits.get(fp)), () => false, 99).puts.length, 0,
+      "a card with nothing on it, or one that didn't change, moves nothing");
+    const two = V.editsFollowingCards([{ from: "old", to: "n1" }, { from: "old", to: "n2" }], (fp) => edits.get(fp), () => false, 99);
+    t.eq([two.puts.map((e) => e.fingerprint).join(), two.dels.join(), two.moved.length], ["n1,n2", "old", 1], "two copies edited two ways each keep the record");
+    t.ok(V.editHolds({ favorite: true }) && V.editHolds({ notes: "x" }) && V.editHolds({ fields: { a: "b" } }) && V.editHolds({ sent: { d1: { at: 1 } } }) && !V.editHolds({ fields: {}, notes: "", flags: [] }) && !V.editHolds(null),
+      "a record counts as holding something for a note, a favourite, an unsaved change or a sent mark");
   }
 
   console.log("\nthe system the browser runs on, and the launcher to name there");
@@ -148,6 +181,17 @@ async function main() {
       "rp-card-vault-data.json", "my notes.json", "rp-card-vault-data 20260101-000000.json.bak"];
     t.eq(V.vaultDataFilesToPrune(names, 2).join(), "rp-card-vault-data 20260930-120000.json", "keeping 2, the oldest backup goes");
     t.eq(V.vaultDataFilesToPrune(names, 7).length, 0, "and below the limit nothing does; other files never");
+    t.eq(V.vaultDataBackupNames(names.concat(["notes.txt"])), V.vaultDataFilesToPrune(names, 1).length ? [V.vaultDataBackupNames(names)[0]].concat(V.vaultDataFilesToPrune(names, 1)) : V.vaultDataBackupNames(names),
+      "the backups in a folder are listed newest first: the one kept, then those a prune would take");
+    t.ok(V.vaultDataBackupNames(names).every((n) => /^rp-card-vault-data \d{8}-\d{6}\.json$/.test(n)) && V.vaultDataBackupNames(names)[0] > V.vaultDataBackupNames(names)[1], "and nothing else in the folder is one");
+    t.eq(V.vaultDataBackupDate("rp-card-vault-data 20261107-090503.json"), "2026-11-07 09:05", "a backup's name says when it was made");
+
+    // A cleared browser starts the vault again empty. Its backups mustn't push the real ones out.
+    t.eq(V.vaultDataWeight({ edits: new Array(300), agentChats: new Array(4) }), 304, "a backup's weight is its card records and chats");
+    t.eq([V.vaultDataWeight(null), V.vaultDataWeight({}), V.vaultDataWeight({ edits: "x" })], [0, 0, 0], "and nothing, for something that isn't a backup");
+    t.ok(V.backupOutweighs(300, 0) && V.backupOutweighs(300, 3) && V.backupOutweighs(3000, 1900), "a backup holding far more than the vault does now is kept, and offered back");
+    t.ok(!V.backupOutweighs(300, 300) && !V.backupOutweighs(300, 290) && !V.backupOutweighs(310, 300) && !V.backupOutweighs(15, 0),
+      "one about the size of the vault, or of a few records, is an ordinary old backup");
 
     const h = {};
     const roots = [{ id: "imp", name: "Imported", mode: "import" }, { id: "r1", name: "Cards", handle: h }, { id: "r2", name: "Archive", handle: h }];

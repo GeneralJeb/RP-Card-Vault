@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "1.7.1";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -2941,6 +2941,12 @@ function setFolderRolesNow(roles) { FOLDER_ROLES_NOW = roles || {}; }
 function referenceFolderError(root, dir, folderRoles) {
   if (!root) return "";
   const roles = folderRoles === undefined ? FOLDER_ROLES_NOW : folderRoles;
+  // The vault's own backups of a folder's cards sit in "_vault backups/<that
+  // folder>": they may be written wherever the cards themselves may be. Without
+  // this, a writable folder inside a Reference one could never be saved to.
+  const b = String(dir || "");
+  const of = b === BACKUP_FOLDER_NAME ? "" : b.indexOf(BACKUP_FOLDER_NAME + "/") === 0 ? b.slice(BACKUP_FOLDER_NAME.length + 1) : null;
+  if (of !== null) return referenceFolderError(root, of, roles) ? "\"" + [root.name, b].join("/") + "\" holds the backups of a Reference folder, which is never written to." : "";
   // A folder registered before roles existed has none: it was never meant to be read-only.
   if (effectiveFolderRole(root.id, dir || "", roles, root.role || "library") !== "reference") return "";
   return "\"" + [root.name].concat(dir ? [dir] : []).join("/") + "\" is a Reference folder, which is never written to. Give it another role to change cards there.";
@@ -3211,11 +3217,12 @@ async function moveCardTo(rec, srcRoot, destRoot, destDir) {
   // 2. write the copy (collision-safe; may land under a numbered name)
   const written = await copyIntoRoot(destRoot, destDirs, rec.file, new Blob([bytes]), srcSig);
 
-  // 3. verify the copy really exists and matches, byte signature for byte signature
+  // 3. verify the copy really exists and matches, byte for byte. (A byte
+  //    signature only samples the start and end of a big file, so damage in
+  //    the middle of the copy would pass it.)
   const checkFile = await written.fh.getFile();
   if (checkFile.size !== srcFile.size) throw new Error("Copy verification failed (size mismatch) — source left untouched");
-  const checkSig = await byteSignature(checkFile);
-  if (checkSig !== srcSig) throw new Error("Copy verification failed (content mismatch) — source left untouched");
+  if (!sameBytes(bytes, new Uint8Array(await checkFile.arrayBuffer()))) throw new Error("Copy verification failed (content mismatch) — source left untouched");
 
   // 4. only now remove the original
   await srcDirHandle.removeEntry(rec.file);
@@ -3482,6 +3489,73 @@ function editAfterSave(saved, live, fp) {
   if (cur.lorebook && cur.lorebook !== saved.lorebook) out.lorebook = cur.lorebook;
   const pending = proposalOf(cur);
   if (proposalCount(pending) > 0) out.aiProposal = pending;
+  return out;
+}
+
+/** Whether an edit record holds anything at all: something of yours, or a change waiting to be saved. */
+function editHolds(edit) {
+  if (!edit) return false;
+  return isEdited(edit) || vaultTagsOf(edit).length > 0 || flagsOf(edit).length > 0 || !!String(edit.notes || "").trim() ||
+    !!edit.rating || !!edit.favorite || proposalCount(proposalOf(edit)) > 0 || !!(edit.sent && Object.keys(edit.sent).length);
+}
+
+/**
+ * Two edit records that have become one card's: `mine` (already under that
+ * card's fingerprint) with whatever `other` adds. Nothing of either is lost:
+ * notes are joined, tags and flags pooled, and where both say something
+ * different about the card's text, `mine` stands.
+ */
+function mergeEditRecords(mine, other, fp, now) {
+  const a = mine || {}, b = other || {};
+  const out = Object.assign({}, b, a, { fingerprint: fp, updatedAt: now });
+  out.fields = Object.assign({}, b.fields || {}, a.fields || {});
+  out.tags = Array.isArray(a.tags) ? a.tags : Array.isArray(b.tags) ? b.tags : null;
+  const tags = vaultTagsOf(a).slice();
+  for (const t of vaultTagsOf(b)) if (!tags.some((x) => normTagName(x) === normTagName(t))) tags.push(t);
+  out.vaultTags = tags;
+  out.flags = addFlagEntries(flagsOf(a), flagsOf(b), now);
+  const na = String(a.notes || "").trim(), nb = String(b.notes || "").trim();
+  out.notes = !nb || na === nb || na.indexOf(nb) >= 0 ? (a.notes || "") : !na ? (b.notes || "") : a.notes + "\n\n" + b.notes;
+  out.rating = a.rating || b.rating || 0;
+  out.favorite = !!(a.favorite || b.favorite);
+  if (a.sent || b.sent) out.sent = Object.assign({}, b.sent || {}, a.sent || {});
+  return out;
+}
+
+/**
+ * A card's notes, favourite, rating, flags, vault-only tags and unsaved
+ * changes are kept under a fingerprint of its name, description and first
+ * message, so that copies of one card share them. When a rescan finds a file
+ * it knew with a new fingerprint (the card was edited somewhere else), the
+ * record has to follow the file, or everything on it drops out of sight.
+ *
+ * `pairs` are { from, to }: the old and new fingerprint of each such file.
+ * `editOf(fp)` gives a record; `inUse(fp)` says whether some card still has
+ * that fingerprint (a copy that wasn't edited keeps the record as well).
+ * Returns { puts, dels, moved }: records to store, fingerprints whose record
+ * is no longer anyone's, and the [from, to] of those (what else is kept by
+ * fingerprint, cached AI answers, goes with them).
+ */
+function editsFollowingCards(pairs, editOf, inUse, now) {
+  const puts = new Map(), dels = new Set(), moved = [];
+  for (const p of pairs || []) {
+    if (!p || !p.from || !p.to || p.from === p.to) continue;
+    const old = editOf(p.from);
+    if (!editHolds(old)) continue;
+    const there = puts.has(p.to) ? puts.get(p.to) : editOf(p.to);
+    puts.set(p.to, editHolds(there) ? mergeEditRecords(there, old, p.to, now) : Object.assign({}, old, { fingerprint: p.to, updatedAt: now }));
+    if (!inUse(p.from) && !dels.has(p.from)) { dels.add(p.from); moved.push([p.from, p.to]); }
+  }
+  return { puts: Array.from(puts.values()), dels: Array.from(dels), moved };
+}
+
+/** The { from, to } fingerprints of the files a scan read again and found changed. */
+function changedFingerprints(before, after) {
+  const out = [];
+  for (const r of after || []) {
+    const prev = before && before.get(r.id);
+    if (prev && prev.ok && r.ok && prev.fp && r.fp && prev.fp !== r.fp) out.push({ from: prev.fp, to: r.fp });
+  }
   return out;
 }
 
@@ -3849,16 +3923,46 @@ function backupsToPrune(names, file, keep, newest) {
 const VAULT_DATA_FOLDER = "_vault data";
 const VAULT_DATA_PREFIX = "rp-card-vault-data ";
 const AUTO_BACKUP_KEY = "autoBackupAt";
+const RESTORE_OFFER_KEY = "restoreOfferDismissed";   // the backup you said "not now" to: not offered again
 const AUTO_BACKUP_DAYS = [1, 3, 7];
 const AUTO_BACKUP_KEEP = [3, 7, 14, 30];
 
 function vaultDataFileName(stamp) { return VAULT_DATA_PREFIX + stamp + ".json"; }
 
+/** The vault-data backups among a folder's file names, newest first. */
+function vaultDataBackupNames(names) {
+  const re = new RegExp("^" + reEscape(VAULT_DATA_PREFIX) + "(\\d{8}-\\d{6})\\.json$");
+  return (names || []).filter((n) => re.test(n)).sort().reverse();
+}
+
 /** Which vault-data backups to remove so that the newest `keep` remain. */
 function vaultDataFilesToPrune(names, keep) {
   if (!(keep > 0)) return [];
-  const re = new RegExp("^" + reEscape(VAULT_DATA_PREFIX) + "(\\d{8}-\\d{6})\\.json$");
-  return names.filter((n) => re.test(n)).sort().reverse().slice(keep);
+  return vaultDataBackupNames(names).slice(keep);
+}
+
+/** When a backup was made, from its name ("2026-11-07 09:00"), or "". */
+function vaultDataBackupDate(name) {
+  const m = /(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}\.json$/.exec(String(name || ""));
+  return m ? m[1] + "-" + m[2] + "-" + m[3] + " " + m[4] + ":" + m[5] : "";
+}
+
+/** How much a vault-data export holds: its card records (tags, notes, edits…) and agent chats. */
+function vaultDataWeight(data) {
+  const d = data && typeof data === "object" ? data : {};
+  return (Array.isArray(d.edits) ? d.edits.length : 0) + (Array.isArray(d.agentChats) ? d.agentChats.length : 0);
+}
+
+/*
+ * Whether a backup holds far more than the vault does now. That is what a
+ * cleared browser looks like from here: the vault starts again empty, and its
+ * daily backups of next to nothing would push the real ones out of the folder
+ * within a week. A backup like that is never pruned, and the vault offers to
+ * bring it back. The margin keeps ordinary tidying (a few records fewer than
+ * last week) from counting.
+ */
+function backupOutweighs(backupWeight, nowWeight) {
+  return Number(backupWeight) > Number(nowWeight) * 1.5 + 20;
 }
 
 /** Whether a backup is due: never made, or older than `days`. */
@@ -3918,11 +4022,33 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   const dirs = rec.dir ? rec.dir.split("/") : [];
   const dir = await getDirByPath(root.handle, dirs, false);
   const fh = await dir.getFileHandle(rec.file, { create: false });
-  const originalBytes = new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  const fileNow = await fh.getFile();
+  const originalBytes = new Uint8Array(await fileNow.arrayBuffer());
 
-  // Start from the file's own card, so nothing the vault doesn't model is lost.
-  const raw = await rawCardFromBytes(originalBytes, rec.file);
-  const v3 = buildV3Payload(body, edit, rawCharacterBook(raw), raw);
+  // The index holds the card as it was when the vault last read it. If the
+  // file has changed since (edited in the front end, say), writing from the
+  // index would quietly undo that change. So it's refused, and the caller
+  // reads the card again: the pending changes follow it, to be saved after a look.
+  if (rec.sig) {
+    let sigNow = "";
+    try { sigNow = await byteSignature(fileNow); } catch (e) { sigNow = ""; }
+    if (sigNow && sigNow !== rec.sig) {
+      const stale = new Error("This card's file has changed since the vault last read it (it was edited somewhere else), so nothing was written. Rescan its folder, check the card, then save.");
+      stale.code = "stale";
+      throw stale;
+    }
+  }
+
+  // Start from the file's own card, as it is now: nothing the vault doesn't
+  // model is lost, and every field the save doesn't change is the file's own.
+  // (`body`, the index's copy, is only what's used if the file can't be read
+  // as a card at all; with neither, there is nothing to build a card from.)
+  let parsedNow = null;
+  try { parsedNow = await parseCardBytes(originalBytes, rec.file); } catch (e) { parsedNow = null; }
+  const raw = parsedNow && parsedNow.ok ? parsedNow.raw : null;
+  const base = parsedNow && parsedNow.ok ? parsedNow.data : body;
+  if (!base) throw new Error("The vault couldn't read this file as a card" + (parsedNow && parsedNow.err ? " (" + parsedNow.err + ")" : "") + ", so there is nothing to save its changes onto. Nothing was written.");
+  const v3 = buildV3Payload(base, edit, rawCharacterBook(raw), raw);
 
   if (cardFormatOf(rec.file) === "png" && !isPng(originalBytes)) {
     throw new Error("Don't know how to write this file type in place — use Download copy");
@@ -4023,7 +4149,11 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
     } catch (e) { /* no backup folder after all */ }
   }
 
-  return { data: verified.data, spec: verified.spec, backupPath, bytes: outBytes.length, pruned };
+  // The file's signature as it is now, so the index can tell this write from
+  // a change made somewhere else.
+  let sig = "";
+  try { sig = await byteSignature(await fh.getFile()); } catch (e) { sig = ""; }
+  return { data: verified.data, spec: verified.spec, backupPath, bytes: outBytes.length, pruned, sig };
 }
 
 /* ════════════════════════════════════════════
@@ -15534,6 +15664,9 @@ function App() {
   const [roots, setRoots] = useState([]);
   const [cards, setCards] = useState([]);
   const [editsMap, setEditsMap] = useState(new Map());
+  // The edits as they are now, for work that outlives a render (a scan).
+  const editsRef = useRef(editsMap);
+  editsRef.current = editsMap;
   // Edits saved in another window of the vault come in here (see announceEdits).
   useEffect(() => {
     const ch = vaultEditsChannel();
@@ -16131,7 +16264,7 @@ function App() {
       return next;
     });
     setCards((prev) => prev.map((c) => (c.id === rec.id
-      ? Object.assign({}, c, { fp: newFp, scannedAt: Date.now(), name: res.data.name || c.name, tags: res.data.tags })
+      ? Object.assign({}, c, { fp: newFp, sig: res.sig || c.sig, scannedAt: Date.now(), name: res.data.name || c.name, tags: res.data.tags })
       : c)));
     if (newFp !== rec.fp) await dbDel(STORE_EDITS, rec.fp);
     return res;
@@ -16169,6 +16302,12 @@ function App() {
       return true;
     } catch (e) {
       setScan(SCAN_IDLE);
+      if (e && e.code === "stale") {
+        // Read it again straight away: the changes waiting to be saved follow the card.
+        showToast(rec.name + " was changed outside the vault since it was last read, so nothing was written. Reading it again now: check the card, then save.", "warm");
+        runScanRef.current(rec.rootId, false, { quiet: true });
+        return false;
+      }
       showToast("Save failed: " + e.message, "red");
       return false;
     }
@@ -16209,6 +16348,8 @@ function App() {
         touched.add(rec.rootId);
       } catch (e) {
         failed++;
+        // A card changed outside the vault is read again, so it can be saved after a look.
+        if (e && e.code === "stale") touched.add(rec.rootId);
         if (errs.length < 3) errs.push(rec.file + ": " + e.message);
       }
     }
@@ -16280,6 +16421,26 @@ function App() {
         await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
       }
       working = working.filter((c) => c.rootId !== root.id).concat(res.records);
+      // A card edited somewhere else has a new fingerprint: its notes, favourite,
+      // flags and unsaved changes follow it (see editsFollowingCards).
+      {
+        const pairs = changedFingerprints(existing, res.records);
+        if (pairs.length) {
+          const fps = new Set(working.map((c) => c.fp));
+          const f = editsFollowingCards(pairs, (fp) => editsRef.current.get(fp), (fp) => fps.has(fp), Date.now());
+          if (f.puts.length) {
+            setEditsMap((prev) => {
+              const next = new Map(prev);
+              for (const fp of f.dels) next.delete(fp);
+              for (const e of f.puts) next.set(e.fingerprint, e);
+              return next;
+            });
+            await dbPutMany(STORE_EDITS, f.puts);
+            for (const fp of f.dels) await dbDel(STORE_EDITS, fp);
+            for (const m of f.moved) await migrateAiNotes(m[0], m[1]);
+          }
+        }
+      }
       // Merge into what's on screen now, not into this scan's starting copy:
       // another scan or a removed folder may have changed it meanwhile.
       const fresh = res.records;
@@ -16466,6 +16627,9 @@ function App() {
   }, [buildVaultExport, showToast]);
 
   const [lastAutoBackup, setLastAutoBackup] = useState(0);
+  // A backup in the backup folder that holds far more than this vault does:
+  // { name, label, weight, data }. Shown as an offer to bring it back.
+  const [restoreOffer, setRestoreOffer] = useState(null);
   useEffect(() => { dbGet(STORE_KV, AUTO_BACKUP_KEY).then((v) => setLastAutoBackup(Number(v) || 0)); }, []);
 
   // Write a copy of the vault data into the backup folder: when one is due
@@ -16485,13 +16649,31 @@ function App() {
     if (!granted) { if (asked) showToast("No write access to " + target.root.name, "red"); return false; }
     try {
       const dir = await getDirByPath(target.root.handle, target.dirs.concat([VAULT_DATA_FOLDER]), true);
+      const data = await buildVaultExport();
+      const nowWeight = vaultDataWeight(data);
+      const listNames = async () => { const out = []; for await (const [n, e] of dir.entries()) if (e.kind === "file") out.push(n); return out; };
+      const readBackup = async (n) => {
+        try { return JSON.parse(await (await (await dir.getFileHandle(n)).getFile()).text()); } catch (e) { return null; }
+      };
+      // A backup here that holds far more than the vault does now means the
+      // browser's copy was lost (cleared, or a new computer): offer it back.
+      // Until the vault has something of its own again, nothing is written,
+      // so those backups aren't crowded out by backups of an empty vault.
+      const dismissed = await dbGet(STORE_KV, RESTORE_OFFER_KEY);
+      for (const n of vaultDataBackupNames(await listNames())) {
+        const old = await readBackup(n);
+        if (!old || !Array.isArray(old.edits) || !backupOutweighs(vaultDataWeight(old), nowWeight)) continue;
+        if (n !== dismissed) setRestoreOffer({ name: n, label: target.label, weight: vaultDataWeight(old), data: old });
+        if (!asked && nowWeight === 0) return false;
+        break;
+      }
       const fh = await dir.getFileHandle(vaultDataFileName(stampNow()), { create: true });
       const w = await fh.createWritable();
-      await w.write(new Blob([JSON.stringify(await buildVaultExport(), null, 2)], { type: "application/json" }));
+      await w.write(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
       await w.close();
-      const names = [];
-      for await (const [n, e] of dir.entries()) if (e.kind === "file") names.push(n);
-      for (const n of vaultDataFilesToPrune(names, Number(settings.autoBackupKeep) || 7)) {
+      for (const n of vaultDataFilesToPrune(await listNames(), Number(settings.autoBackupKeep) || 7)) {
+        // One that holds far more than the vault does now is never the one to go.
+        if (backupOutweighs(vaultDataWeight(await readBackup(n)), nowWeight)) continue;
         try { await dir.removeEntry(n); } catch (e) { /* tried again next time */ }
       }
       const at = Date.now();
@@ -18109,6 +18291,29 @@ function App() {
       <input ref={dirInputRef} type="file" multiple webkitdirectory="" directory=""
         style={{ display: "none" }}
         onChange={(e) => { const fl = e.target.files; e.target.value = ""; handlePickedFolder(fl); }} />
+
+      {/* ── a backup that holds more than this vault does ── */}
+      {restoreOffer ? (
+        <div style={{
+          flexShrink: 0, padding: "9px 16px", display: "flex", gap: 10, alignItems: "center",
+          background: acRgba("green", 0.09), borderBottom: "1px solid " + acRgba("green", 0.3),
+        }}>
+          <span style={{ fontSize: 14 }}>{"\u{1F4BE}"}</span>
+          <div style={{ fontSize: 11.5, lineHeight: 1.6, color: "var(--text-secondary)", flex: 1 }}>
+            <strong style={{ color: "var(--accent-green)" }}>A backup of your vault data is in {restoreOffer.label}</strong>
+            {vaultDataBackupDate(restoreOffer.name) ? ", made " + vaultDataBackupDate(restoreOffer.name) : ""}: {fmtNum(restoreOffer.weight)} records
+            of tags, notes, ratings, edits and chats, which is more than this vault holds now. If this browser's
+            copy was cleared, or this is a new computer, bring it back. It's kept in the folder either way.
+          </div>
+          <SmallBtn color="green" onClick={async () => {
+            const offer = restoreOffer;
+            setRestoreOffer(null);
+            try { await applyVaultData(offer.data); }
+            catch (e) { showToast("Couldn't bring the backup back: " + e.message, "red"); }
+          }}>Bring it back</SmallBtn>
+          <SmallBtn color="muted" onClick={() => { dbPut(STORE_KV, restoreOffer.name, RESTORE_OFFER_KEY); setRestoreOffer(null); }}>not now</SmallBtn>
+        </div>
+      ) : null}
 
       {/* ── overlapping registered folders ── */}
       {nestedWarn.length ? (

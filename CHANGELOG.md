@@ -8,6 +8,22 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.7.1
+
+- **Notes, favourites, ratings, flags and vault-only tags stay on a card that was edited somewhere else.** They're kept under a fingerprint of the card's name, description and first message, so that copies of one card share them. But when a card's description was changed in your front end, the next scan saw a new fingerprint, and everything you'd put on the card dropped out of sight (it was still stored, under the old one). A scan now carries a card's record over when its file has changed. A copy that wasn't edited keeps the record too, and if the card now matches one that already has notes, the two are joined. Changes waiting for **Save to card** follow the card as well.
+- **Save to card can't undo a change made somewhere else.** A save wrote every field from the vault's own copy of the card, taken at the last scan. If the file had changed since (edited in your front end, say), the save quietly put the old text back, and still said it had worked. Now:
+  - A file that has changed since the vault last read it is **not written**. The vault says so, reads the card again, and your changes wait on it to be saved after a look.
+  - A save takes every field it doesn't change **from the file itself**, as it is at that moment.
+  - A card whose text never reached the vault's cache can no longer be saved with its other fields blank. A bulk **Save to card** could do that; the button in the card panel was already off for such a card.
+- **A cleared browser no longer costs you your vault-data backups.** The automatic backups in `_vault data` are there for exactly this, but after the browser's data was cleared the vault started again empty, wrote a backup of nothing on the first scan, and removed the oldest real one to make room. A week on, every real backup was gone, and nothing had offered to bring one back. Now:
+  - When a backup in the folder holds far more than the vault does, the vault **offers to bring it back**, in a bar above your cards. **Not now** puts the bar away for that backup.
+  - An empty vault writes no backup while such a one is there.
+  - A backup that holds far more than the vault does now is **never removed** to make room, however many newer ones there are.
+- **The agent's workspace refuses files named only by an extension.** It takes text files only, by extension, so that a card can't talk the agent into leaving a program for you to open. A name like `.bat`, `.vbs` or `.html` slipped through, because such a name counts as having no extension, though Windows runs a file called `.bat` as a batch file all the same. They're refused now, for new files and for renames. A text file whose name starts with a dot (`.notes.md`) is still fine.
+- **A move checks every byte of the copy.** Before the original is removed, the copy was compared by a signature that only samples the start and end of a big file, so a copy damaged in the middle would have passed. The whole copy is compared now.
+- **A writable folder inside a Reference folder can be saved to.** With backups on, **Save to card** failed there, saying its backup folder was a Reference folder. A folder's backups can now be written wherever its cards can.
+- **The safety notes say what the vault does.** `SECURITY.md` and `CONTRIBUTING.md` said the vault never deletes a card file. It does when you ask it to (**Delete permanently**, or deleting duplicates), after asking, as the README says.
+
 ## 1.7.0
 
 - **The vault runs on a Mac and on Linux.** It was Windows only, because its launchers were. There are now launchers for the other two, in every download:

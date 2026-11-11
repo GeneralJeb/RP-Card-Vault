@@ -46,7 +46,7 @@ Signing in to an upload destination (SillyTavern, Lumiverse, another importer) h
 - **Only a PNG's card chunks are unpacked,** and never past 64 MB. A file built to unpack to gigabytes is refused, not opened. The same limit applies to `.charx` files.
 - **Keys like `__proto__` in a card change nothing outside that card.**
 - **File names can't become Windows device names** (`CON`, `NUL`, …).
-- **The vault never deletes a card file.** Moves are copied and checked before the original is removed, and saving keeps a backup.
+- **The vault only deletes a card file when you ask it to** (Delete permanently, or deleting duplicates), and asks first. Moves are copied and checked, byte for byte, before the original is removed, and saving keeps a backup.
 
 ## The AI agent
 

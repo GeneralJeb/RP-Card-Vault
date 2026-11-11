@@ -165,7 +165,7 @@ async function main() {
     // Save to card, end to end, into a folder held in memory.
     const fsys = memFs("Scratch");
     fsys.put("ada.png", first);
-    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png", sig: "s" };
+    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png" };
     const edit = { fields: { description: "A clockmaker who hates being late." } };
     const res = await V.saveCardToFile(rec, parsed.data, edit, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
     const onDisk = await V.parseCardBytes(fsys.get("ada.png"), "ada.png");
@@ -186,7 +186,7 @@ async function main() {
       const bytes = ext === "png" ? V.writeCardIntoPng(PNG_1PX, card, V.buildV2Payload(card)) : enc(card);
       fsys.put("ada." + ext, bytes);
       const parsed = await V.parseCardBytes(bytes, "ada." + ext);
-      const rec = { id: "r:ada." + ext, rootId: "r", rel: "ada." + ext, dir: "", file: "ada." + ext, ext, sig: "s" };
+      const rec = { id: "r:ada." + ext, rootId: "r", rel: "ada." + ext, dir: "", file: "ada." + ext, ext };
       await V.saveCardToFile(rec, parsed.data, { fields: { description: "Edited." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
       const d = (await V.parseCardBytes(fsys.get("ada." + ext), "ada." + ext)).raw.data;
       t.ok(d.description === "Edited." && (d.assets || []).length === 2 && d.assets[1].name === "happy"
@@ -222,7 +222,7 @@ async function main() {
       return fh;
     };
     const parsed = await V.parseCardBytes(orig, "ada.png");
-    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png", sig: "s" };
+    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png" };
     let err = "";
     try { await V.saveCardToFile(rec, parsed.data, { fields: { personality: "Punctual." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false }); }
     catch (e) { err = e.message; }
@@ -243,6 +243,108 @@ async function main() {
     catch (e) { err = e.message; }
     t.ok(/Restore failed/.test(err) && /backups are off/i.test(err) && !/recover from/.test(err),
       "a failed restore with backups off doesn't send you looking for a backup (" + (err || "no error") + ")");
+  }
+
+  console.log("\nSave to card never writes over a change made somewhere else");
+  {
+    const card = (over) => ({ spec: "chara_card_v3", spec_version: "3.0", data: Object.assign({
+      name: "Ada", description: "A clockmaker.", personality: "Dry.", scenario: "A workshop.", first_mes: "You're late.",
+      mes_example: "", creator_notes: "", system_prompt: "", post_history_instructions: "", tags: ["victorian"], creator: "someone",
+      character_version: "1", alternate_greetings: ["Hello again."], extensions: {} }, over || {}) });
+    const pngOf = (c) => V.writeCardIntoPng(PNG_1PX, c, V.buildV2Payload(c));
+    const info = { rel: "ada.png", dir: "", file: "ada.png", ext: "png" };
+    const scanned = async (fsys, root) => V.processCardFile(root, info, await (await root.handle.getFileHandle("ada.png")).getFile());
+
+    // The card is indexed; then the front end rewrites its file; then, with no rescan, a tag is added here and saved.
+    const fsys = memFs("Library");
+    fsys.put("ada.png", pngOf(card()));
+    const root = { id: "r", name: "Library", role: "library", handle: fsys.handle };
+    const first = await scanned(fsys, root);
+    const outside = pngOf(card({ description: "A clockmaker who lost her hand in the fire.", alternate_greetings: ["Hello again.", "Mind the gears."] }));
+    fsys.put("ada.png", outside);
+    let err = null;
+    try { await V.saveCardToFile(first.rec, first.body.__val, { fields: {}, tags: ["victorian", "inventor"] }, [root], { keep: 5 }); } catch (e) { err = e; }
+    t.ok(err && err.code === "stale" && /changed since the vault last read it/.test(err.message), "a file changed since the vault read it is refused, saying so", err && err.message);
+    t.ok(V.sameBytes(fsys.get("ada.png"), outside), "and is left exactly as the front end wrote it");
+    t.eq(fsys.list("_vault backups").length, 0, "with no backup made for a save that didn't happen");
+
+    // Read again, the same change goes in on top of the front end's.
+    const again = await scanned(fsys, root);
+    const res = await V.saveCardToFile(again.rec, again.body.__val, { fields: {}, tags: ["victorian", "inventor"] }, [root], { keep: 5 });
+    const now = (await V.parseCardBytes(fsys.get("ada.png"), "ada.png")).data;
+    t.eq([now.description, now.alternate_greetings.length, now.tags.join()], ["A clockmaker who lost her hand in the fire.", 2, "victorian,inventor"],
+      "once the card is read again, the save keeps the front end's change and adds the vault's");
+    t.eq(res.sig, await V.byteSignature(new File([fsys.get("ada.png")], "ada.png")), "the save gives back the file's new signature");
+    let second = null;
+    try { await V.saveCardToFile(Object.assign({}, again.rec, { sig: res.sig }), now, { fields: { scenario: "A workshop at night." } }, [root], { keep: 5 }); } catch (e) { second = e; }
+    t.ok(!second, "so a second save straight after the first isn't taken for a change made elsewhere", second && second.message);
+
+    // The index has the card but not its text (it never made it into the cache).
+    const bare = memFs("Library");
+    bare.put("ada.png", pngOf(card()));
+    const bareRoot = { id: "r", name: "Library", role: "library", handle: bare.handle };
+    const rec = (await scanned(bare, bareRoot)).rec;
+    await V.saveCardToFile(rec, undefined, { fields: { description: "A clockmaker, rewritten." } }, [bareRoot], { backup: false });
+    const kept = (await V.parseCardBytes(bare.get("ada.png"), "ada.png")).data;
+    t.eq([kept.name, kept.description, kept.first_mes, kept.personality, kept.tags.join(), kept.alternate_greetings.length],
+      ["Ada", "A clockmaker, rewritten.", "You're late.", "Dry.", "victorian", 1],
+      "a save with no cached text takes every other field from the file, instead of writing them blank");
+
+    // A stale copy of the text in the index can't undo a field either: only what was edited is written.
+    const stale = memFs("Library");
+    stale.put("ada.png", pngOf(card({ scenario: "A workshop, rebuilt." })));
+    const staleRoot = { id: "r", name: "Library", role: "library", handle: stale.handle };
+    await V.saveCardToFile({ id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png" },
+      (await V.parseCardBytes(pngOf(card()), "ada.png")).data, { fields: { personality: "Wry." } }, [staleRoot], { backup: false });
+    const merged = (await V.parseCardBytes(stale.get("ada.png"), "ada.png")).data;
+    t.eq([merged.scenario, merged.personality], ["A workshop, rebuilt.", "Wry."], "fields the save doesn't change are always the file's own");
+  }
+
+  console.log("\na writable folder inside a Reference one can be saved to, backups and all");
+  {
+    const v3 = V.newCardPayload({ name: "Ada", description: "A clockmaker.", first_mes: "You're late." });
+    const fsys = memFs("Shared");
+    fsys.put("mine/ada.png", V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3)));
+    const root = { id: "r", name: "Shared", role: "reference", handle: fsys.handle };
+    const roles = { "r::mine": "library" };
+    V.setFolderRolesNow(roles);
+    try {
+      t.eq(V.referenceFolderError(root, "mine", roles), "", "the folder itself may be written to");
+      t.eq(V.referenceFolderError(root, "_vault backups/mine", roles), "", "and so may its backups folder");
+      t.ok(/Reference/.test(V.referenceFolderError(root, "_vault backups/theirs", roles)) && /Reference/.test(V.referenceFolderError(root, "_vault backups", roles)),
+        "the backups of a Reference folder stay off limits");
+      const rec = { id: "r:mine/ada.png", rootId: "r", rel: "mine/ada.png", dir: "mine", file: "ada.png", ext: "png" };
+      const body = (await V.parseCardBytes(fsys.get("mine/ada.png"), "ada.png")).data;
+      const res = await V.saveCardToFile(rec, body, { fields: { description: "A clockmaker, edited." } }, [root], { keep: 5 });
+      t.ok(/^Shared\/_vault backups\/mine\/ada \d{8}-\d{6}\.png$/.test(res.backupPath), "Save to card works there, with its backup beside the others", res.backupPath);
+      t.eq((await V.parseCardBytes(fsys.get("mine/ada.png"), "ada.png")).data.description, "A clockmaker, edited.", "and the card has the change");
+    } finally { V.setFolderRolesNow({}); }
+  }
+
+  console.log("\na move checks every byte of the copy");
+  {
+    const big = new Uint8Array(600 * 1024);
+    for (let i = 0; i < big.length; i++) big[i] = i & 255;
+    const src = memFs("Inbox"), dst = memFs("Library");
+    src.put("big.png", big);
+    // A destination that damages the middle of what it's given: past where a sampled signature looks.
+    const real = dst.handle.getFileHandle;
+    dst.handle.getFileHandle = async function (name, o) {
+      const fh = await real.call(this, name, o);
+      const open = fh.createWritable;
+      fh.createWritable = async function () {
+        const w = await open.call(this);
+        const close = w.close;
+        w.close = async function () { await close.call(this); fh._n.bytes[300 * 1024] ^= 0xff; };
+        return w;
+      };
+      return fh;
+    };
+    const rec = { id: "s:big.png", rootId: "s", rel: "big.png", dir: "", file: "big.png", name: "big" };
+    let err = null;
+    try { await V.moveCardTo(rec, { id: "s", name: "Inbox", role: "inbox", handle: src.handle }, { id: "d", name: "Library", role: "library", handle: dst.handle }, ""); } catch (e) { err = e; }
+    t.ok(err && /content mismatch/.test(err.message) && /source left untouched/.test(err.message), "a copy damaged in the middle of a big file is caught", err && err.message);
+    t.ok(src.get("big.png") && V.sameBytes(src.get("big.png"), big), "and the original stays where it was");
   }
 
   console.log("\nReference folders are never written to");
@@ -396,7 +498,7 @@ async function main() {
     const fsys = memFs("Scratch");
     fsys.put("cora.charx", charxBytes);
     const parsed = await V.parseCardBytes(charxBytes, "cora.charx");
-    const rec = { id: "r:cora.charx", rootId: "r", rel: "cora.charx", dir: "", file: "cora.charx", ext: "charx", sig: "s" };
+    const rec = { id: "r:cora.charx", rootId: "r", rel: "cora.charx", dir: "", file: "cora.charx", ext: "charx" };
     await V.saveCardToFile(rec, parsed.data, { fields: { description: "After." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
     const saved = fsys.get("cora.charx");
     const back = await V.parseCardBytes(saved, "cora.charx");
@@ -497,7 +599,7 @@ async function main() {
     // Two different cards with the same file name in different folders.
     fsys.put("A/Bram.png", card("Bram the Smith"));
     fsys.put("B/Bram.png", card("Bram the Sailor"));
-    const rec = (dir) => ({ id: "r:" + dir + "/Bram.png", rootId: "r", rel: dir + "/Bram.png", dir, file: "Bram.png", ext: "png", sig: "s" });
+    const rec = (dir) => ({ id: "r:" + dir + "/Bram.png", rootId: "r", rel: dir + "/Bram.png", dir, file: "Bram.png", ext: "png" });
     const save = async (dir, text) => {
       const parsed = await V.parseCardBytes(fsys.get(dir + "/Bram.png"), "Bram.png");
       return V.saveCardToFile(rec(dir), parsed.data, { fields: { description: text } }, [root], { keep: 1 });
@@ -1017,7 +1119,7 @@ async function main() {
     fsys.put("Ada.png", bytes);
     for (const s of ["20991101-015000", "20991101-015500", "20991101-015800"]) fsys.put("_vault backups/Ada " + s + ".png", new Uint8Array([1]));
     const parsed = await V.parseCardBytes(bytes, "Ada.png");
-    const rec = { id: "r:Ada.png", rootId: "r", rel: "Ada.png", dir: "", file: "Ada.png", ext: "png", sig: "s" };
+    const rec = { id: "r:Ada.png", rootId: "r", rel: "Ada.png", dir: "", file: "Ada.png", ext: "png" };
     const res = await V.saveCardToFile(rec, parsed.data, { fields: { description: "Edited." } }, [root], { keep: 3 });
     const made = res.backupPath.split("/").pop();
     const kept = fsys.list("_vault backups");
