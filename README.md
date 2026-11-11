@@ -16,18 +16,21 @@ A local library for roleplay character cards (the PNG and JSON cards used by Sil
 
 ## What it needs
 
-- **Windows** with **Chrome or Edge**. The vault reads and files your cards through the browser's File System Access API. Brave has it switched off by default; the vault explains how to turn it on.
+- **Windows, macOS or Linux**, with **Chrome or Edge** (or another Chromium browser, such as Vivaldi or Chromium itself). The vault reads and files your cards through the browser's File System Access API. Brave has it switched off by default; the vault explains how to turn it on.
 - **Firefox and Safari aren't supported right now.** Neither has that API, so the vault can't save edits to your card files or move them there. Support may come later, in a more limited form.
 - **[Node.js](https://nodejs.org) 20 or newer.** If you run SillyTavern you probably have it. Without Node, the launcher falls back to Python and the vault runs without the AI features.
 
 ## Start it
 
 1. From the [Releases](https://github.com/GeneralJeb/RP-Card-Vault/releases) page, download **`RP-Card-Vault-<version>.zip`** (not "Source code", which has the developer files too) and unzip it into a folder of its own.
-2. Double-click **`Start RP Card Vault.bat`**. That's the only file you need to open; the others are explained in `HOW TO RUN.txt`.
-3. The vault opens at `http://127.0.0.1:8790/RP_Card_Vault.html`.
+2. Start it. That's the only file you need to open; the others are explained in `HOW TO RUN.txt`.
+   - **Windows:** double-click **`Start RP Card Vault.bat`**.
+   - **Mac:** double-click **`Start RP Card Vault.command`**. The first time, macOS may refuse a file that came from the internet: right-click it, choose **Open**, and confirm.
+   - **Linux:** in a terminal in that folder, run **`./start.sh`**.
+3. The vault opens at `http://127.0.0.1:8790/RP_Card_Vault.html`. On a Mac or Linux it opens in Chrome, Edge, Brave, Vivaldi or Chromium even when your default browser is Safari or Firefox, which can't run it.
 4. Click **Add a folder** and pick your card folder.
 
-`Create Shortcut.bat` adds Desktop and Start Menu shortcuts.
+On Windows, `Create Shortcut.bat` adds Desktop and Start Menu shortcuts.
 
 ## Updating
 
@@ -40,6 +43,8 @@ Your cards, tags and notes aren't in the vault's files, so nothing of yours is o
 ## Tested on
 
 - Windows 10 (22H2), and GitHub's Windows test machines
+- Linux (Ubuntu 24.04): the launchers, the local server and the automated tests
+- macOS: new in 1.7.0, and not yet tried on a real Mac. If it misbehaves there, please open an issue
 - Microsoft Edge (the automated browser test) and other Chrome-based browsers
 - Node.js 20 and 24
 - SillyTavern 1.19 and Lumiverse, as places to send cards

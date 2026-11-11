@@ -19,7 +19,7 @@ console.warn = () => {};
 
 const { mod: V } = loadPureRegion([
   "dbPutMany", "dbPut", "dbDel", "dbGet", "dbKeys", "STORE_BODIES", "STORE_EDITS", "vaultEditsChannel", "agentPinnedLine",
-  "chromiumMajor", "handleCrashVersion", "browserUpdatePage",
+  "chromiumMajor", "handleCrashVersion", "browserUpdatePage", "osKindOf", "startScriptFor", "unopenedFileMessage",
   "orphanCardIds", "dbDelCardsOfRoot", "dbAll", "STORE_CARDS", "STORE_THUMBS",
   "vaultDataFileName", "vaultDataFilesToPrune", "autoBackupDue", "autoBackupTarget", "dirKey", "startupSort",
 ], { indexedDB, IDBKeyRange });
@@ -82,6 +82,28 @@ async function main() {
     t.eq(V.handleCrashVersion(""), 0, "an empty user agent is fine");
     t.eq(V.browserUpdatePage("Edge"), "edge://settings/help", "Edge users are sent to Edge's update page");
     t.eq(V.browserUpdatePage("Chrome"), "chrome://settings/help", "Chrome users to Chrome's");
+  }
+
+  console.log("\nthe system the browser runs on, and the launcher to name there");
+  {
+    const cases = [
+      ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", "windows", "Start RP Card Vault.bat"],
+      ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", "mac", "Start RP Card Vault.command"],
+      ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", "linux", "start.sh"],
+      ["Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", "linux", "start.sh"],
+      ["", "windows", "Start RP Card Vault.bat"],
+      ["something unheard of", "windows", "Start RP Card Vault.bat"],
+    ];
+    for (const [ua, os, script] of cases) {
+      t.eq([V.osKindOf(ua), V.startScriptFor(V.osKindOf(ua))], [os, script], (ua.match(/\(([^;)]+)/) || [0, ua || "(no user agent)"])[1] + ": " + os + ", started with " + script);
+    }
+    const gone = Object.assign(new Error("not found"), { name: "NotFoundError" });
+    t.ok(/260-character limit/.test(V.unopenedFileMessage("a.png", gone, "windows")), "a listed file that can't be opened: on Windows, most likely the 260-character limit");
+    for (const os of ["mac", "linux"]) {
+      const m = V.unopenedFileMessage("a.png", gone, os);
+      t.ok(!/Windows|260/.test(m) && /moved or removed/.test(m) && /Rescan/.test(m), "on " + os + ", where there's no such limit: moved or removed, rescan", m);
+    }
+    t.ok(/Couldn't open the file: denied/.test(V.unopenedFileMessage("a.png", new Error("denied"), "mac")), "any other failure says what it was, on every system");
   }
 
   console.log("\nindex records left without a folder");

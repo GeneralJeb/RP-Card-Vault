@@ -106,6 +106,7 @@ t.ok(/pull_request:\s*\n\s*branches: \[dev, main\]/.test(testYml), "on every pul
 t.ok(/- run: npm ci\s*\n\s*- run: npm test/.test(testYml), "installing from the lockfile, then npm test");
 t.eq(Number((testYml.match(/node-version: (\d+)/) || [])[1]), relay.NODE_MIN, "on the oldest Node the vault supports");
 t.ok(/contents: read/.test(testYml), "with read-only access");
+t.ok(/os: \[ubuntu-latest, macos-latest\]/.test(testYml) && /- run: node test\/launchers\.test\.js/.test(testYml), "and the Mac and Linux launchers are run on a Mac and on Linux");
 console.log("\nthe offline copy can't keep an old library");
 {
   // sw.js serves lib/ cache-first under unchanging names. Its LIB_HASH must
@@ -127,7 +128,7 @@ t.ok(/awk -v v="## \$VERSION"/.test(relYml) && /--notes-file notes\.md/.test(rel
   const cp = (relYml.match(/cp -r ([\s\S]*?) "\$DIR"\//) || [])[1] || "";
   const listed = [...cp.replace(/\\\n/g, " ").matchAll(/"([^"]+)"|(\S+)/g)].map((m) => m[1] || m[2]);
   const served = [...new Set(Object.values(relay.STATIC_FILES || {}).map((f) => f.split("/")[0]))];
-  const launchers = fs.readdirSync(ROOT).filter((f) => /\.(bat|vbs|ps1)$/i.test(f));
+  const launchers = fs.readdirSync(ROOT).filter((f) => /\.(bat|vbs|ps1|sh|command)$/i.test(f));
   t.ok(served.length > 5 && served.every((f) => listed.indexOf(f) >= 0), "the release zip has every file the server serves (" + served.join(", ") + ")",
     served.filter((f) => listed.indexOf(f) < 0));
   t.ok(launchers.every((f) => listed.indexOf(f) >= 0) && listed.indexOf("HOW TO RUN.txt") >= 0, "and every launcher, with HOW TO RUN.txt",
@@ -141,6 +142,16 @@ t.ok(/awk -v v="## \$VERSION"/.test(relYml) && /--notes-file notes\.md/.test(rel
     .concat(/robocopy "%~dp0lib" "%STAGE%\\lib"/.test(bat) ? ["lib"] : []);
   t.ok(served.every((f) => staged.indexOf(f) >= 0), "the Python fallback's copy has every file the server serves",
     served.filter((f) => staged.indexOf(f) < 0));
+
+  // The Mac and Linux launchers: in the zip marked as programs, and the same copy without Node.
+  const unix = launchers.filter((f) => /\.(sh|command)$/i.test(f));
+  t.ok(unix.length === 3 && unix.every((f) => new RegExp("chmod \\+x [^\\n]*\\$DIR/" + reEscape(f)).test(relYml)), "start.sh, stop.sh and the .command are marked as programs in the zip", unix);
+  const sh = read("start.sh");
+  const shStaged = [...(((sh.match(/\ncp ([^\n]*) "\$STAGE\/"/) || [])[1] || "").matchAll(/"\$DIR\/([^"]+)"/g))].map((m) => m[1])
+    .concat(/cp -R "\$DIR\/lib" "\$STAGE\/lib"/.test(sh) ? ["lib"] : []);
+  t.ok(served.every((f) => shStaged.indexOf(f) >= 0), "start.sh's Python fallback copies every file the server serves too",
+    served.filter((f) => shStaged.indexOf(f) < 0));
+  t.ok(shStaged.every((f) => served.indexOf(f) >= 0), "and nothing else", shStaged.filter((f) => served.indexOf(f) < 0));
 }
 {
   // The awk the workflow runs, done in JS: the section must exist and not run into the next one.

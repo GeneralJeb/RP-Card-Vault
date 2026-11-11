@@ -8,6 +8,19 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.7.0
+
+- **The vault runs on a Mac and on Linux.** It was Windows only, because its launchers were. There are now launchers for the other two, in every download:
+  - **Mac:** double-click **`Start RP Card Vault.command`**. The first time, macOS may refuse a file that came from the internet: right-click it, choose **Open**, and confirm.
+  - **Linux:** run **`./start.sh`** in a terminal in the vault's folder (it works on a Mac too, and is what the `.command` runs).
+  - **`./stop.sh`** turns the server off. It asks the server to stop through the vault's own address, so it can never stop another program.
+  - They do what the Windows launcher does: a server already on this copy's port is replaced by a fresh one, `vault.local` gives a second copy its own port (read exactly as on Windows, even a `vault.local` saved there), a portable Node in `node/bin/node` is used before an installed one, and without Node the page alone is served through Python.
+  - Checked on Linux (Ubuntu 24.04), where the launchers are run for real by the tests. **Not yet tried on a real Mac:** GitHub's tests now run the launchers on one, but if it misbehaves for you, please open an issue.
+- **On a Mac or Linux the vault opens in a browser that can run it.** It needs Chrome, Edge, Brave, Vivaldi or Chromium, and the default browser there is often Safari or Firefox. It now opens in your default browser when that is one of those five, and otherwise in the first of them that's installed (Chrome first). Only when none is installed does it open in the default, where the page says what it needs. On Windows nothing changes: `Start RP Card Vault.bat` opens your default browser and the shortcuts pick as they did. Your tags and notes are kept by the browser, so keep using the same one.
+- **The vault names the right file to start.** Its messages said to run `Start RP Card Vault.bat` whatever the computer. On a Mac they now name `Start RP Card Vault.command`, and on Linux `start.sh`.
+- **A file that can't be opened no longer blames Windows on other systems.** A card file that was in a folder's list but couldn't be opened was always put down to Windows' 260-character path limit. On a Mac or Linux, which have no such limit, it now says the file was most likely moved or removed, and to rescan.
+- **Smaller wording changes for the same reason.** The theme choice is **Match your system**, a card dragged out of the window lands in Finder or your file manager, and the problem log speaks of your user name on this computer.
+
 ## 1.6.26
 
 - **One card with "sign" in its name no longer stops an upload.** Sending several cards to SillyTavern, Lumiverse or another importer stops early when the front end signs you out or stops running. It decided that by looking for words like "sign" in the error, and a refusal can name the card, so one refused card called "Assignment" or "Designer" (or a refusal that said "design") left every card after it unsent. The run now stops only when the local server says the sign-in is gone or the front end can't be reached.

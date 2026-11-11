@@ -19,6 +19,9 @@
  *     Start RP Card Vault.bat     console window, shows what the server prints
  *     RP Card Vault.vbs           no console window - what the shortcuts use
  *     node serve.js 8790          from a terminal in this folder
+ *
+ * On a Mac or Linux:  ./start.sh  (on a Mac, double-clicking
+ * "Start RP Card Vault.command" does the same).
  * ---------------------------------------------------------------------------
  *
  * Chrome refuses the File System Access API and IndexedDB to pages opened as
@@ -50,7 +53,7 @@ function nodeTooOld(version) {
 if (require.main === module && nodeTooOld(process.version)) {
   console.error("");
   console.error("  RP Card Vault needs Node.js " + NODE_MIN + " or newer; this is Node " + process.version + ".");
-  console.error("  Get the current LTS from https://nodejs.org (or put a portable node.exe in a");
+  console.error("  Get the current LTS from https://nodejs.org (or put a portable Node in a");
   console.error("  folder named node next to serve.js).");
   console.error("");
   process.exit(1);
@@ -60,7 +63,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 
 /**
  * Bump RELAY_BUILD whenever this file changes in a way the page can notice.
@@ -72,7 +75,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.26";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.7.0";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -1534,19 +1537,87 @@ const APP_URL = "http://" + HOST + ":" + PORT + "/" + MAIN;
  * helper hangs — better to carry on serving than to block on it.
  */
 function openInBrowser(url) {
-  const p = process.platform;
   const opts = { timeout: 5000, stdio: "ignore", windowsHide: true };
-  try {
-    // "start" is a cmd builtin, so it needs cmd. The empty "" is the window
-    // title argument: without it, a quoted URL is taken as the title and
-    // nothing opens.
-    if (p === "win32") execFileSync("cmd", ["/c", "start", "", url], opts);
-    else if (p === "darwin") execFileSync("open", [url], opts);
-    else execFileSync("xdg-open", [url], opts);
-    return true;
-  } catch (e) {
-    return false;   // the printed URL is the fallback
+  const ask = (cmd, args) => {
+    try { return execFileSync(cmd, args, { timeout: 3000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }); }
+    catch (e) { return ""; }
+  };
+  for (const c of browserCommands(process.platform, url, ask, onPath)) {
+    try {
+      if (c.stays) {
+        // A browser started by name runs until it's closed, so it isn't waited
+        // for: it's left to carry on by itself, even once this process ends.
+        spawn(c.cmd, c.args, { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
+      } else {
+        execFileSync(c.cmd, c.args, opts);
+      }
+      return true;
+    } catch (e) { /* not there, or it refused: the next one */ }
   }
+  return false;   // the printed URL is the fallback
+}
+
+/*
+ * Which browser the vault opens in.
+ *
+ * The vault needs a Chromium browser (Chrome, Edge, Brave, Vivaldi or
+ * Chromium: the ones with the File System Access API), and on a Mac or Linux
+ * the default browser often isn't one (Safari, Firefox). So there it opens in
+ * the default browser when that is one of them, else in the first of them
+ * that's installed, else in the default all the same, where the page says
+ * what it needs. Your tags and notes are kept by the browser, so the choice
+ * has to come out the same every time: the lists are tried in a fixed order.
+ *
+ * On Windows the default browser is opened as it is. The shortcuts there
+ * (RP Card Vault.vbs) make this same choice themselves.
+ */
+const MAC_BROWSERS = [   // the name `open -a` takes, and the app's id
+  ["Google Chrome", "com.google.chrome"], ["Microsoft Edge", "com.microsoft.edgemac"],
+  ["Brave Browser", "com.brave.browser"], ["Vivaldi", "com.vivaldi.vivaldi"], ["Chromium", "org.chromium.chromium"],
+];
+const LINUX_BROWSERS = ["google-chrome", "google-chrome-stable", "microsoft-edge", "microsoft-edge-stable",
+  "chromium", "chromium-browser", "brave-browser", "vivaldi", "vivaldi-stable"];
+
+/** The default browser's id on a Mac, from its list of handlers (`defaults read … LSHandlers`); "" when it doesn't say. */
+function macDefaultBrowser(lsHandlers) {
+  const m = /LSHandlerRoleAll = "?([A-Za-z0-9._-]+)"?;\s*LSHandlerURLScheme = "?https?"?;/.exec(String(lsHandlers || ""));
+  return m ? m[1].toLowerCase() : "";
+}
+
+/** Whether a Linux desktop entry (xdg-settings' answer, like "google-chrome.desktop") is a browser that can run the vault. */
+function isChromiumDesktopEntry(name) {
+  return /chrome|chromium|microsoft-edge|\.edge\b|brave|vivaldi/i.test(String(name || "").trim());
+}
+
+/** Whether a program is on the PATH. */
+function onPath(program) {
+  return String(process.env.PATH || "").split(path.delimiter).some((d) => {
+    if (!d) return false;
+    try { fs.accessSync(path.join(d, program), fs.constants.X_OK); return true; } catch (e) { return false; }
+  });
+}
+
+/**
+ * The commands that open `url`, to try in order until one works: each
+ * { cmd, args }, with `stays` for a browser started by name (it runs until
+ * closed). `ask(cmd, args)` runs a query and gives its output ("" if it
+ * failed); `has(program)` says whether a program is installed.
+ */
+function browserCommands(platform, url, ask, has) {
+  // "start" is a cmd builtin, so it needs cmd. The empty "" is the window
+  // title argument: without it, a quoted URL is taken as the title and
+  // nothing opens.
+  if (platform === "win32") return [{ cmd: "cmd", args: ["/c", "start", "", url] }];
+  if (platform === "darwin") {
+    const usual = { cmd: "open", args: [url] };
+    const def = macDefaultBrowser(ask("defaults", ["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"]));
+    if (MAC_BROWSERS.some((b) => b[1] === def)) return [usual];
+    // `open -a` fails for an app that isn't installed, and the next is tried.
+    return MAC_BROWSERS.map((b) => ({ cmd: "open", args: ["-a", b[0], url] })).concat([usual]);
+  }
+  const usual = { cmd: "xdg-open", args: [url] };
+  if (isChromiumDesktopEntry(ask("xdg-settings", ["get", "default-web-browser"]))) return [usual];
+  return LINUX_BROWSERS.filter(has).map((b) => ({ cmd: b, args: [url], stays: true })).concat([usual]);
 }
 
 /** Is the thing already on our port our own vault server? */
@@ -1599,6 +1670,7 @@ if (require.main !== module) {
     readChoice, sseParser, addToolPiece, toolCallIds, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
     cleanMessages, cleanTools, saysToolsUnsupported, saysImagesUnsupported, WS_STARTER, cookiesOf, mergeCookies,
     RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES, errorText,
+    browserCommands, macDefaultBrowser, isChromiumDesktopEntry,
   };
   return;
 }
@@ -1636,7 +1708,8 @@ server.on("error", (e) => {
         return;
       }
       console.log("  It didn't answer a shutdown request — it predates that route.");
-      console.log("  Run \"Stop RP Card Vault.bat\", then start again.");
+      console.log(process.platform === "win32" ? "  Run \"Stop RP Card Vault.bat\", then start again."
+        : "  Stop it yourself (close its terminal window, or end its node process), then start again.");
       console.log("");
     }
     if (ours) {
@@ -1651,7 +1724,7 @@ server.on("error", (e) => {
       console.log(opened ? "  Opened:  " + APP_URL : "  Open it yourself:  " + APP_URL);
       console.log("");
       console.log("  If you have just edited serve.js, the running copy is still the");
-      console.log("  old one. \"Start RP Card Vault.bat\" restarts it for you.");
+      console.log("  old one. " + (process.platform === "win32" ? "\"Start RP Card Vault.bat\"" : "./start.sh") + " restarts it for you.");
       console.log("");
       process.exit(0);
     }

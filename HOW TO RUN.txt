@@ -4,8 +4,10 @@ RP Card Vault - how to run it
 Keep every file of the vault together in one folder.
 
 
-START IT
---------
+START IT (WINDOWS)
+------------------
+
+On a Mac or Linux, see the next section.
 
   Start RP Card Vault.bat     Double-click this. It stops any vault server
                               already running on this copy's port and starts a
@@ -50,6 +52,49 @@ The vault runs at:
     http://127.0.0.1:8790/RP_Card_Vault.html
 
 
+START IT (MAC OR LINUX)
+-----------------------
+
+  Start RP Card Vault.command  On a Mac, double-click this. A Terminal window
+                               opens and stays open while the vault runs.
+                               The first time, macOS may refuse a file that
+                               came from the internet: right-click it, choose
+                               Open, and confirm. It is remembered after that.
+
+  ./start.sh                   On Linux (or a Mac), run this in a terminal in
+                               the vault's folder. It is what the .command
+                               runs. Like the Windows launcher, it stops any
+                               vault server already on this copy's port and
+                               starts a fresh one.
+
+                               ./start.sh --no-open  starts the server without
+                               opening a browser.
+
+  ./stop.sh                    Shuts the server down. start.sh doesn't need
+                               it; use it to turn the vault off when its
+                               window is out of reach.
+
+Leave the terminal window open while you use the vault. Ctrl+C in it, or
+closing it, stops the server.
+
+The vault needs Chrome, Edge, Brave, Vivaldi or Chromium. It opens in your
+default browser when that is one of them. Otherwise (Safari or Firefox, say)
+it opens in the first of those that is installed. Your tags and notes are kept
+by that browser, so keep using the same one.
+
+If the terminal says "Permission denied", the launchers have lost their mark
+as programs (some unzip tools drop it). In the vault's folder, run:
+
+    chmod +x start.sh stop.sh "Start RP Card Vault.command"
+
+No Node on this computer? Download the "tar" build for your system from
+https://nodejs.org and unpack it into a folder named node, so that
+node/bin/node sits next to start.sh. It is used before an installed one.
+
+There are no shortcuts to create on these systems: keep the .command in the
+Dock, or make a launcher for start.sh the way your desktop does it.
+
+
 WHICH serve.js IS ACTUALLY RUNNING?
 -----------------------------------
 
@@ -72,8 +117,8 @@ Editing RP_Card_Vault.html needs no restart, only a refresh: the page is read
 from disk on every request. Only serve.js is held in memory.
 
 
-DO NOT DOUBLE-CLICK serve.js
-----------------------------
+DO NOT DOUBLE-CLICK serve.js (WINDOWS)
+--------------------------------------
 
 Windows associates .js files with Windows Script Host, not with Node. WSH reads
 serve.js as JScript - an old dialect with no `const`, no arrow functions and no
@@ -111,7 +156,7 @@ own port. Make a plain text file named vault.local in that copy's folder:
     port=8791
     label=test
 
-Every launcher in that folder reads it. The label goes on the shortcut names,
+Every launcher in that folder reads it, on Windows, a Mac and Linux alike. The label goes on the shortcut names,
 "RP Card Vault (test)", so the second copy's shortcuts don't replace the
 first's. Never point two copies at the same port: the second would pick up the
 first one's saved folder permissions.

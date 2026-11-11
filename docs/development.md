@@ -11,6 +11,8 @@ npm test
 
 The packages are for the tests only; the vault itself needs nothing installed but Node. Keep Babel pinned to 7.23.9, the version in `lib`. The same tests run on GitHub, on Windows, for every pull request.
 
+The launcher suite (`node test/launchers.test.js`) runs each system's launchers for real: the `.bat`, `.vbs` and `.ps1` files on Windows, and `start.sh` and `stop.sh` on a Mac or Linux. GitHub runs it on all three. It needs no packages installed.
+
 ## Branches and releases
 
 - Work goes into the `dev` branch through pull requests. `main` holds releases, and `dev` is merged into it by hand.

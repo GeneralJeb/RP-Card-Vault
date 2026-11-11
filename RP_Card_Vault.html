@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.26";
+const APP_VERSION = "1.7.0";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -652,10 +652,29 @@ const BROWSER_LABEL = (function () {
   return "this browser";
 })();
 
+/* The system the browser runs on: "windows", "mac" or "linux". The vault
+   comes with a launcher for each, and a few words (the launcher's name, where
+   a dragged card lands) depend on it. Anything unrecognised counts as Windows. */
+function osKindOf(ua) {
+  const s = String(ua || "");
+  if (/Macintosh|Mac OS X/.test(s)) return "mac";
+  if (/Linux|X11|CrOS/.test(s)) return "linux";
+  return "windows";
+}
+const OS_KIND = osKindOf(typeof navigator !== "undefined" ? navigator.userAgent : "");
+
+/** The launcher to run on that system: the file a message tells you to start. */
+function startScriptFor(os) {
+  return os === "mac" ? "Start RP Card Vault.command" : os === "linux" ? "start.sh" : "Start RP Card Vault.bat";
+}
+const START_SCRIPT = startScriptFor(OS_KIND);
+/** Where a card dragged out of the window lands, as that system calls it. */
+const FILE_MANAGER = OS_KIND === "mac" ? "Finder" : OS_KIND === "linux" ? "your file manager" : "Explorer";
+
 /* ── themes ──────────────────────────────────────────────────────────────
    Every colour on the page is one of these variables. A theme sets them all;
    an accent colour, if you pick one, replaces the main accent (and its dim and
-   glow). "auto" follows Windows' light or dark setting. */
+   glow). "auto" follows the system's light or dark setting. */
 const THEME_VARS = ["--bg-primary", "--bg-secondary", "--bg-tertiary", "--bg-elevated", "--bg-input",
   "--border-subtle", "--border-accent", "--text-primary", "--text-secondary", "--text-muted",
   "--accent-warm", "--accent-warm-dim", "--accent-warm-glow", "--accent-red", "--accent-green",
@@ -738,7 +757,7 @@ function browserUpdatePage(label) {
 // No port here on purpose. Each copy can have its own (vault.local), and this
 // string is shown from a file:// page where there's no origin to read: naming
 // one port could send the reader to the wrong vault.
-const SERVE_HINT = "Run \"Start RP Card Vault.bat\" from the folder this file is in — " +
+const SERVE_HINT = "Run \"" + START_SCRIPT + "\" from the folder this file is in — " +
   "or in a terminal there:  node serve.js  — then open the address it prints.";
 
 /* The address this copy is actually being served from, and the same port under
@@ -784,7 +803,7 @@ const DEFAULT_SETTINGS = {
   normalizeTags: true,
   showNsfw: true,
   tileSize: 150,
-  theme: "vault",                // see THEMES; "auto" follows Windows' light or dark setting
+  theme: "vault",                // see THEMES; "auto" follows the system's light or dark setting
   startSort: "name",             // the sort the grid opens with: a SORTS key, or "last" for the last one used
   lastSort: "name",              // kept up to date while startSort is "last"
   accentColor: "",               // "#rrggbb" replaces the theme's main accent; "" keeps it
@@ -2124,10 +2143,12 @@ function cardRecordBase(root, info, size, mtime) {
  * Why a file that's in the folder couldn't be opened. Chrome and Edge list a
  * file whose full path is over Windows' 260-character limit, then can't open
  * it ("not found"); the vault can't see the folders above a linked one, so the
- * name's length is the best clue it can give.
+ * name's length is the best clue it can give. Other systems have no such
+ * limit: there, a listed file that isn't found has gone since the listing.
  */
-function unopenedFileMessage(rel, e) {
+function unopenedFileMessage(rel, e, os) {
   if (e && e.name === "NotFoundError") {
+    if ((os || OS_KIND) !== "windows") return "This file was in the folder's list but couldn't be opened: it was most likely moved or removed just then. Rescan to check.";
     const name = String(rel || "").split("/").pop();
     return "Windows can't open this file. Its full path is most likely over Windows' 260-character limit" +
       (name.length > 100 ? " (the file name alone is " + name.length + " characters)" : "") +
@@ -4538,18 +4559,18 @@ function aiSettingsProblems(s, relay) {
   const cfg = sanitizeAiSettings(s);
   const r = relay || {};
   if (r.available === false) {
-    out.push("The local server isn't answering. Start the vault with \"Start RP Card Vault.bat\" rather than opening the file directly.");
+    out.push("The local server isn't answering. Start the vault with \"" + START_SCRIPT + "\" rather than opening the file directly.");
     return out;
   }
   if (r.needsUpgrade) {
-    out.push("The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"Start RP Card Vault.bat\".");
+    out.push("The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"" + START_SCRIPT + "\".");
     return out;
   }
   if (relayIsStale(r)) {
     out.push(
       "The server answering is serve.js build " + (r.build || 0) + "; this page needs build " +
       EXPECTED_RELAY_BUILD + ". An older copy is probably still running in the background. " +
-      "Run \"Start RP Card Vault.bat\" to restart it."
+      "Run \"" + START_SCRIPT + "\" to restart it."
     );
     return out;
   }
@@ -9025,12 +9046,12 @@ async function wsCall(route, body) {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
     });
   } catch (e) {
-    throw new Error("Couldn't reach the local server. Is \"Start RP Card Vault.bat\" running?");
+    throw new Error("Couldn't reach the local server. Is \"" + START_SCRIPT + "\" running?");
   }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
     const e = new Error(d.error || (r.status === 404 && !d.error
-      ? "The local server has no workspace. It's an older serve.js; run \"Start RP Card Vault.bat\"."
+      ? "The local server has no workspace. It's an older serve.js; run \"" + START_SCRIPT + "\"."
       : "The workspace request failed (HTTP " + r.status + ")."));
     e.status = r.status;
     throw e;
@@ -10095,7 +10116,7 @@ function FilterSidebar({
           </SectionHead>
           <div style={{ fontSize: 9.5, color: "var(--text-muted)", padding: "0 12px 5px", lineHeight: 1.5 }}>
             Drag cards onto a folder to move them — or out of the window entirely
-            to drop a real file into Explorer. <kbd>S</kbd> sends to your front end.
+            to drop a real file into {FILE_MANAGER}. <kbd>S</kbd> sends to your front end.
           </div>
           <FolderTree trees={folderTrees} filters={filters} patch={patch}
             collapsed={collapsed} setCollapsed={setCollapsed}
@@ -14561,9 +14582,9 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
 
   const relayNote =
     relay.available === null ? { color: "muted", text: "Checking for the local server…" }
-    : relay.available === false ? { color: "red", text: "The local server isn't answering. The vault has to be opened through \"Start RP Card Vault.bat\", not straight from the file. Nothing can be sent until then." }
-    : relay.needsUpgrade ? { color: "warm", text: "The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"Start RP Card Vault.bat\"." }
-    : relayIsStale(relay) ? { color: "warm", text: "The server answering is serve.js build " + (relay.build || 0) + "; this page needs build " + EXPECTED_RELAY_BUILD + ". An older copy is still running in the background. Run \"Start RP Card Vault.bat\" — it stops the old one and starts the current one." }
+    : relay.available === false ? { color: "red", text: "The local server isn't answering. The vault has to be opened through \"" + START_SCRIPT + "\", not straight from the file. Nothing can be sent until then." }
+    : relay.needsUpgrade ? { color: "warm", text: "The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"" + START_SCRIPT + "\"." }
+    : relayIsStale(relay) ? { color: "warm", text: "The server answering is serve.js build " + (relay.build || 0) + "; this page needs build " + EXPECTED_RELAY_BUILD + ". An older copy is still running in the background. Run \"" + START_SCRIPT + "\" — it stops the old one and starts the current one." }
     : { color: relay.hasKey ? "green" : "cyan",
         text: "Local server build " + relay.build + " ready" + (relay.baseUrl ? " · " + relay.baseUrl : " · no endpoint saved yet") +
           (relay.hasKey ? " · an API key is held in its memory." : " · no API key held (local endpoints usually don't need one).") };
@@ -14980,7 +15001,7 @@ function DestinationRow({ dest, isDefault, status, folderOptions, onChange, onRe
           </div>
           {status && status.available === false ? (
             <div style={{ fontSize: 10.5, color: "var(--accent-red)", marginBottom: 6 }}>
-              The local server isn't answering, so uploads can't work. Start the vault with Start RP Card Vault.bat.
+              The local server isn't answering, so uploads can't work. Start the vault with {START_SCRIPT}.
             </div>
           ) : null}
           {connected ? (
@@ -15099,7 +15120,7 @@ function ProblemLog({ info, onToast }) {
       <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.7, marginBottom: 8 }}>
         Errors and warnings from this session, to paste into a bug report. Kept only while this page is open:
         nothing is saved or sent anywhere. What you see is exactly what gets copied, with API keys, tokens and
-        passwords, email addresses, your Windows user name, addresses on your network, destination user names
+        passwords, email addresses, your user name on this computer, addresses on your network, destination user names
         and private cards' names taken out.
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
@@ -15213,7 +15234,7 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
           <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>Theme</span>
           <select value={settings.theme || "vault"} onChange={(e) => onSave({ theme: e.target.value })} aria-label="Theme"
             style={Object.assign({}, selectStyle, { width: "auto", flex: "1 1 180px", padding: "5px 8px" })}>
-            {THEME_CHOICES.map((k) => <option key={k} value={k}>{k === "auto" ? "Match Windows (Vault or Parchment)" : THEMES[k].label}</option>)}
+            {THEME_CHOICES.map((k) => <option key={k} value={k}>{k === "auto" ? "Match your system (Vault or Parchment)" : THEMES[k].label}</option>)}
           </select>
           <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>Accent</span>
           <input type="color" aria-label="Accent colour" value={settings.accentColor || THEMES[themeKeyFor(settings.theme, false)].colors[THEME_VARS.indexOf("--accent-warm")]}
@@ -15245,7 +15266,7 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
         </div>
         <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: -6, lineHeight: 1.5 }}>
           They also play in the card panel, unless set to Never. Always play plays every animated card on screen, which
-          can slow the vault down when many are showing. Turning off Windows' animation effects stops them all.
+          can slow the vault down when many are showing. Turning off your system's animation effects stops them all.
         </div>
         <Toggle color="warm" checked={settings.normalizeTags} onChange={(v) => onSave({ normalizeTags: v })}
           label="Normalize tag case and separators" />
@@ -17535,7 +17556,7 @@ function App() {
     const recs = ids.map((id) => recById.get(id)).filter(Boolean);
     if (!recs.length) return;
     if (destStatus.available === false) {
-      showToast("The local server isn't answering — start the vault with \"Start RP Card Vault.bat\"", "red");
+      showToast("The local server isn't answering — start the vault with \"" + START_SCRIPT + "\"", "red");
       return;
     }
     if (!destStatus.byId[dest.id]) {
@@ -18179,12 +18200,12 @@ function App() {
                   <strong style={{ color: "var(--accent-warm)" }}>1.</strong> Put{" "}
                   <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--accent-cyan)" }}>serve.js</code>{" "}
                   and{" "}
-                  <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--accent-cyan)" }}>Start RP Card Vault.bat</code>{" "}
+                  <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--accent-cyan)" }}>{START_SCRIPT}</code>{" "}
                   in the same folder as this file.
                 </div>
                 <div style={{ marginBottom: 10, color: "var(--text-secondary)" }}>
                   <strong style={{ color: "var(--accent-warm)" }}>2.</strong> Double-click{" "}
-                  <strong>Start RP Card Vault.bat</strong>. A console window opens and your browser follows automatically.
+                  <strong>{START_SCRIPT}</strong>{OS_KIND === "linux" ? " (in a terminal: ./start.sh)" : ""}. A console window opens and your browser follows automatically.
                 </div>
                 <div style={{ marginBottom: 14, color: "var(--text-secondary)" }}>
                   <strong style={{ color: "var(--accent-warm)" }}>3.</strong> Leave that console open while you use the vault.
@@ -18194,7 +18215,7 @@ function App() {
                   background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
                   borderRadius: "var(--radius-sm)", padding: "8px 10px", color: "var(--text-muted)",
                 }}>
-                  no .bat? &nbsp;cd into the folder and run:&nbsp;
+                  no launcher? &nbsp;cd into the folder and run:&nbsp;
                   <span style={{ color: "var(--accent-green)" }}>node serve.js</span>
                 </div>
                 <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 12, lineHeight: 1.6 }}>

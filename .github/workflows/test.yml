@@ -1,5 +1,7 @@
 # Runs every test suite on each pull request and on each push to dev and main.
 # Windows, because the launcher tests run the real .bat, .vbs and .ps1 files.
+# The Mac and Linux launchers (start.sh, stop.sh) are run for real on those
+# systems by a second job: the launcher suite needs nothing installed but Node.
 name: Tests
 
 on:
@@ -30,3 +32,17 @@ jobs:
           name: browser-test-failure
           path: ${{ runner.temp }}/vault-browser-fail.png
           if-no-files-found: ignore
+
+  launchers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node test/launchers.test.js

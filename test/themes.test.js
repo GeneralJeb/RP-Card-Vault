@@ -52,8 +52,8 @@ for (const [k, th] of Object.entries(V.THEMES)) {
 
 console.log("\nchoosing a theme");
 t.eq(V.themeKeyFor("midnight", false), "midnight", "a named theme is itself");
-t.eq(V.themeKeyFor("auto", false), "vault", "Match Windows, dark: Vault");
-t.eq(V.themeKeyFor("auto", true), "parchment", "Match Windows, light: Parchment");
+t.eq(V.themeKeyFor("auto", false), "vault", "Match your system, dark: Vault");
+t.eq(V.themeKeyFor("auto", true), "parchment", "Match your system, light: Parchment");
 t.eq(V.themeKeyFor("nonsense", true), "vault", "anything unknown: Vault");
 t.eq(V.themeKeyFor(undefined, false), "vault", "settings from before themes: Vault");
 {
