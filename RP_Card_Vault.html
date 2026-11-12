@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.8.1";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -538,9 +538,23 @@ function orphanCardIds(cards, roots) {
 
 /** Drop index records (card, text, thumbnail) by id. Never touches files. */
 async function dbDelCardRecords(ids) {
-  for (const id of ids) {
-    await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
-    await dbDel(STORE_BODIES, id + "\u0000before");   // prevBodyKey(id): its text before an outside change, if kept
+  if (!ids || !ids.length) return;
+  try {
+    // All in one transaction: a folder of thousands goes in a moment, not a card at a time.
+    const db = await dbOpen();
+    const tx = db.transaction([STORE_CARDS, STORE_BODIES, STORE_THUMBS], "readwrite");
+    const cards = tx.objectStore(STORE_CARDS), bodies = tx.objectStore(STORE_BODIES), thumbs = tx.objectStore(STORE_THUMBS);
+    for (const id of ids) {
+      cards.delete(id); bodies.delete(id); thumbs.delete(id);
+      bodies.delete(prevBodyKey(id));   // its text before an outside change, if kept
+    }
+    await txDone(tx);
+  } catch (e) {
+    // Whatever stopped the batch, each record still gets its own try.
+    for (const id of ids) {
+      await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
+      await dbDel(STORE_BODIES, prevBodyKey(id));
+    }
   }
 }
 
@@ -789,6 +803,46 @@ async function probeStorage() {
   } catch (e) {
     return { ok: false, msg: (e && e.message) || String(e) };
   }
+}
+
+/**
+ * Whether the vault's saved data can really be read. That the database opens
+ * isn't proof: a store can still fail to read (a damaged file on disk, say),
+ * and the vault's own readers answer "nothing there" when a read fails. The
+ * vault would then open looking empty, and the first setting you changed
+ * would be saved over the real ones. So the stores startup relies on are
+ * read first, and if that fails nothing is loaded and nothing is written.
+ * Saved folders are only counted, never read back (see dbHas).
+ */
+async function probeReads() {
+  try {
+    const db = await dbOpen();
+    const stores = [STORE_KV, STORE_ROOTS, STORE_CARDS, STORE_EDITS];
+    const tx = db.transaction(stores, "readonly");
+    for (const name of stores) tx.objectStore(name).count();
+    tx.objectStore(STORE_KV).get(SETTINGS_KEY);
+    await txDone(tx);
+    return { ok: true, msg: "" };
+  } catch (e) {
+    return { ok: false, msg: (e && e.message) || String(e) };
+  }
+}
+
+/**
+ * Ask the browser to keep the vault's data. Left to itself a browser may
+ * clear a site's saved data when the disk runs low, without asking: tags,
+ * notes and edits would go with it. Asking costs nothing and shows nothing.
+ * Returns "kept" (it has agreed), "may-clear" (it wouldn't promise; it tends
+ * to once the vault is installed as an app or used often) or "unknown" (this
+ * browser has no way to ask).
+ */
+async function keepStorage(nav) {
+  const st = nav && nav.storage;
+  if (!st || typeof st.persist !== "function") return "unknown";
+  try {
+    if (typeof st.persisted === "function" && await st.persisted()) return "kept";
+    return (await st.persist()) ? "kept" : "may-clear";
+  } catch (e) { return "unknown"; }
 }
 
 /* --- typed accessors --- */
@@ -6370,13 +6424,14 @@ const AGENT_TOOLS = [
       tag: { type: "string", description: "A card tag or vault-only tag." },
       creator: { type: "string" },
       folder: { type: "string", description: "Folder path, as shown in the vault." },
-      flag: { type: "string", description: "A flag key such as needsEdit, or favorite, edited, aiPending, animated (an animated picture)." },
+      flag: { type: "string", description: "A flag key such as needsEdit, or one of: favorite, edited, aiPending, animated (an animated picture), changedOutside (its file was changed outside the vault), sent (in the user's front end), notSent, changedSinceSent." },
+      issue: { type: "string", description: "Only cards the vault's own checks found something on: any, unreadable, or words from a check, such as: no name, empty description, no first message, no tags, heavy, short description, lorebook, example dialogue. Each line then says what was found. Use this instead of reading cards to find ones that need attention." },
       duplicates: { type: "string", enum: ["any", "exact", "content", "version"], description: "Only cards in a duplicate group of this kind (see list_duplicates)." },
       limit: { type: "integer", description: "Default 50." }, offset: { type: "integer" } } } },
   { name: "list_duplicates", group: "cards",
-    description: "The duplicate finder's groups, as the user sees them in Dupes: exact (identical files), content (the same card in different files), and version (version drift: same name and creator but different content; often one is a newer edit, but two unrelated cards can share a name, so check before calling them the same). Groups the user marked as not duplicates are left out. Each group lists its copies' ids and paths.",
+    description: "The duplicate finder's groups, as the user sees them in Dupes: exact (identical files), content (the same card in different files), and version (version drift: same name and creator but different content; often one is a newer edit, but two unrelated cards can share a name, so check before calling them the same). Groups the user marked as not duplicates are left out. Each group lists its copies' ids and paths. kind similar is something else: cards that share most of their wording without being the same card (a rework, a repost under another name), with how alike they are; it is worked out when you ask, and is not part of any.",
     parameters: { type: "object", properties: {
-      kind: { type: "string", enum: ["any", "exact", "content", "version"], description: "Default any." },
+      kind: { type: "string", enum: ["any", "exact", "content", "version", "similar"], description: "Default any." },
       limit: { type: "integer", description: "Groups to show. Default 20." }, offset: { type: "integer" } } } },
   { name: "grep_cards", group: "cards",
     description: "Search the text of every card (description, personality, scenario, greetings, examples, lorebook and so on) and return matching snippets. The way to find cards by theme, mood or content without reading them.",
@@ -6394,8 +6449,8 @@ const AGENT_TOOLS = [
       from: { type: "integer", description: "Where to read on from, as the end of a cut-short read says (default 0)." } },
       required: ["id"] } },
   { name: "inspect_card", group: "cards",
-    description: "A card's metadata: file, folder, creator, tokens, card tags, vault-only tags, flags, notes, rating, lorebook size, pending proposals.",
-    parameters: { type: "object", properties: { id: AGENT_ID_PARAM }, required: ["id"] } },
+    description: "A card's metadata: file, folder, creator, tokens, card tags, vault-only tags, flags, notes, rating, lorebook size, pending proposals, what the vault's own checks found, whether its file was changed outside the vault, and where it stands with the user's front end. With checks: true it also runs the lorebook checks (entries that can never trigger, bad keys, repeated text, the token budget).",
+    parameters: { type: "object", properties: { id: AGENT_ID_PARAM, checks: { type: "boolean", description: "Also run the lorebook checks. Reads the card's text." } }, required: ["id"] } },
   { name: "read_proposals", group: "ai",
     description: "The AI suggestions waiting in a card's Proposed changes: field rewrites (with the text they were made from), vault-only tags, flags and the critique verdict.",
     parameters: { type: "object", properties: { id: AGENT_ID_PARAM }, required: ["id"] } },
@@ -7627,9 +7682,29 @@ function agentCardLine(r) {
 /** The filters agentMatchCards knows. */
 const AGENT_CARD_FILTERS = ["query", "tag", "creator", "folder", "flag", "duplicates"];
 
+/* list_cards' flags for where a card stands with the front end Send uses (see SENT_STATES). */
+const AGENT_SENT_FLAGS = {
+  sent: (st) => !!(st && st.in),
+  notSent: (st) => !!(st && !st.in && !st.changed),
+  changedSinceSent: (st) => !!(st && st.changed),
+};
+
 /**
- * Cards matching list_cards' filters ({ query, tag, creator, folder, flag },
- * all optional), sorted by name. bulk_tags uses the same filters.
+ * What the vault's own checks found on a card, as it tells the agent: the
+ * warnings worked out when the card was read, or that it can't be read at
+ * all. `want` narrows it: "any", "unreadable", or words from a warning.
+ */
+function agentCardIssues(r, want) {
+  const all = r && r.ok === false ? ["Unreadable: " + (r.err || "not a card the vault can read")] : ((r && r.warnings) || []).slice();
+  const w = String(want || "any").trim().toLowerCase();
+  if (!w || w === "any") return all;
+  if (w === "unreadable") return all.filter((x) => /^Unreadable/.test(x));
+  return all.filter((x) => x.toLowerCase().indexOf(w) >= 0);
+}
+
+/**
+ * Cards matching list_cards' filters ({ query, tag, creator, folder, flag,
+ * issue }, all optional), sorted by name. bulk_tags uses the same filters.
  */
 function agentMatchCards(records, a, dupeIdx) {
   const f = a || {};
@@ -7640,8 +7715,10 @@ function agentMatchCards(records, a, dupeIdx) {
   const creator = String(f.creator || "").toLowerCase().trim();
   const folder = String(f.folder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
   const flag = String(f.flag || "").trim();
+  const issue = String(f.issue || "").trim().toLowerCase();
   return (records || []).filter((r) => {
     if (r.aiPrivate) return false;   // private from the AI: not even its name
+    if (issue && !agentCardIssues(r, issue).length) return false;
     // Trashed cards only when their folder is named (the user asked about the trash).
     if (r.inTrash && !folder) return false;
     if (terms.length) {
@@ -7652,7 +7729,8 @@ function agentMatchCards(records, a, dupeIdx) {
     if (creator && String(r.creator || "").toLowerCase().indexOf(creator) < 0) return false;
     if (folder) { const d = String(r.dir || "").toLowerCase(); if (d !== folder && d.indexOf(folder + "/") !== 0) return false; }
     if (flag) {
-      if (flag === "favorite" || flag === "edited" || flag === "aiPending" || flag === "animated") { if (!r[flag]) return false; }
+      if (flag === "favorite" || flag === "edited" || flag === "aiPending" || flag === "animated" || flag === "changedOutside") { if (!r[flag]) return false; }
+      else if (Object.prototype.hasOwnProperty.call(AGENT_SENT_FLAGS, flag)) { if (!AGENT_SENT_FLAGS[flag](SENT_STATES[r.sentState] || null)) return false; }
       else if (!(r.flags || []).some((x) => x.key === flag)) return false;
     }
     if (dupKind) {
@@ -8202,7 +8280,7 @@ const AGENT_TOOL_IMPL = {
     return { ok: true, content: fmtNum(all.length) + " card" + (all.length === 1 ? "" : "s") + " match" + (all.length === 1 ? "es" : "") +
       (all.length > page.length ? " (showing " + (off + 1) + "–" + (off + page.length) + "; use offset for more)" : "") + ".\n" +
       // The user's Description previews switch (Agent options), not the model, decides.
-      page.map((r) => agentCardLine(r) + (ctx.previews && r.descPreview
+      page.map((r) => agentCardLine(r) + (String(a.issue || "").trim() ? " · found: " + agentCardIssues(r, a.issue).join("; ") : "") + (ctx.previews && r.descPreview
         ? " · starts: \"" + aiFenceText(String(r.descPreview).replace(/\s+/g, " ").trim().slice(0, AGENT_PREVIEW_CHARS)) + "\""
         : "")).join("\n") };
   },
@@ -8293,7 +8371,23 @@ const AGENT_TOOL_IMPL = {
   async list_duplicates(a, ctx) {
     const d = (ctx.vault.dupes && ctx.vault.dupes()) || {};
     const kind = String(a.kind || "any").toLowerCase().replace(/^versions?( drift)?$/, "version");
-    if (["any", "exact", "content", "version"].indexOf(kind) < 0) throw new Error("kind is one of any, exact, content, version.");
+    if (kind === "similar") {
+      if (!ctx.vault.similar) throw new Error("Similar cards can't be worked out here.");
+      await ctx.gate("reads", 1);
+      const sim = await ctx.vault.similar();
+      // Private cards take no part: a group needs two cards the agent may know of.
+      const groups = ((sim && sim.groups) || []).map((g) => ({ score: g.score, items: g.items.filter((x) => !x.aiPrivate) })).filter((g) => g.items.length > 1);
+      if (!groups.length) return { ok: true, content: "No two cards read alike, beyond the duplicates the other kinds list." };
+      const lim = Math.max(1, Math.min(100, Math.floor(Number(a.limit) || 20)));
+      const from = Math.max(0, Math.floor(Number(a.offset) || 0));
+      const shown = groups.slice(from, from + lim);
+      if (!shown.length) return { ok: true, content: fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + ", so there's nothing from offset " + from + "." };
+      return { ok: true, content: fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + " of cards that read alike without being the same card" +
+        (groups.length > shown.length ? "; showing " + (from + 1) + "–" + (from + shown.length) + ", use offset for more" : "") + ". They aren't copies: compare before calling one redundant.\n" +
+        shown.map((g, i) => (from + i + 1) + ". about " + Math.round(g.score * 100) + "% of their wording in common:\n" +
+          g.items.map((x) => "   - " + agentCardLine(x) + " · " + (x.dir ? x.dir + "/" : "") + x.file).join("\n")).join("\n") };
+    }
+    if (["any", "exact", "content", "version"].indexOf(kind) < 0) throw new Error("kind is one of any, exact, content, version, similar.");
     const tagged = [];
     for (const [list, k] of [[d.exact, "exact"], [d.content, "content"], [d.versions, "version"]]) {
       if (kind === "any" || kind === k) for (const g of list || []) tagged.push({ kind: k, items: g.items });
@@ -8329,7 +8423,24 @@ const AGENT_TOOL_IMPL = {
       "Lorebook entries: " + (r.loreCount || 0) + " · alternate greetings: " + (r.altCount || 0),
       "Unsaved vault edits: " + (r.pending || 0) + " · pending AI proposals: " + proposalCount(p),
       agentDupeLine(r, agentDupeIndex(ctx.vault.dupes && ctx.vault.dupes())),
+      "The vault's checks: " + (agentCardIssues(r, "any").join("; ") || "nothing found"),
     ];
+    if (r.changedOutside) lines.push("Changed outside the vault: yes, found " + fmtDate(r.changedOutside.at) + " (" + ((r.changedOutside.fields || []).join(", ") || "its file") + "). The user can see what changed in the card's History tab.");
+    if (r.sentState) lines.push("Front end: " + (SENT_STATES[r.sentState] || SENT_STATES.none).label.toLowerCase() + " (what the vault knows from its own sends and linked folders; it never asks the front end)");
+    if (a.checks) {
+      await ctx.gate("reads", 1);
+      const body = await agentChangeBody(ctx, r);
+      const lb = effectiveLorebook(body, edit);
+      if (!lb) lines.push("Lorebook checks: this card has no lorebook.");
+      else {
+        const cardText = agentCardTexts(body, edit).filter((x) => x.key !== "lorebook").map((x) => x.text).join("\n");
+        const res = lorebookChecks(lb, cardText);
+        const fix = res.notes.filter((n) => n.level === "warn").length;
+        lines.push("Lorebook checks: " + (res.notes.length ? fix + " to fix, " + (res.notes.length - fix) + " to know" : "nothing to note") +
+          " · always-on entries about " + fmtNum(res.tokens.always) + " tokens, everything about " + fmtNum(res.tokens.all) + (res.tokens.budget ? ", budget " + fmtNum(res.tokens.budget) : "") + ".");
+        for (const n of res.notes) lines.push("  " + (n.level === "warn" ? "To fix: " : "To know: ") + n.text + (n.entries.length ? " (" + (n.entries.length === 1 ? "entry " : "entries ") + n.entries.slice(0, 20).join(", ") + (n.entries.length > 20 ? " and more" : "") + ")" : ""));
+      }
+    }
     return { ok: true, content: lines.join("\n") };
   },
 
@@ -11603,7 +11714,7 @@ function WorkspaceModal({ onClose, onToast, initialPath }) {
  * loop and tools, handed the workspace, the vault (read-only), the model via
  * the relay, and your approval.
  */
-function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, shuffleSeed, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, privateFolders, onCardFiles, dupes }) {
+function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, shuffleSeed, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, privateFolders, onCardFiles, dupes, onSimilar }) {
   const [sessions, setSessions] = useState([]);
   const [sess, setSess] = useState(() => newAgentSession(uid(), Date.now()));
   const [input, setInput] = useState("");
@@ -11626,7 +11737,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
   const rateLog = useRef([]);
   const listRef = useRef(null);
   const latest = useRef(null);
-  latest.current = { ai, relay, agent, records, editsMap, tagIndex, onPatchEdit, onPatchMany, roots, privateFolders, onCardFiles, dupes };
+  latest.current = { ai, relay, agent, records, editsMap, tagIndex, onPatchEdit, onPatchMany, roots, privateFolders, onCardFiles, dupes, onSimilar };
 
   const ready = aiReady(ai, relay);
 
@@ -11720,6 +11831,8 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
     records: () => latest.current.records,
     // The duplicate finder's groups, exactly as the Dupes view shows them.
     dupes: () => latest.current.dupes,
+    // Cards that read alike, worked out afresh each time it's asked for.
+    similar: () => latest.current.onSimilar(),
     body: (id) => dbGet(STORE_BODIES, id),
     edit: (fp) => latest.current.editsMap.get(fp),
     notes: (fp) => dbAllByIndex(STORE_AINOTES, "fingerprint", fp),
@@ -16244,7 +16357,7 @@ function ArchiveBox({ onExport, onOpen, onRestore, onToast }) {
   );
 }
 
-function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage, problemLogInfo, onExportArchive, onOpenArchive, onRestoreArchive }) {
+function SettingsModal({ storageKept, settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage, problemLogInfo, onExportArchive, onOpenArchive, onRestoreArchive }) {
   const importRef = useRef(null);
   return (
     <Modal title="Settings" icon={"⚙"} width={640} onClose={onClose}
@@ -16436,6 +16549,11 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
           the browser can't take it with it. To restore, use Import vault data and pick one of those files. It includes your
           agent chats, so keep it somewhere private.
         </div>
+        <div className="storage-kept" style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 8 }}>
+          {storageKept === "kept" ? <span><strong style={{ color: "var(--accent-green)" }}>{BROWSER_LABEL} has agreed to keep the vault's data</strong>: it won't clear it by itself when disk space runs low.</span>
+            : storageKept === "may-clear" ? <span><strong style={{ color: "var(--accent-warm)" }}>{BROWSER_LABEL} hasn't promised to keep the vault's data</strong>: it may clear it by itself if disk space runs very low. It usually agrees once the vault is installed as an app (the install button in the address bar) or has been used for a while. These backups cover you either way.</span>
+            : <span>This browser has no way to be asked to keep the vault's data, so these backups are what protects it.</span>}
+        </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
           <select value={settings.autoBackupKey == null ? "auto" : settings.autoBackupKey} onChange={(e) => onSave({ autoBackupKey: e.target.value })}
             style={Object.assign({}, selectStyle, { width: "auto", flex: "1 1 180px", padding: "4px 8px" })} aria-label="Backup folder">
@@ -16593,6 +16711,10 @@ function App() {
   const sidHintsRef = useRef({});  // new record id → short id, left by the vault's own moves
 
   const [storage, setStorage] = useState({ ok: true, msg: "" });
+  // Set when the saved data couldn't be read at startup: the vault stops there, having loaded and written nothing.
+  const [readFailure, setReadFailure] = useState("");
+  // Whether the browser has agreed to keep the vault's data: "kept", "may-clear" or "unknown".
+  const [storageKept, setStorageKept] = useState("unknown");
 
   /* ---- boot ---- */
   useEffect(() => {
@@ -16600,7 +16722,14 @@ function App() {
     const el = document.getElementById("root");
     if (el) el.setAttribute("data-mounted", "1");
     (async () => {
-      setStorage(await probeStorage());
+      const st = await probeStorage();
+      setStorage(st);
+      if (st.ok) {
+        // A database that opens but can't be read must not pass for an empty vault.
+        const read = await probeReads();
+        if (!read.ok) { logProblem("Storage", "The vault's saved data couldn't be read", read.msg); setReadFailure(read.msg || "unknown error"); return; }
+        keepStorage(navigator).then(setStorageKept);
+      }
       let [s, tm, rts, cds0, eds, di, fr, dm, ais, ags, sidNext] = await Promise.all([
         loadSettings(), loadTagMeta(), dbAll(STORE_ROOTS), dbAll(STORE_CARDS), dbAll(STORE_EDITS),
         loadDupeIgnore(), loadFolderRoles(), loadDupeMode(), loadAiSettings(), loadAgentSettings(),
@@ -17389,10 +17518,7 @@ function App() {
       await dbPutMany(STORE_CARDS, res.records);
       await dbPutMany(STORE_BODIES, res.bodies);
       await dbPutMany(STORE_THUMBS, res.thumbs);
-      for (const id of res.removed) {
-        await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
-        await dbDel(STORE_BODIES, prevBodyKey(id));
-      }
+      await dbDelCardRecords(res.removed);
       working = working.filter((c) => c.rootId !== root.id).concat(res.records);
       // A card edited somewhere else has a new fingerprint: its notes, favourite,
       // flags and unsaved changes follow it (see editsFollowingCards).
@@ -18059,32 +18185,38 @@ function App() {
 
   /* ---- cards that read alike ---- */
   const [similar, setSimilar] = useState(null);   // { groups, compared, at } once looked for
+  /** Compare every card's wording: { groups, compared, short, at }. Also what the agent's list_duplicates kind "similar" asks for. */
+  const computeSimilar = useCallback(async () => {
+    const items = [];
+    let short = 0;
+    await scanAllBodies((id, body) => {
+      const r = recById.get(id);
+      if (!r || !r.ok || r.inTrash || (dupeExcluder && dupeExcluder(r))) return;
+      const runs = textShingles(similarityText(body));
+      if (!runs) { short++; return; }
+      items.push({ id, fp: r.fp, sig: minHashSignature(runs) });
+    });
+    const groups = similarGroups(items, SIMILAR_MIN).map((g, i) => ({
+      key: "sim" + i + ":" + g.ids[0], kind: "similar", score: g.score,
+      items: g.ids.map((id) => recById.get(id)).filter(Boolean),
+    })).filter((g) => g.items.length > 1);
+    const out = { groups, compared: items.length, short, at: Date.now() };
+    setSimilar(out);
+    return out;
+  }, [recById, dupeExcluder]);
+
   const findSimilar = useCallback(async () => {
     if (scan.running) { showToast("Wait for the current job to finish first", "warm"); return; }
-    setScan({ running: true, done: 0, total: 0, label: "Reading every card's text…", rootName: "Similar cards" });
+    setScan({ running: true, done: 0, total: 0, label: "Reading and comparing every card's text…", rootName: "Similar cards" });
     try {
-      const items = [];
-      let short = 0;
-      await scanAllBodies((id, body) => {
-        const r = recById.get(id);
-        if (!r || !r.ok || r.inTrash || (dupeExcluder && dupeExcluder(r))) return;
-        const runs = textShingles(similarityText(body));
-        if (!runs) { short++; return; }
-        items.push({ id, fp: r.fp, sig: minHashSignature(runs) });
-      });
-      setScan({ running: true, done: 0, total: 0, label: "Comparing " + fmtNum(items.length) + " cards…", rootName: "Similar cards" });
       await new Promise((r) => setTimeout(r, 30));
-      const groups = similarGroups(items, SIMILAR_MIN).map((g, i) => ({
-        key: "sim" + i + ":" + g.ids[0], kind: "similar", score: g.score,
-        items: g.ids.map((id) => recById.get(id)).filter(Boolean),
-      })).filter((g) => g.items.length > 1);
-      setSimilar({ groups, compared: items.length, short, at: Date.now() });
+      const { groups } = await computeSimilar();
       showToast(groups.length ? fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + " of cards that read alike" : "No two cards read alike beyond the duplicates already found", groups.length ? "cyan" : "green");
     } catch (e) {
       showToast("Couldn't compare the cards: " + ((e && e.message) || String(e)), "red");
     }
     setScan(SCAN_IDLE);
-  }, [scan.running, recById, dupeExcluder, showToast]);
+  }, [scan.running, computeSimilar, showToast]);
 
   /* ---- rename from a pattern ---- */
   const [renameIds, setRenameIds] = useState(null);
@@ -19245,6 +19377,32 @@ function App() {
     [roots, records]
   );
 
+  if (readFailure) {
+    return (
+      <Empty icon="⚠" title="The vault couldn't read its saved data"
+        hint={"The browser opened the vault's database but a read from it failed, so the vault has stopped here rather than open looking empty. Nothing has been loaded and nothing has been changed: your tags, notes and settings are as they were."}>
+        <div style={{ marginTop: 6, maxWidth: 560, fontSize: 12, lineHeight: 1.7, color: "var(--text-secondary)", textAlign: "left" }}>
+          <div><strong>1.</strong> Close any other tab or window of the vault, then reload this page.</div>
+          <div><strong>2.</strong> If it says the same, close {BROWSER_LABEL} completely and open it again.</div>
+          <div><strong>3.</strong> If it still can't, the browser's copy is damaged. Your vault-data backups are in the{" "}
+            <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>{VAULT_DATA_FOLDER}</code> folder inside one of your card folders:
+            start afresh below, add the folder again, and the vault offers to bring the newest one back.</div>
+        </div>
+        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+          <SmallBtn color="warm" style={{ padding: "8px 16px", fontSize: 12 }} onClick={() => window.location.reload()}>Reload</SmallBtn>
+          <SmallBtn color="red" style={{ padding: "8px 16px", fontSize: 12 }} title="Erase this browser's copy of the vault's data. Card files and backups are not touched."
+            onClick={() => {
+              if (!window.confirm("Erase this browser's copy of the vault's data and start afresh?\n\nYour card files, and the backups in " + VAULT_DATA_FOLDER + ", are not touched. After the reload, add your card folder again and the vault offers to bring the newest backup back.")) return;
+              const reload = () => window.location.reload();
+              dbOpen().then((db) => { try { db.close(); } catch (e) { /* not open */ } }, () => {}).then(() => {
+                try { const r = indexedDB.deleteDatabase(DB_NAME); r.onsuccess = reload; r.onerror = reload; r.onblocked = reload; } catch (e) { reload(); }
+              });
+            }}>Start afresh</SmallBtn>
+        </div>
+        <div style={{ marginTop: 10, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "var(--text-muted)", maxWidth: 560, wordBreak: "break-word" }}>{readFailure}</div>
+      </Empty>
+    );
+  }
   if (!ready) {
     return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)", fontSize: 13 }}>Opening vault…</div>;
   }
@@ -19527,7 +19685,7 @@ function App() {
                 <AgentPanel ai={aiSettings} relay={aiRelay} agent={agentSettings} onSaveAgent={patchAgentSettings}
                   records={records} editsMap={editsMap} tagIndex={tagIndex} sortKey={filters.sort} shuffleSeed={shuffleSeed} onPatchEdit={patchEdit}
                   onPatchMany={patchManyEdits} roots={roots} privateFolders={settings.privateFolders}
-                  onCardFiles={{ create: createCardFile, copy: copyCardFile, move: moveCardFile }} dupes={dupes}
+                  onCardFiles={{ create: createCardFile, copy: copyCardFile, move: moveCardFile }} dupes={dupes} onSimilar={computeSimilar}
                   onOpenCard={(id) => setFocusId(id)}
                   onOpenAiSettings={() => setModal("ai")} onToast={showToast} />
               ) : null} />
@@ -19758,7 +19916,7 @@ function App() {
       ) : null}
 
       {modal === "settings" ? (
-        <SettingsModal settings={settings} onSave={patchSettings} onClose={() => setModal(null)}
+        <SettingsModal settings={settings} onSave={patchSettings} onClose={() => setModal(null)} storageKept={storageKept}
           onToast={showToast} onHardReset={hardReset} onExportVault={exportVault}
           onImportVault={importVault} cardCount={cards.length} trashOptions={moveTargets}
           destStatus={destStatus} onConnectDest={connectDest} onDisconnectDest={disconnectDest}

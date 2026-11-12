@@ -10,7 +10,7 @@
  *     could undo what the other had just saved
  */
 
-const { indexedDB, IDBKeyRange } = require("fake-indexeddb");
+const { indexedDB, IDBKeyRange, IDBDatabase } = require("fake-indexeddb");
 const { loadPureRegion } = require("./pure-region");
 const t = require("./harness");
 
@@ -24,6 +24,7 @@ const { mod: V } = loadPureRegion([
   "vaultDataFileName", "vaultDataFilesToPrune", "autoBackupDue", "autoBackupTarget", "dirKey", "startupSort",
   "vaultDataBackupNames", "vaultDataBackupDate", "vaultDataWeight", "backupOutweighs",
   "editsFollowingCards", "changedFingerprints", "mergeEditRecords", "editHolds",
+  "probeReads", "keepStorage",
   "cleanFilters", "sameFilters", "sanitizeSavedViews", "savedViewsWith", "viewFiltersFor", "suggestViewName", "SAVED_VIEWS_MAX", "DEFAULT_SETTINGS",
 ], { indexedDB, IDBKeyRange });
 
@@ -85,6 +86,34 @@ async function main() {
     t.eq(V.handleCrashVersion(""), 0, "an empty user agent is fine");
     t.eq(V.browserUpdatePage("Edge"), "edge://settings/help", "Edge users are sent to Edge's update page");
     t.eq(V.browserUpdatePage("Chrome"), "chrome://settings/help", "Chrome users to Chrome's");
+  }
+
+  console.log("\nthe vault's saved data: kept by the browser, and really readable");
+  {
+    const nav = (persisted, grant) => { const calls = []; return { calls, storage: { persisted: async () => { calls.push("persisted"); return persisted; }, persist: async () => { calls.push("persist"); return grant; } } }; };
+    const kept = nav(true, false);
+    t.eq([await V.keepStorage(kept), kept.calls], ["kept", ["persisted"]], "a browser already keeping the data isn't asked again");
+    const yes = nav(false, true);
+    t.eq([await V.keepStorage(yes), yes.calls], ["kept", ["persisted", "persist"]], "one that isn't is asked, and may agree");
+    t.eq(await V.keepStorage(nav(false, false)), "may-clear", "or may not promise: then the vault says so");
+    t.eq([await V.keepStorage({}), await V.keepStorage(null), await V.keepStorage({ storage: {} })], ["unknown", "unknown", "unknown"], "a browser with no way to ask is no error");
+    t.eq(await V.keepStorage({ storage: { persist: async () => { throw new Error("blocked"); } } }), "unknown", "nor is one that refuses to be asked");
+
+    t.eq(await V.probeReads(), { ok: true, msg: "" }, "a database that reads is fine to open");
+    // The same database, with reads from the settings store failing as a damaged one's do.
+    const realTx = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function (stores, mode) {
+      const tx = realTx.call(this, stores, mode);
+      const realStore = tx.objectStore.bind(tx);
+      tx.objectStore = (name) => { const os = realStore(name); if (name === "kv") os.get = () => { throw new DOMException("Internal error reading the backing store", "UnknownError"); }; return os; };
+      return tx;
+    };
+    try {
+      const bad = await V.probeReads();
+      t.ok(!bad.ok && /Internal error reading the backing store/.test(bad.msg), "one that opens but can't be read is caught, with the browser's reason", bad);
+      t.eq(await V.dbGet("kv", "settings"), undefined, "(the ordinary reader would have answered \"nothing saved\", which is how a vault opens looking empty)");
+    } finally { IDBDatabase.prototype.transaction = realTx; }
+    t.eq((await V.probeReads()).ok, true, "and it's fine again once reads work");
   }
 
   console.log("\nsaved views: the sidebar as you had it, by name");

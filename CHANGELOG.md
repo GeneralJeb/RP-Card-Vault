@@ -8,6 +8,18 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.1
+
+- **The vault asks your browser to keep its data.** Left to itself, a browser may clear a site's saved data when the disk runs low, without asking, and your tags, notes and edits would go with it. The vault now asks the browser to keep them, once, each time it opens; this shows nothing and needs nothing from you. **Settings → Automatic backups** says what the browser answered. A browser that won't promise usually does once the vault is installed as an app or has been used for a while, and your backups cover you either way.
+- **A vault whose saved data can't be read no longer opens looking empty.** If the browser's database opened but a read from it failed (a damaged file on disk, say), the vault took that for "nothing saved": it opened empty, with default settings, and the first setting you changed was saved over your real ones. It now checks that its data can be read before loading anything. If it can't, it stops with a notice that says what to try, having changed nothing. **Reload** tries again, and **Start afresh** clears only this browser's copy, after which adding your folder again brings the offer of your newest backup.
+- **The agent can ask the vault what it already knows, instead of reading cards one by one.** This is quicker, costs fewer tokens, and suits small local models, which lose their way in long runs of reading:
+  - **`list_cards` finds cards that need attention.** A new `issue` filter lists the cards the vault's own checks found something on (no tags, an empty description, no first message, a lorebook entry with no keys and so on), or files that aren't readable as cards, and says what was found on each.
+  - **`list_cards` knows about changes and sends.** Its `flag` filter takes `changedOutside`, `sent`, `notSent` and `changedSinceSent`.
+  - **`inspect_card` says more.** It adds what the checks found, whether the card's file was changed outside the vault, and where it stands with your front end. Asked to, it also runs the lorebook checks and names the entries.
+  - **`list_duplicates` can list cards that read alike** (`kind: similar`), with how alike they are. It works this out when asked, and it isn't part of the ordinary duplicate list.
+  - Cards in a folder you keep private from the AI stay out of all of it.
+- **Removing a folder from the vault is quicker.** Its cards were taken out of the index one at a time, several steps each, which took seconds for a few hundred cards. They now go together.
+
 ## 1.8.0
 
 - **New: where a card stands with your front end.** The card panel's Overview has a **Front end** block with a line for each destination, and the sidebar has three new filters for the destination that Send uses: **In front end**, **Not sent** and **Changed since sent**. The vault works this out from what it knows itself, and never asks a front end what it holds:

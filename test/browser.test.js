@@ -1289,8 +1289,12 @@ async function main() {
       await page.getByRole("button", { name: "+ Add folder" }).click();
       await page.getByText(/Added Parent/).first().waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
-      // Let both scans run to their end.
+      // Let both scans run to their end: six seconds on a quick computer, and on a
+      // slow one for as long as the outer folder's cards take to reach the index
+      // (a scan writes its records when it finishes), then a moment more.
       await page.waitForTimeout(6000);
+      for (let i = 0; i < 120 && (await cardRecords()).filter((c) => /^Extra \d+\.png$/.test(c.file)).length < 300; i++) await page.waitForTimeout(500);
+      await page.waitForTimeout(1000);
       t.eq(await orphanCount(), 0, "no records are left without a folder (no \"?\" duplicates)");
       const added = (await rootKeys()).filter((k) => !before.has(k));
       t.eq(added.length, 1, "one folder was added in the end, Parent: the inner one's scan didn't write it back", added);

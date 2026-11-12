@@ -32,6 +32,20 @@ On GitHub, every pull request runs: every suite on Windows (the browser test in 
 - The first change after a release raises the version and starts a new `CHANGELOG.md` section; later changes add to it.
 - When `main` gets a version that has no release yet, GitHub tags it `v<version>` and publishes a release with that version's changelog section.
 
+## Working on the code
+
+For anyone picking the project up, person or coding assistant. These are the things that aren't obvious from the files.
+
+- **Start from `dev`, not `main`.** `main` only moves at a release and can be many versions behind. Branch from `dev` and open the pull request into `dev`.
+- **Where things are.** `RP_Card_Vault.html` is the whole page. Everything above the `/*__PURE_JS_END__*/` line is plain JavaScript with no React in it, which the tests load straight from the file (`test/pure-region.js`); put new logic there and keep the components below it thin. `serve.js` is the local server and has no dependencies. Nothing may load from the internet.
+- **Reproduce before fixing.** Write the failing check first, see it fail, then fix. A test that only confirms what the code already does proves nothing.
+- **A user-facing change raises the version** in all four places and adds a `CHANGELOG.md` entry. Entries are written for someone using the vault, not reading its code: what was wrong or missing, then what happens now. A change to tests, workflows or these documents alone doesn't raise it.
+- **Your organising work is keyed by content.** Notes, tags, flags, ratings and unsaved changes are stored under a fingerprint of a card's name, description and first message, so copies of one card share them. Anything new kept on that record has to be carried in `editAfterSave` and `mergeEditRecords`, or it is lost when a card is saved or edited elsewhere.
+- **Card files are only changed by copy, check, then replace.** Saves, moves, renames and restores all compare what was written byte for byte before the original goes. Keep to that for anything new that writes a card file.
+- **Chromium 153 closes itself** when a page that has saved a folder reopens its saved data (fixed in 154). The page shows a notice instead of opening on 153. Playwright 1.63's own Chromium is a 153, so in that browser the browser test skips the steps that reload after a folder is added; don't add a reload to a step that runs there.
+- **Line endings matter for the launchers.** The Windows ones (`.bat`, `.vbs`, `.ps1`, `HOW TO RUN.txt`) must be CRLF and plain ASCII; the Mac and Linux ones (`.sh`, `.command`) must be LF and marked as programs in git. `.gitattributes` sets this and the launcher suite checks it.
+- **The libraries in `lib` are pinned by hash.** Changing one means changing its hash in the page and `LIB_HASH` in `sw.js`; the release suite says what to change.
+
 ## Bundled libraries
 
 React, ReactDOM, Babel and JSZip are in `lib`, pinned by hash. [`lib/LICENSES.md`](../lib/LICENSES.md) lists their versions and licenses, and how to change one.
