@@ -45,9 +45,9 @@ Your cards, tags and notes aren't in the vault's files, so nothing of yours is o
 ## Tested on
 
 - Windows 10 (22H2), and GitHub's Windows test machines
-- Linux (Ubuntu 24.04): the launchers, the local server and the automated tests
-- macOS: new in 1.7.0, and not yet tried on a real Mac. If it misbehaves there, please open an issue
-- Microsoft Edge (the automated browser test) and other Chrome-based browsers
+- Linux (Ubuntu 24.04, and GitHub's Linux test machines): the launchers, the local server and every automated test
+- macOS (GitHub's Mac test machines): the launchers and the automated browser test. Nobody has used it day to day on a Mac yet, so if it misbehaves there, please open an issue
+- Microsoft Edge, Google Chrome and Brave (the automated browser test runs in each), and other Chrome-based browsers
 - Node.js 20 and 24
 - SillyTavern 1.19 and Lumiverse, as places to send cards
 
