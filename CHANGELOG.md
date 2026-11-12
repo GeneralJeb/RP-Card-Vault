@@ -8,6 +8,11 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.6.27
+
+- **Switches work from the keyboard.** The on/off switches (in Settings, the AI and agent panels, Ingest and the sidebar's Deep text) could only be clicked: Tab skipped them, so without a mouse there was no way to turn on backups before saving, tag tidying, the AI features and the rest. Tab now stops on each one, Space or Enter turns it over, and a screen reader hears it as a switch that is on or off.
+- **Unnamed controls have names.** The tile size sliders and the Sort, Default filing and Trash folder lists were read out by a screen reader with no name. They now say what they are.
+
 ## 1.6.26
 
 - **One card with "sign" in its name no longer stops an upload.** Sending several cards to SillyTavern, Lumiverse or another importer stops early when the front end signs you out or stops running. It decided that by looking for words like "sign" in the error, and a refusal can name the card, so one refused card called "Assignment" or "Designer" (or a refusal that said "design") left every card after it unsent. The run now stops only when the local server says the sign-in is gone or the front end can't be reached.

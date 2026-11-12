@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.26";
+const APP_VERSION = "1.6.27";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -9122,7 +9122,14 @@ function Toggle({ checked, onChange, label, color, small }) {
   const onTrack = c === "green" ? "rgba(107,158,107,0.8)" : (c === "warm" ? "var(--accent-warm-dim)" : ac(c));
   const onDot = c === "warm" ? "var(--accent-warm)" : (c === "pink" ? "#d4899e" : c === "blue" ? "#8aadd4" : c === "cyan" ? "#8ed4d4" : c === "purple" ? "#b698d4" : ac(c));
   return (
-    <div onClick={() => onChange(!checked)} className="no-sel"
+    // A switch, so Tab reaches it and Space or Enter turns it over, as a checkbox would.
+    <div onClick={() => onChange(!checked)} className="no-sel" role="switch" aria-checked={!!checked} tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key !== " " && e.key !== "Enter") return;
+        e.preventDefault();      // Space would scroll the page
+        e.stopPropagation();     // and is no card shortcut
+        onChange(!checked);
+      }}
       style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
       <div style={{
         width: track.w, height: track.h, borderRadius: track.h / 2, flexShrink: 0,
@@ -10031,7 +10038,7 @@ function FilterSidebar({
   const sortBlock = (
     <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--border-subtle)", flexShrink: 0 }}>
       <label style={tinyLabel}>Sort</label>
-      <select value={filters.sort} onChange={(e) => patch({ sort: e.target.value })} style={selectStyle}>
+      <select value={filters.sort} onChange={(e) => patch({ sort: e.target.value })} aria-label="Sort" style={selectStyle}>
         {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
       </select>
     </div>
@@ -15223,7 +15230,7 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
         </div>
         <div>
           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4 }}>Tile size — {settings.tileSize}px</div>
-          <input type="range" min="90" max="260" value={settings.tileSize}
+          <input type="range" min="90" max="260" value={settings.tileSize} aria-label="Tile size"
             onChange={(e) => onSave({ tileSize: Number(e.target.value) })} style={{ width: "100%", accentColor: "var(--accent-warm)" }} />
         </div>
         <div className="start-sort" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -15262,7 +15269,7 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
           label="Skip exact duplicates by default" />
         <div>
           <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4 }}>Default filing</div>
-          <select value={settings.ingestSubfolder} onChange={(e) => onSave({ ingestSubfolder: e.target.value })} style={selectStyle}>
+          <select value={settings.ingestSubfolder} onChange={(e) => onSave({ ingestSubfolder: e.target.value })} aria-label="Default filing" style={selectStyle}>
             <option value="flat">Flat</option>
             <option value="creator">Subfolder per creator</option>
             <option value="firstTag">Subfolder per first tag</option>
@@ -15354,7 +15361,7 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
         reuses an existing folder called "trash cards" or "trash", and otherwise creates
         "{TRASH_FOLDER_NAME}".
       </div>
-      <select value={settings.trashKey || ""} onChange={(e) => onSave({ trashKey: e.target.value })}
+      <select value={settings.trashKey || ""} onChange={(e) => onSave({ trashKey: e.target.value })} aria-label="Trash folder"
         style={Object.assign({}, selectStyle, { marginBottom: 16 })}>
         <option value="">Automatic</option>
         {trashOptions.map((g) => (
@@ -18339,7 +18346,7 @@ function App() {
                   <SmallBtn color="warm" active={settings.viewMode === "grid"} onClick={() => patchSettings({ viewMode: "grid" })}>grid</SmallBtn>
                   <SmallBtn color="warm" active={settings.viewMode === "list"} onClick={() => patchSettings({ viewMode: "list" })}>list</SmallBtn>
                   {settings.viewMode === "grid" ? (
-                    <input type="range" min="90" max="260" value={settings.tileSize}
+                    <input type="range" min="90" max="260" value={settings.tileSize} aria-label="Tile size"
                       onChange={(e) => patchSettings({ tileSize: Number(e.target.value) })}
                       style={{ width: 80, accentColor: "var(--accent-warm)" }} />
                   ) : null}
