@@ -1701,6 +1701,10 @@ async function main() {
         Object.defineProperty(window, "showDirectoryPicker", { value: undefined, configurable: true });
         Object.defineProperty(Navigator.prototype, "userAgent", { get: () => ua });
         try { delete window.chrome; } catch (e) { /* not there */ }
+        // When this test runs in Brave itself, the tab still carries Brave's own
+        // mark, and the page would rightly say "Brave". A Firefox has none. Set on
+        // the navigator object, which wins whether or not Brave's can be removed.
+        Object.defineProperty(navigator, "brave", { get: () => undefined, configurable: true });
       }, "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0");
       await p.getByText("Firefox can't file cards automatically").waitFor();
       t.ok(true, "it names the browser and says it can't file cards");
