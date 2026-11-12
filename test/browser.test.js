@@ -1161,6 +1161,38 @@ async function main() {
       await page.getByRole("button", { name: "Close", exact: true }).click();
     });
 
+    await step("Settings' switches work from the keyboard, and its controls have names", async () => {
+      // A switch was a clickable box that Tab never reached, so a keyboard
+      // couldn't change any of them; sliders and some lists had no name to read out.
+      t.eq(await page.getByRole("slider", { name: "Tile size" }).count(), 1, "the toolbar's tile size slider is named");
+      t.eq(await page.getByRole("combobox", { name: "Sort", exact: true }).count(), 1, "so is the sidebar's sort list");
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("Destinations — where", { exact: false }).first().waitFor();
+      for (const n of ["Default filing", "Trash folder"]) t.eq(await page.getByRole("combobox", { name: n, exact: true }).count(), 1, n + " is named");
+      t.eq(await page.getByRole("slider", { name: "Tile size" }).count(), 2, "and Settings' own tile size slider");
+      const sw = page.getByRole("switch", { name: "Normalize tag case and separators" });
+      t.eq(await sw.count(), 1, "Normalize tag case is a switch");
+      const before = await sw.getAttribute("aria-checked");
+      t.ok(before === "true" || before === "false", "that says whether it's on", before);
+      // Reached with Tab, like any control: from the theme list, the next stops lead to it.
+      await page.getByRole("combobox", { name: "Theme" }).focus();
+      let reached = false;
+      for (let i = 0; i < 12 && !reached; i++) {
+        await page.keyboard.press("Tab");
+        reached = await sw.evaluate((el) => el === document.activeElement);
+      }
+      t.ok(reached, "Tab reaches it");
+      await page.keyboard.press("Space");
+      const state = (v) => page.locator("[role=switch][aria-checked='" + v + "']").filter({ hasText: "Normalize tag case and separators" });
+      await state(before === "true" ? "false" : "true").waitFor();
+      t.eq(await sw.getAttribute("aria-checked"), before === "true" ? "false" : "true", "Space turns it over");
+      await page.keyboard.press("Enter");
+      await state(before).waitFor();
+      t.eq(await sw.getAttribute("aria-checked"), before, "and Enter turns it back");
+      t.ok(await sw.evaluate((el) => el === document.activeElement), "keeping the focus where it was");
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+    });
+
     await step("the problem log in Settings collects problems, scrubbed", async () => {
       await page.evaluate(() => {
         setTimeout(() => { throw new Error("test failure for Ada Clockmaker at C:\\Users\\Jeb\\x with sk-abcdefgh12345678"); });

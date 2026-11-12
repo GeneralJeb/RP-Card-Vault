@@ -70,6 +70,18 @@ If you skipped several releases, read every section down to the one you had.
 - **A file that can't be opened no longer blames Windows on other systems.** A card file that was in a folder's list but couldn't be opened was always put down to Windows' 260-character path limit. On a Mac or Linux, which have no such limit, it now says the file was most likely moved or removed, and to rescan.
 - **Smaller wording changes for the same reason.** The theme choice is **Match your system**, a card dragged out of the window lands in Finder or your file manager, and the problem log speaks of your user name on this computer.
 
+## 1.6.28
+
+- **Start RP Card Vault.bat works from a folder with brackets in its name.** Downloading the vault a second time gives a folder like `RP-Card-Vault (1)`, and from there Start closed at once with "\ was unexpected at this time", so the vault never started. Brackets, `&` and the rest are now just part of the folder's name, including for a portable Node kept in that folder.
+- **Stop RP Card Vault.bat stops the right copy from a folder with `!` in its name.** It lost the `!` from its own folder, so it couldn't read that copy's `vault.local` and went looking on port 8790, where it could stop a different copy of the vault.
+- **Create Shortcut works from a folder with square brackets in its name.** In a folder like `vault [2]` it said it couldn't find `RP Card Vault.vbs` sitting right next to it.
+- **A port the vault can't use says so.** A `port=` in `vault.local` above 65535, below 1 or with a decimal point (`99999`, `8791.5`) made the server stop with a page of Node error text. It now says the port can't be used and to check `vault.local`.
+
+## 1.6.27
+
+- **Switches work from the keyboard.** The on/off switches (in Settings, the AI and agent panels, Ingest and the sidebar's Deep text) could only be clicked: Tab skipped them, so without a mouse there was no way to turn on backups before saving, tag tidying, the AI features and the rest. Tab now stops on each one, Space or Enter turns it over, and a screen reader hears it as a switch that is on or off.
+- **Unnamed controls have names.** The tile size sliders and the Sort, Default filing and Trash folder lists were read out by a screen reader with no name. They now say what they are.
+
 ## 1.6.26
 
 - **One card with "sign" in its name no longer stops an upload.** Sending several cards to SillyTavern, Lumiverse or another importer stops early when the front end signs you out or stops running. It decided that by looking for words like "sign" in the error, and a refusal can name the card, so one refused card called "Assignment" or "Designer" (or a refusal that said "design") left every card after it unsent. The run now stops only when the local server says the sign-in is gone or the front end can't be reached.
