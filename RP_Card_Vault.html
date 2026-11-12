@@ -683,6 +683,9 @@ function startScriptFor(os) {
   return os === "mac" ? "Start RP Card Vault.command" : os === "linux" ? "start.sh" : "Start RP Card Vault.bat";
 }
 const START_SCRIPT = startScriptFor(OS_KIND);
+/** The key held to add to a selection or reach a shortcut, as that system's keyboard names it. */
+function modKeyFor(os) { return os === "mac" ? "\u2318" : "Ctrl"; }
+const MOD_KEY = modKeyFor(OS_KIND);
 /** Where a card dragged out of the window lands, as that system calls it. */
 const FILE_MANAGER = OS_KIND === "mac" ? "Finder" : OS_KIND === "linux" ? "your file manager" : "Explorer";
 
@@ -10770,7 +10773,7 @@ function FolderNode({ node, root, filters, patch, collapsed, setCollapsed, onDro
         title={(node.dir || root.name) + (readOnly ? "  (read-only — can't accept moves)" : "\nDrop cards here to move them") +
           "\n" + node.own + " here, " + node.count + " including subfolders" +
           "\nRole: " + (ROOT_ROLES[inheritedRole] || {}).label + (explicitRole ? " (labelled)" : " (inherited)") +
-          "\nClick to filter · Ctrl-click to add · Right-click to label"}
+          "\nClick to filter · " + MOD_KEY + "-click to add · Right-click to label"}
         style={{
           display: "flex", alignItems: "center", gap: 5, cursor: "pointer",
           padding: "3px 12px 3px " + (10 + node.depth * 11) + "px",
@@ -16254,7 +16257,7 @@ function ProblemLog({ info, onToast }) {
   const text = useMemo(build, [tick, showNames, info]);
   const copy = async () => {
     try { await navigator.clipboard.writeText(build()); onToast("Problem log copied", "green"); }
-    catch (e) { onToast("Couldn't copy: select the log below and press Ctrl+C", "warm"); }
+    catch (e) { onToast("Couldn't copy: select the log below and press " + MOD_KEY + "+C", "warm"); }
   };
   return (
     <div className="problem-log" style={{ marginBottom: 16 }}>

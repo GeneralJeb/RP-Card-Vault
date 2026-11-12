@@ -18,6 +18,7 @@ If you skipped several releases, read every section down to the one you had.
   - **`inspect_card` says more.** It adds what the checks found, whether the card's file was changed outside the vault, and where it stands with your front end. Asked to, it also runs the lorebook checks and names the entries.
   - **`list_duplicates` can list cards that read alike** (`kind: similar`), with how alike they are. It works this out when asked, and it isn't part of the ordinary duplicate list.
   - Cards in a folder you keep private from the AI stay out of all of it.
+- **On a Mac, hints name the ⌘ key.** The folder list's hint said "Ctrl-click to add", but on a Mac a Ctrl-click is a right-click and opens the folder's menu. ⌘-click always worked there; the hint now says so, and so does the hint for copying the problem log by hand.
 - **Removing a folder from the vault is quicker.** Its cards were taken out of the index one at a time, several steps each, which took seconds for a few hundred cards. They now go together.
 
 ## 1.8.0

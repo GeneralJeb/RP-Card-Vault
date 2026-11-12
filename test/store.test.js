@@ -19,7 +19,7 @@ console.warn = () => {};
 
 const { mod: V } = loadPureRegion([
   "dbPutMany", "dbPut", "dbDel", "dbGet", "dbKeys", "STORE_BODIES", "STORE_EDITS", "vaultEditsChannel", "agentPinnedLine",
-  "chromiumMajor", "handleCrashVersion", "browserUpdatePage", "osKindOf", "startScriptFor", "unopenedFileMessage",
+  "chromiumMajor", "handleCrashVersion", "browserUpdatePage", "osKindOf", "startScriptFor", "modKeyFor", "unopenedFileMessage",
   "orphanCardIds", "dbDelCardsOfRoot", "dbAll", "STORE_CARDS", "STORE_THUMBS",
   "vaultDataFileName", "vaultDataFilesToPrune", "autoBackupDue", "autoBackupTarget", "dirKey", "startupSort",
   "vaultDataBackupNames", "vaultDataBackupDate", "vaultDataWeight", "backupOutweighs",
@@ -183,6 +183,7 @@ async function main() {
     for (const [ua, os, script] of cases) {
       t.eq([V.osKindOf(ua), V.startScriptFor(V.osKindOf(ua))], [os, script], (ua.match(/\(([^;)]+)/) || [0, ua || "(no user agent)"])[1] + ": " + os + ", started with " + script);
     }
+    t.eq([V.modKeyFor("mac"), V.modKeyFor("windows"), V.modKeyFor("linux")], ["\u2318", "Ctrl", "Ctrl"], "hints name the key that system has: Cmd on a Mac (where a Ctrl-click is a right-click), Ctrl elsewhere");
     const gone = Object.assign(new Error("not found"), { name: "NotFoundError" });
     t.ok(/260-character limit/.test(V.unopenedFileMessage("a.png", gone, "windows")), "a listed file that can't be opened: on Windows, most likely the 260-character limit");
     for (const os of ["mac", "linux"]) {

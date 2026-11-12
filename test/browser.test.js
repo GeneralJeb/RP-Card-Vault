@@ -46,6 +46,10 @@ const { loadPureRegion } = require("./pure-region");
 const t = require("./harness");
 
 const ROOT = path.join(__dirname, "..");
+// The key held to add a card to the selection, and to reach the browser's own
+// shortcuts: Cmd on a Mac, Ctrl everywhere else. A Control-click on a Mac is a
+// right-click, so it opens the card's menu instead of selecting it.
+const SELECT_KEY = "ControlOrMeta";
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk", "cardPictures"]);
@@ -406,8 +410,8 @@ async function main() {
       }));
       const before = await favourites();
       await tile("Bram Lighthouse").click();
-      await page.keyboard.press("Control+f");
-      await page.keyboard.press("Control+s");
+      await page.keyboard.press(SELECT_KEY + "+f");
+      await page.keyboard.press(SELECT_KEY + "+s");
       await page.waitForTimeout(500);
       t.eq(await favourites(), before, "Ctrl+F doesn't favourite the card you're looking at");
       t.eq(await page.getByText("Normalize tag case and separators").count(), 0, "and Ctrl+S doesn't start a send (which opens Settings with no destination)");
@@ -971,7 +975,7 @@ async function main() {
       await page.getByText("sea → victorian").waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
       await tile("Ada Clockmaker").click();
-      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await tile("Bram Lighthouse").click({ modifiers: [SELECT_KEY] });
       await page.getByText("2 selected").waitFor();
       await page.getByRole("button", { name: "Tag…", exact: true }).click();
       const remove = page.getByPlaceholder("add tag, Enter to commit").nth(1);
@@ -1020,7 +1024,7 @@ async function main() {
       await page.getByText("Reference", { exact: true }).last().click();
       // Gil (Reference, so it stays) is picked first: the trash isn't looked for in its folder.
       await tile("Gil Reader").click();
-      await tile("Hal Tinker").click({ modifiers: ["Control"] });
+      await tile("Hal Tinker").click({ modifiers: [SELECT_KEY] });
       await page.getByTitle("Relocate to your trash folder").click();
       await toast(/^1 sent to Loose\/_vault trash\. 1 card\(s\) live in a read-only folder/);
       t.ok(true, "the notice says the one went to the trash, and the other can't be moved");
@@ -1119,7 +1123,7 @@ async function main() {
 
       // A card that leaves the vault (renamed on disk, then rescanned) leaves the selection too.
       await tile("Ada Clockmaker").click();
-      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await tile("Bram Lighthouse").click({ modifiers: [SELECT_KEY] });
       await page.getByText("2 selected").waitFor();
       await writeFiles(page, "Cards", [["Bram Renamed.png", Buffer.from(await readFile(page, "Cards", "Bram Lighthouse.png"))]]);
       await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Bram Lighthouse.png"));
@@ -1549,8 +1553,8 @@ async function main() {
         // Bulk: one card saved while the model answers for it, one saved before its turn.
         await p.getByRole("button", { name: "Rescan", exact: true }).waitFor();
         await tile2("Ada").click();
-        await tile2("Cora").click({ modifiers: ["Control"] });
-        await tile2("Bram").click({ modifiers: ["Control"] });
+        await tile2("Cora").click({ modifiers: [SELECT_KEY] });
+        await tile2("Bram").click({ modifiers: [SELECT_KEY] });
         hold = new Promise((r) => { release = r; });
         const sentBefore = calls.length;
         await p.getByRole("button", { name: "✦ Suggest tags", exact: true }).click();
