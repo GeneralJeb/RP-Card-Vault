@@ -72,7 +72,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.27";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.6.28";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -1601,6 +1601,14 @@ if (require.main !== module) {
     RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES, errorText,
   };
   return;
+}
+
+// listen() throws on a port like 99999 or 8791.5 (a typo in vault.local), and
+// the launcher window would show only a Node stack trace.
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error("\n  Port " + process.argv[2] + " can't be used: a port is a whole number from 1 to 65535.");
+  console.error("  Check the port= line in vault.local next to serve.js.\n");
+  process.exit(1);
 }
 
 const WANT_RESTART = process.argv.indexOf("--restart") >= 0;

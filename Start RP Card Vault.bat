@@ -31,7 +31,9 @@ if defined VAULT_LABEL (
 if not exist "RP_Card_Vault.html" (
   echo.
   echo   RP_Card_Vault.html is not in this folder:
-  echo     %~dp0
+  rem The folder goes in by a for variable, like the label above, so a ) or &
+  rem in its name ("RP-Card-Vault (1)") is just text and doesn't end this block.
+  for %%d in ("%~dp0") do echo     %%~d
   echo.
   echo   Put this .bat file next to RP_Card_Vault.html and run it again.
   echo.
@@ -53,9 +55,10 @@ rem A portable Node kept with the vault comes first (node\node.exe, or node.exe
 rem next to this file), so the vault can run from a USB drive on a computer
 rem that has no Node installed. Download the Windows "zip" build from
 rem nodejs.org and unpack it into a folder named node here.
+rem The quotes around name=value keep an & in the folder's name inside the value.
 set NODE_EXE=
-if exist "%~dp0node\node.exe" set NODE_EXE=%~dp0node\node.exe
-if not defined NODE_EXE if exist "%~dp0node.exe" set NODE_EXE=%~dp0node.exe
+if exist "%~dp0node\node.exe" set "NODE_EXE=%~dp0node\node.exe"
+if not defined NODE_EXE if exist "%~dp0node.exe" set "NODE_EXE=%~dp0node.exe"
 if defined NODE_EXE (
   echo   Starting with the portable Node on port %VAULT_PORT%...
   "%NODE_EXE%" "%~dp0serve.js" %VAULT_PORT% --restart
