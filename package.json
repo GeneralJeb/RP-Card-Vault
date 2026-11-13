@@ -1,10 +1,11 @@
 {
   "name": "rp-card-vault",
-  "version": "1.6.28",
+  "version": "1.8.1",
   "private": true,
   "description": "Local catalogue for roleplay character cards: RP_Card_Vault.html + serve.js. No runtime dependencies; these are for the tests only.",
   "scripts": {
-    "test": "node test/run-all.js"
+    "test": "node test/run-all.js",
+    "test:browsers": "node test/browser.test.js all"
   },
   "devDependencies": {
     "@babel/standalone": "7.23.9",

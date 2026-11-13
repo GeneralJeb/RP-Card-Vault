@@ -1,5 +1,6 @@
 /**
- * The Windows launcher files.
+ * The launcher files: Windows' (.bat, .vbs, .ps1), and the Mac and Linux ones
+ * (start.sh, stop.sh, Start RP Card Vault.command).
  *
  *   node test/launchers.test.js
  *
@@ -18,6 +19,11 @@
  * port is a separate vault with its own saved folder permissions. The launchers
  * all default to one port and all read a second copy's own port from
  * vault.local; if they disagreed, one launcher would open a different vault.
+ *
+ * The Mac and Linux launchers have the opposite trap: saved with Windows (CRLF)
+ * line endings, "#!/bin/sh" ends in a CR and the file won't start at all. They
+ * must also be marked as programs, which a Windows checkout can't show, so the
+ * mark is checked where git keeps it.
  *
  * Files that aren't present are skipped, so this suite can travel with just the
  * app if the launchers are left behind.
@@ -40,6 +46,8 @@ const WINDOWS_SCRIPTS = [
   "Create Shortcut.ps1",
   "HOW TO RUN.txt",
 ];
+
+const UNIX_SCRIPTS = ["start.sh", "stop.sh", "Start RP Card Vault.command"];
 
 function read(name) {
   const p = path.join(ROOT, name);
@@ -475,4 +483,160 @@ console.log("\nthe double-click trap is documented where it will be read");
   }
 }
 
-t.done();
+/* ── the Mac and Linux launchers ───────────────────────────────────────── */
+
+console.log("\nthe Mac and Linux launchers have Unix line endings and are marked as programs");
+for (const name of UNIX_SCRIPTS) {
+  const buf = read(name);
+  if (!buf) { t.skip(name, "not in this folder"); continue; }
+  const text = buf.toString("latin1");
+  t.ok(text.indexOf("\r") < 0, name + " has no CR: after \"#!/bin/sh\" one would stop it from starting");
+  t.ok(text.indexOf("#!/bin/sh\n") === 0, name + " starts with #!/bin/sh");
+  t.ok(!Array.from(buf).some((b) => b > 127), name + " is pure ASCII");
+  if (process.platform !== "win32") t.ok((fs.statSync(path.join(ROOT, name)).mode & 0o111) !== 0, name + " is marked as a program on disk");
+  // What a release is built from is git's copy, where the mark is a file mode.
+  let mode = "";
+  try {
+    mode = require("child_process").execFileSync("git", ["ls-files", "-s", "--", name], { cwd: ROOT, encoding: "utf8", windowsHide: true, timeout: 15000 }).slice(0, 6);
+  } catch (e) { mode = ""; }
+  if (!mode) t.skip(name + " in git", "not a git checkout");
+  else t.eq(mode, "100755", name + " is marked as a program in git");
+}
+
+console.log("\nthe Mac and Linux launchers use port " + DEFAULT_PORT + ", or the one in vault.local");
+{
+  const start = read("start.sh"), stop = read("stop.sh"), command = read("Start RP Card Vault.command");
+  for (const [name, buf] of [["start.sh", start], ["stop.sh", stop]]) {
+    if (!buf) { t.skip(name + " port", "not in this folder"); continue; }
+    const text = buf.toString("latin1");
+    const set = text.match(/^VAULT_PORT=(\d+)$/m);
+    t.ok(!!set && Number(set[1]) === DEFAULT_PORT, name + " defaults to " + DEFAULT_PORT, set && set[1]);
+    t.ok(/done < "\$DIR\/vault\.local"/.test(text), "and reads vault.local");
+    t.ok(/case "\$VAULT_PORT" in ''\|\*\[!0-9\]\*\) VAULT_PORT=8790 ;; esac/.test(text), "falling back to it if vault.local's port isn't a number");
+    const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    t.ok(!/\b(8777|8788)\b/.test(code), "with no other port in its code");
+  }
+  if (start) {
+    const text = start.toString("latin1");
+    t.ok(/"\$NODE" "\$DIR\/serve\.js" "\$VAULT_PORT" --restart "\$@"/.test(text),
+      "start.sh passes --restart, so a server already on the port is replaced, and passes its own arguments on");
+    const portable = text.indexOf('if [ -x "$DIR/node/bin/node" ]; then NODE=$DIR/node/bin/node');
+    t.ok(portable > 0 && portable < text.indexOf("command -v node"), "it uses node/bin/node next to it before looking for an installed Node");
+    t.ok(/mktemp -d/.test(text) && /trap 'rm -rf "\$STAGE"' EXIT/.test(text) && /--bind 127\.0\.0\.1 --directory "\$STAGE"/.test(text),
+      "without Node, Python serves a copy of the app's own files, on this computer only, and the copy is removed afterwards");
+  }
+  if (stop) {
+    const text = stop.toString("latin1");
+    const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    t.ok(/\/__vault\/shutdown/.test(code) && /X-Vault: 1/.test(code), "stop.sh asks the server to stop, through the vault's own address");
+    t.ok(!/\b(kill|pkill|killall)\b/.test(code), "and never kills anything: only a vault server can answer that request");
+  }
+  if (command) t.ok(/exec sh \.\/start\.sh "\$@"/.test(command.toString("latin1")), "the .command a Mac double-clicks runs start.sh");
+}
+
+/** A port nothing is listening on. */
+function freePort() {
+  return new Promise((resolve) => {
+    const s = require("net").createServer();
+    s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); });
+  });
+}
+
+/** The vault server's status on a port, or null when nothing answers. */
+function vaultStatus(port) {
+  return new Promise((resolve) => {
+    const req = require("http").get({ host: "127.0.0.1", port, path: "/__vault/status", timeout: 2000 }, (res) => {
+      let body = "";
+      res.on("data", (c) => (body += c));
+      res.on("end", () => { try { resolve(JSON.parse(body)); } catch (e) { resolve(null); } });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+  });
+}
+
+async function unixLaunchers() {
+  console.log("\nvault.local is read by start.sh and stop.sh as the Windows launchers read it (run for real on a Mac or Linux)");
+  const start = read("start.sh"), stop = read("stop.sh");
+  if (process.platform === "win32" || !start || !stop) {
+    t.skip("running start.sh and stop.sh", process.platform === "win32" ? "on Windows" : "not in this folder");
+    return;
+  }
+  const os = require("os");
+  const { spawn, spawnSync } = require("child_process");
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  let dir = fs.mkdtempSync(path.join(os.tmpdir(), "vault-unix-"));
+  const made = dir;
+  let server = null;
+  try {
+    const block = (buf) => (buf.toString("latin1").match(/# --- vault\.local ---\n([\s\S]*?)# --- end vault\.local ---\n/) || [])[1];
+    const startPart = block(start), stopPart = block(stop);
+    t.ok(!!(startPart && stopPart), "each launcher's vault.local code was found");
+    const probe = (local) => {
+      const f = path.join(dir, "vault.local");
+      if (local == null) { if (fs.existsSync(f)) fs.unlinkSync(f); } else fs.writeFileSync(f, local);
+      const run = (part, print) => {
+        fs.writeFileSync(path.join(dir, "probe.sh"), "DIR=$1\n" + part + print + "\n");
+        return spawnSync("sh", [path.join(dir, "probe.sh"), dir], { encoding: "latin1", timeout: 30000 }).stdout.trim();
+      };
+      return [run(startPart, "printf '%s|%s\\n' \"$VAULT_PORT\" \"$VAULT_LABEL\""), run(stopPart, "printf '%s (Stop)\\n' \"$VAULT_PORT\"")];
+    };
+    if (startPart && stopPart) {
+      // The same cases, with the same answers, as the Windows launchers get above.
+      t.eq(probe(null), ["8790|", "8790 (Stop)"], "with no vault.local: port 8790 and no label");
+      t.eq(probe("port=8791\r\nlabel=test\r\n"), ["8791|test", "8791 (Stop)"], "with one (saved on Windows, CRLF and all): its port and label");
+      t.eq(probe("label=only\n"), ["8790|only", "8790 (Stop)"], "a vault.local without a port keeps " + DEFAULT_PORT);
+      t.eq(probe("port = 8791\r\nlabel = test\r\n"), ["8791|test", "8791 (Stop)"], "spaces around the = are allowed");
+      t.eq(probe("  port=8791 \r\n"), ["8791|", "8791 (Stop)"], "and spaces before or after a line");
+      t.eq(probe("port=8791\r\nlabel=old (backup) & more\r\n"), ["8791|old (backup) & more", "8791 (Stop)"], "a label with brackets or an & in it is only a label");
+      t.eq(probe("port=abc\r\n"), ["8790|", "8790 (Stop)"], "a port that isn't a number means " + DEFAULT_PORT);
+      t.eq(probe("port=8791; echo hacked\n"), ["8790|", "8790 (Stop)"], "and so does one with a command after it: nothing in vault.local is ever run");
+      t.eq(probe("port=8791"), ["8791|", "8791 (Stop)"], "a last line with no line break still counts");
+    }
+
+    console.log("\nstart.sh starts the vault and stop.sh stops it, from a folder with ( ) & ! [ ] in its name (run for real on a Mac or Linux)");
+    // The name a second download gets, and the characters that tripped the Windows launchers.
+    const top = dir;
+    dir = path.join(top, "RP-Card-Vault (1) & [copy] !");
+    fs.mkdirSync(dir);
+    for (const name of ["start.sh", "stop.sh", "Start RP Card Vault.command", "serve.js", "RP_Card_Vault.html"]) {
+      fs.copyFileSync(path.join(ROOT, name), path.join(dir, name));
+    }
+    const port = await freePort();
+    fs.writeFileSync(path.join(dir, "vault.local"), "port = " + port + "\r\nlabel = test\r\n");
+    // Started from another folder, as a double-click does, through the .command.
+    let out = "";
+    server = spawn("sh", [path.join(dir, "Start RP Card Vault.command"), "--no-open"], { cwd: os.tmpdir(), stdio: ["ignore", "pipe", "pipe"] });
+    server.stdout.on("data", (c) => (out += c));
+    server.stderr.on("data", (c) => (out += c));
+    const exited = new Promise((resolve) => server.on("exit", (code) => resolve(code)));
+    let status = null;
+    for (let i = 0; i < 100 && !status; i++) { await wait(100); status = await vaultStatus(port); }
+    t.ok(!!status, "the server answers on vault.local's port", out.slice(-300));
+    t.eq(status && status.version, require("../serve.js").VAULT_VERSION, "and it's the serve.js next to the launcher");
+    t.ok(out.indexOf(dir.replace(/^\/private/, "")) >= 0 || out.indexOf(fs.realpathSync(dir)) >= 0, "serving the launcher's own folder, wherever it was started from", out.slice(0, 300));
+
+    const stopped = spawnSync("sh", [path.join(dir, "stop.sh")], { cwd: os.tmpdir(), encoding: "utf8", timeout: 30000 });
+    t.ok(/Stopped\./.test(stopped.stdout), "stop.sh says it stopped it", stopped.stdout + stopped.stderr);
+    const code = await Promise.race([exited, wait(10000).then(() => "still running")]);
+    t.eq(code, 0, "the server's window finishes");
+    t.ok(/Server stopped\./.test(out), "and says the server stopped");
+    t.ok(!(await vaultStatus(port)), "nothing answers on the port any more");
+    server = null;
+    const again = spawnSync("sh", [path.join(dir, "stop.sh")], { cwd: os.tmpdir(), encoding: "utf8", timeout: 30000 });
+    t.ok(new RegExp("Nothing was listening on " + port).test(again.stdout), "stop.sh with nothing running says so", again.stdout + again.stderr);
+
+    // A port no computer has: the server says so in a sentence, and the launcher's window ends.
+    fs.writeFileSync(path.join(dir, "vault.local"), "port=99999\n");
+    const bad = spawnSync("sh", [path.join(dir, "start.sh"), "--no-open"], { cwd: os.tmpdir(), encoding: "utf8", timeout: 30000 });
+    const said = (bad.stdout || "") + (bad.stderr || "");
+    t.ok(/Port 99999 can't be used/.test(said) && /vault\.local/.test(said) && !/RangeError|\n\s+at /.test(said), "a port that can't be used is said in a sentence, not a page of error text", said.slice(0, 300));
+  } catch (e) {
+    t.ok(false, "running start.sh and stop.sh", String(e && e.message || e).slice(0, 200));
+  } finally {
+    if (server) { try { server.kill(); } catch (e) { /* already gone */ } }
+    fs.rmSync(made, { recursive: true, force: true });
+  }
+}
+
+unixLaunchers().then(() => t.done());

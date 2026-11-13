@@ -25,7 +25,7 @@ const { mod: V } = loadPureRegion([
   "agentHandoffPath", "agentOpenRoots", "agentRegexRisk", "makePrivateTest", "agentUserContent", "agentFileBlock", "AGENT_IMAGE_CHARS",
   "agentToolDocs", "agentDocUnedited", "ensureAgentToolDocs", "aiHash", "wsTreeRows", "wsAncestors", "agentPinnedNote", "agentFieldPrints", "unflagIsStale", "mergeProposal", "proposalAcceptPatch",
   "agentChangeSize", "agentChangedChars", "AGENT_MINOR", "agentForgetReads", "agentPinnedLine", "agentRegenPlan", "agentForkSession", "agentTurnStart", "agentSameProposal", "assignShortIds", "agentIsPinned", "agentPinnedRecord", "agentSeenFor", "agentCardLine", "normalizeLorebook", "cleanLorebook", "agentBulkTagChanges", "proposalOf", "proposalCount", "AGENT_TOOL_NOTES",
-  "agentMacroLoss", "agentParseDice", "agentRandomIndexes", "makeTrashTest", "agentMatchCards", "AGENT_RULES_SMALL", "AGENT_SMALL_TOOLS", "agentFixedChars", "agentBudgetChars", "makePrivateTest",
+  "agentMacroLoss", "agentParseDice", "agentRandomIndexes", "makeTrashTest", "agentMatchCards", "agentCardIssues", "AGENT_RULES_SMALL", "AGENT_SMALL_TOOLS", "agentFixedChars", "agentBudgetChars", "makePrivateTest",
 ]);
 
 /* ── fakes ─────────────────────────────────────────────────────────────── */
@@ -99,6 +99,85 @@ function fakeVault(edits, extra) {
     knownTags: () => ["victorian", "steampunk"],
     scanBodies: async (fn) => { for (const id of Object.keys(BODIES)) fn(id, BODIES[id]); },
   };
+}
+
+/* The agent can ask for what the vault already knows about its cards, rather
+   than read them one by one: what its checks found, which were changed
+   outside it, where each stands with the front end, and which read alike. */
+async function vaultKnowledgeTests() {
+  console.log("\nwhat the vault already knows, for the agent");
+  const rec = (sid, name, extra) => Object.assign({ id: "r:" + name + ".png", sid, fp: "fp-" + sid, ok: true, name, creator: "kay", tags: [], vaultTags: [], flags: [], dir: "Cards", file: name + ".png", tokensCore: 100, warnings: [], search: name.toLowerCase() }, extra || {});
+  const ada = rec("c20", "Ada", { warnings: ["No tags", "Lorebook entry with no keys"], sentState: "sent" });
+  const bram = rec("c21", "Bram", { warnings: ["Empty description"], changedOutside: { at: 1700000000000, fields: ["Description", "Tags"] }, sentState: "changed" });
+  const cora = rec("c22", "Cora", { sentState: "none" });
+  const dud = rec("c23", "Dud", { ok: false, err: "No embedded card data", sentState: "gone" });
+  const home = rec("c24", "Eve", { sentState: "home" });
+  const secret = rec("c25", "Secret", { aiPrivate: true, warnings: ["No tags"], changedOutside: { at: 1, fields: ["Description"] }, sentState: "sent" });
+  const all = [ada, bram, cora, dud, home, secret];
+  const names = (a) => V.agentMatchCards(all, a).map((r) => r.name);
+
+  t.eq(names({ issue: "any" }), ["Ada", "Bram", "Dud"], "issue: any finds the cards the vault's checks found something on, and never a private one");
+  t.eq([names({ issue: "no tags" }), names({ issue: "LOREBOOK" }), names({ issue: "empty description" }), names({ issue: "unreadable" })], [["Ada"], ["Ada"], ["Bram"], ["Dud"]],
+    "words from a check narrow it, in any case; unreadable finds files that aren't cards");
+  t.eq(names({ issue: "nothing like this" }), [], "words no check uses find nothing");
+  t.eq(V.agentCardIssues(dud, "any"), ["Unreadable: No embedded card data"], "an unreadable file says why");
+  t.eq(names({ flag: "changedOutside" }), ["Bram"], "flag: changedOutside finds cards whose file was changed outside the vault");
+  t.eq([names({ flag: "sent" }), names({ flag: "notSent" }), names({ flag: "changedSinceSent" })], [["Ada", "Eve"], ["Cora", "Dud"], ["Bram"]],
+    "sent, notSent and changedSinceSent go by where the card stands with the front end");
+  t.eq(names({ flag: "sent", issue: "any" }), ["Ada"], "the filters combine");
+  t.eq(V.agentMatchCards([rec("c30", "Old")], { flag: "sent" }).length, 0, "with no destination set up, no card counts as sent or not sent");
+
+  const k = ctxFor();
+  k.ctx.vault = Object.assign(fakeVault(), { records: () => all, dupes: () => ({ exact: [], content: [], versions: [] }) });
+  let r = await run(k, "list_cards", { issue: "any" });
+  t.ok(r.ok && /Ada[^\n]*found: No tags; Lorebook entry with no keys/.test(r.content) && /Dud[^\n]*found: Unreadable/.test(r.content) && !/Secret|Cora/.test(r.content),
+    "list_cards with issue says what was found on each card, so none needs reading", r.content);
+  r = await run(k, "list_cards", { issue: "lorebook" });
+  t.ok(/found: Lorebook entry with no keys$/m.test(r.content) && !/No tags/.test(r.content), "and only the findings that were asked about", r.content);
+
+  r = await run(k, "inspect_card", { id: "c21" });
+  t.ok(/The vault's checks: Empty description/.test(r.content) && /Changed outside the vault: yes[^\n]*Description, Tags/.test(r.content) && /Front end: changed since it was sent/.test(r.content),
+    "inspect_card says what the checks found, that the file changed outside the vault, and where the card stands with the front end", r.content);
+  r = await run(k, "inspect_card", { id: "c22" });
+  t.ok(/The vault's checks: nothing found/.test(r.content) && !/Changed outside/.test(r.content) && /Front end: not sent/.test(r.content) && !/Lorebook checks/.test(r.content),
+    "a card with nothing on it says so, and the lorebook checks aren't run unless asked for", r.content);
+  t.eq(k.gates.length, 0, "none of that reads a card's text");
+
+  // The lorebook checks read the card, so they're asked for and count as a read.
+  const book = rec("c40", "Ada");
+  k.ctx.vault = Object.assign(fakeVault(), { records: () => [book], dupes: () => ({ exact: [], content: [], versions: [] }),
+    body: async () => ({ name: "Ada", description: "Ada keeps a pot of tea by the engine.", first_mes: "You're late.", lorebook: { tokenBudget: null, entries: [
+      { keys: ["engine"], content: "The engine hums.", enabled: true }, { keys: [], content: "Never reachable.", enabled: true }, { keys: ["gull"], content: "Gulls nest above.", enabled: true }] } }) });
+  r = await run(k, "inspect_card", { id: book.sid, checks: true });
+  t.ok(r.ok && /Lorebook checks: 1 to fix, 1 to know/.test(r.content) && /To fix: This entry has no keys[^\n]*\(entry 2\)/.test(r.content) && /To know: None of this entry's keys[^\n]*\(entry 3\)/.test(r.content),
+    "inspect_card with checks runs the lorebook checks and names the entries", r.content);
+  t.eq(k.gates, [["reads", 1]], "and counts as one read");
+  k.ctx.vault.body = async () => ({ name: "Ada", description: "x", first_mes: "y" });
+  r = await run(k, "inspect_card", { id: book.sid, checks: true });
+  t.ok(/Lorebook checks: this card has no lorebook/.test(r.content), "a card without a lorebook says so");
+
+  // Cards that read alike: asked for by name, never part of "any", and never naming a private card.
+  const sim = { groups: [{ score: 0.71, items: [ada, bram] }, { score: 0.64, items: [cora, secret] }, { score: 0.9, items: [secret, Object.assign({}, secret, { sid: "c26" })] }] };
+  let asked = 0;
+  k.gates.length = 0;
+  k.ctx.vault = Object.assign(fakeVault(), { records: () => all, dupes: () => ({ exact: [], content: [], versions: [] }), similar: async () => { asked++; return sim; } });
+  r = await run(k, "list_duplicates", { kind: "similar" });
+  t.ok(r.ok && /^1 group of cards that read alike/.test(r.content) && /about 71% of their wording in common/.test(r.content) && /c20 · Ada/.test(r.content) && /c21 · Bram/.test(r.content),
+    "list_duplicates kind similar lists the cards that read alike, with how alike", r.content);
+  t.ok(!/Secret|c25|c26|Cora/.test(r.content), "a group that would name a private card, or be left with one card, isn't shown", r.content);
+  t.ok(/aren't copies/.test(r.content), "and says they aren't copies");
+  t.eq([asked, k.gates], [1, [["reads", 1]]], "it's worked out when asked for, as one read");
+  await run(k, "list_duplicates", {});
+  t.eq(asked, 1, "kind any doesn't work it out");
+  k.ctx.vault.similar = async () => ({ groups: [] });
+  r = await run(k, "list_duplicates", { kind: "similar" });
+  t.ok(/No two cards read alike/.test(r.content), "with none, it says so");
+  r = await run(k, "list_duplicates", { kind: "nonsense" });
+  t.ok(!r.ok && /similar/.test(r.content), "an unknown kind is refused, naming the kinds there are");
+
+  const def = (n) => V.AGENT_TOOLS.find((x) => x.name === n);
+  t.ok(/changedOutside/.test(def("list_cards").parameters.properties.flag.description) && def("list_cards").parameters.properties.issue && def("list_duplicates").parameters.properties.kind.enum.indexOf("similar") >= 0 && def("inspect_card").parameters.properties.checks,
+    "the tools' descriptions tell the model about all of it");
 }
 
 /* The agent sees the duplicate finder's groups: list_duplicates, list_cards'
@@ -903,6 +982,7 @@ async function main() {
   await smallModelTests();
   await privateTests();
   await dupeTests();
+  await vaultKnowledgeTests();
   await toolArgTests();
 
   t.done();

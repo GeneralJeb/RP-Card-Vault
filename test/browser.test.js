@@ -4,7 +4,7 @@
  *   node test/browser.test.js
  *
  * The other suites test the parts; this one drives the page itself, the way
- * you would, in a headless Microsoft Edge driven by Playwright:
+ * you would, in a headless browser driven by Playwright:
  *
  *   start → add a folder → scan → search → edit and Save to card → tag →
  *   move to trash → send to a folder destination → Settings and AI panels →
@@ -15,10 +15,26 @@
  * real card files built by the page's own code. Everything runs against a
  * scratch server on a free port with a scratch workspace.
  *
- * Edge rather than Playwright's own Chromium: Edge comes with Windows (and
- * with GitHub's Windows machines) and it's a browser people really use.
- * Without Edge the suite is skipped on your computer, but fails on GitHub
- * (CI is set).
+ * Which browser: the vault runs in any Chromium browser, and so does this.
+ *
+ *   node test/browser.test.js           the first installed of Edge, Chrome,
+ *                                       Brave, then Playwright's own Chromium
+ *   node test/browser.test.js brave     that one (edge, chrome, brave, chromium,
+ *                                       or the path to a browser's program);
+ *                                       it's a failure if it isn't installed
+ *   node test/browser.test.js all       each of the four that is installed,
+ *                                       one after the other
+ *
+ * VAULT_TEST_BROWSER does the same as the word after the file name. Real,
+ * installed browsers come before Playwright's own because they are what
+ * people use; Playwright's needs "npx playwright install chromium" once.
+ * With no browser at all the suite is skipped on your computer, but fails on
+ * GitHub (CI is set).
+ *
+ * Firefox and Safari aren't run: they have no File System Access API, so the
+ * vault can't file cards in them. What the page says to someone who opens it
+ * in one of those, or in a Brave with that API still switched off, is checked
+ * here all the same, in a tab made to look like one.
  */
 
 const fs = require("fs");
@@ -30,6 +46,10 @@ const { loadPureRegion } = require("./pure-region");
 const t = require("./harness");
 
 const ROOT = path.join(__dirname, "..");
+// The key held to add a card to the selection, and to reach the browser's own
+// shortcuts: Cmd on a Mac, Ctrl everywhere else. A Control-click on a Mac is a
+// right-click, so it opens the card's menu instead of selecting it.
+const SELECT_KEY = "ControlOrMeta";
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk", "cardPictures"]);
@@ -38,6 +58,73 @@ const cardPng = (o, rgb, more) => {
   Object.assign(v3.data, more || {});
   return Buffer.from(V.writeCardIntoPng(V.solidPng(40, 60, rgb), v3, V.buildV2Payload(v3)));
 };
+
+/* ── which browser ── */
+
+const BROWSERS = {
+  edge: { name: "Microsoft Edge", channel: "msedge" },
+  chrome: { name: "Google Chrome", channel: "chrome" },
+  brave: { name: "Brave", paths: () => {
+    const env = process.env;
+    if (process.platform === "win32") {
+      return [env.ProgramFiles, env["ProgramFiles(x86)"], env.LOCALAPPDATA].filter(Boolean)
+        .map((d) => path.join(d, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"));
+    }
+    if (process.platform === "darwin") return ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"];
+    return ["/usr/bin/brave-browser", "/usr/bin/brave", "/opt/brave.com/brave/brave-browser", "/snap/bin/brave"];
+  } },
+  chromium: { name: "Chromium (Playwright's own)" },
+};
+const BROWSER_ORDER = ["edge", "chrome", "brave", "chromium"];
+
+/** The browser asked for: the word after the file name, or VAULT_TEST_BROWSER. "" for the first installed. */
+function askedBrowser() {
+  const arg = process.argv.slice(2).filter((a) => !/^--/.test(a))[0];
+  return String(arg || process.env.VAULT_TEST_BROWSER || "").trim();
+}
+
+/** Launch one browser: { browser, name }, or { missing: why } when it isn't installed. Other failures are thrown. */
+async function launchOne(chromium, key) {
+  const known = BROWSERS[key.toLowerCase()];
+  const opts = {};
+  let name = known ? known.name : path.basename(key);
+  if (!known) {
+    if (!fs.existsSync(key)) return { missing: "there's no browser called " + JSON.stringify(key) + " (edge, chrome, brave, chromium, or a path), and no program at that path" };
+    opts.executablePath = key;
+  } else if (known.channel) {
+    opts.channel = known.channel;
+  } else if (known.paths) {
+    const found = known.paths().filter((p) => fs.existsSync(p))[0];
+    if (!found) return { missing: name + " isn't installed" };
+    opts.executablePath = found;
+  }
+  try { return { browser: await chromium.launch(opts), name }; }
+  catch (e) {
+    if (/is not found|Executable doesn't exist|playwright install/i.test(e.message)) {
+      return { missing: name + " isn't installed" + (key === "chromium" ? " (npx playwright install chromium)" : "") };
+    }
+    throw e;
+  }
+}
+
+/** Run this file once for each browser that's installed. */
+function runInEach() {
+  const { spawnSync } = require("child_process");
+  const results = [];
+  for (const key of BROWSER_ORDER) {
+    console.log("\n" + "#".repeat(64) + "\n#  " + BROWSERS[key].name + "\n" + "#".repeat(64));
+    const r = spawnSync(process.execPath, [__filename, key, "--if-installed"], { stdio: "inherit", env: Object.assign({}, process.env, { VAULT_TEST_BROWSER: "" }) });
+    results.push({ key, code: r.status === null ? 1 : r.status });
+  }
+  console.log("\n" + "#".repeat(64));
+  // 3 is "not installed", from a run started with --if-installed.
+  for (const r of results) console.log((r.code === 0 ? "  PASS  " : r.code === 3 ? "  none  " : "  FAIL  ") + BROWSERS[r.key].name + (r.code === 3 ? " (not installed)" : ""));
+  const ran = results.filter((r) => r.code !== 3);
+  if (!ran.length) return skipAll("no browser is installed (Edge, Chrome, Brave, or npx playwright install chromium)");
+  console.log("");
+  for (const r of ran) t.ok(r.code === 0, "the whole test passes in " + BROWSERS[r.key].name);
+  t.done();
+}
 
 function freePort() {
   return new Promise((resolve) => {
@@ -96,16 +183,31 @@ async function readFile(page, dir, rel) {
 }
 
 async function main() {
+  if (askedBrowser().toLowerCase() === "all") return runInEach();
   let chromium;
   try { ({ chromium } = require("playwright")); }
   catch (e) { return skipAll("the playwright package isn't installed (npm install)"); }
-  let browser;
-  try { browser = await chromium.launch({ channel: "msedge" }); }
-  catch (e) {
-    if (/is not found|Executable doesn't exist|playwright install/i.test(e.message)) return skipAll("Microsoft Edge isn't installed");
-    throw e;
+  const asked = askedBrowser();
+  let browser = null, browserName = "";
+  if (asked) {
+    // A browser that was asked for by name has to be there: testing nothing must never pass.
+    const got = await launchOne(chromium, asked);
+    if (got.missing) {
+      if (process.argv.indexOf("--if-installed") >= 0) { console.log("  – " + got.missing); t.done(3); return; }
+      t.ok(false, "the browser test can't run: " + got.missing);
+      return t.done();
+    }
+    browser = got.browser; browserName = got.name;
+  } else {
+    const missing = [];
+    for (const key of BROWSER_ORDER) {
+      const got = await launchOne(chromium, key);
+      if (got.browser) { browser = got.browser; browserName = got.name; break; }
+      missing.push(got.missing);
+    }
+    if (!browser) return skipAll("no browser to run it in: " + missing.join("; "));
   }
-  console.log("Microsoft Edge " + browser.version());
+  console.log(browserName + " " + browser.version());
   // Chromium 153 (and Edge 153) close the whole browser when a page that has
   // saved a folder handle opens its saved data again: a regression, fixed in
   // 154. On 153 the vault shows a notice before opening anything. On a real
@@ -181,7 +283,7 @@ async function main() {
       if (reloadCrashes) {
         // A real 153 shows the browser-bug notice first. This profile is new and
         // has no saved folders yet, so going ahead is safe.
-        await page.getByText(/^Update (Edge|Chrome) before opening the vault$/).waitFor();
+        await page.getByText(/^Update (Edge|Chrome|Brave|Opera|this browser) before opening the vault$/).waitFor();
         t.ok(true, "on a 153 browser the notice comes first");
         await page.getByRole("button", { name: "Open the vault anyway" }).click();
       }
@@ -308,8 +410,8 @@ async function main() {
       }));
       const before = await favourites();
       await tile("Bram Lighthouse").click();
-      await page.keyboard.press("Control+f");
-      await page.keyboard.press("Control+s");
+      await page.keyboard.press(SELECT_KEY + "+f");
+      await page.keyboard.press(SELECT_KEY + "+s");
       await page.waitForTimeout(500);
       t.eq(await favourites(), before, "Ctrl+F doesn't favourite the card you're looking at");
       t.eq(await page.getByText("Normalize tag case and separators").count(), 0, "and Ctrl+S doesn't start a send (which opens Settings with no destination)");
@@ -873,7 +975,7 @@ async function main() {
       await page.getByText("sea → victorian").waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
       await tile("Ada Clockmaker").click();
-      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await tile("Bram Lighthouse").click({ modifiers: [SELECT_KEY] });
       await page.getByText("2 selected").waitFor();
       await page.getByRole("button", { name: "Tag…", exact: true }).click();
       const remove = page.getByPlaceholder("add tag, Enter to commit").nth(1);
@@ -922,7 +1024,7 @@ async function main() {
       await page.getByText("Reference", { exact: true }).last().click();
       // Gil (Reference, so it stays) is picked first: the trash isn't looked for in its folder.
       await tile("Gil Reader").click();
-      await tile("Hal Tinker").click({ modifiers: ["Control"] });
+      await tile("Hal Tinker").click({ modifiers: [SELECT_KEY] });
       await page.getByTitle("Relocate to your trash folder").click();
       await toast(/^1 sent to Loose\/_vault trash\. 1 card\(s\) live in a read-only folder/);
       t.ok(true, "the notice says the one went to the trash, and the other can't be moved");
@@ -1021,7 +1123,7 @@ async function main() {
 
       // A card that leaves the vault (renamed on disk, then rescanned) leaves the selection too.
       await tile("Ada Clockmaker").click();
-      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await tile("Bram Lighthouse").click({ modifiers: [SELECT_KEY] });
       await page.getByText("2 selected").waitFor();
       await writeFiles(page, "Cards", [["Bram Renamed.png", Buffer.from(await readFile(page, "Cards", "Bram Lighthouse.png"))]]);
       await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Bram Lighthouse.png"));
@@ -1223,8 +1325,12 @@ async function main() {
       await page.getByRole("button", { name: "+ Add folder" }).click();
       await page.getByText(/Added Parent/).first().waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
-      // Let both scans run to their end.
+      // Let both scans run to their end: six seconds on a quick computer, and on a
+      // slow one for as long as the outer folder's cards take to reach the index
+      // (a scan writes its records when it finishes), then a moment more.
       await page.waitForTimeout(6000);
+      for (let i = 0; i < 120 && (await cardRecords()).filter((c) => /^Extra \d+\.png$/.test(c.file)).length < 300; i++) await page.waitForTimeout(500);
+      await page.waitForTimeout(1000);
       t.eq(await orphanCount(), 0, "no records are left without a folder (no \"?\" duplicates)");
       const added = (await rootKeys()).filter((k) => !before.has(k));
       t.eq(added.length, 1, "one folder was added in the end, Parent: the inner one's scan didn't write it back", added);
@@ -1447,8 +1553,8 @@ async function main() {
         // Bulk: one card saved while the model answers for it, one saved before its turn.
         await p.getByRole("button", { name: "Rescan", exact: true }).waitFor();
         await tile2("Ada").click();
-        await tile2("Cora").click({ modifiers: ["Control"] });
-        await tile2("Bram").click({ modifiers: ["Control"] });
+        await tile2("Cora").click({ modifiers: [SELECT_KEY] });
+        await tile2("Bram").click({ modifiers: [SELECT_KEY] });
         hold = new Promise((r) => { release = r; });
         const sentBefore = calls.length;
         await p.getByRole("button", { name: "✦ Suggest tags", exact: true }).click();
@@ -1515,17 +1621,17 @@ async function main() {
     // real 153, opening it is what closes the browser.
     const checkNotice = async (p) => {
       await p.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
-      await p.getByText(/^Update (Edge|Chrome) before opening the vault$/).waitFor();
+      await p.getByText(/^Update (Edge|Chrome|Brave|Opera|this browser) before opening the vault$/).waitFor();
       t.ok(true, "a notice explains the browser bug instead of opening the vault");
-      t.ok(await p.getByText(/^(edge|chrome):\/\/settings\/help$/).isVisible(), "and says how to update the browser");
+      t.ok(await p.getByText(/^(edge|chrome|opera):\/\/(settings\/help|update)$/).isVisible(), "and says how to update the browser");
       t.eq(await p.locator(".cardTile").count(), 0, "the vault itself isn't opened");
     };
 
-    if (reloadCrashes) await step("after a reload on a real Edge 153, the notice comes up instead of a crash", async () => {
+    if (reloadCrashes) await step("after a reload on a real 153 browser, the notice comes up instead of a crash", async () => {
       await page.reload();
       await checkNotice(page);
       await page.waitForTimeout(3000);
-      t.ok(browser.isConnected(), "and Edge is still running a few seconds later");
+      t.ok(browser.isConnected(), "and " + browserName + " is still running a few seconds later");
     });
     else await step("after a reload everything is still there", async () => {
       await page.reload();
@@ -1558,6 +1664,53 @@ async function main() {
       await p.locator(".cardTile").filter({ hasText: "Ada Clockmaker" }).first().waitFor();
       t.ok(await p.evaluate(() => window.__idbOpens) > 0, "Open the vault anyway opens it, with everything there");
       await p.close();
+    });
+
+    // A tab of its own, in a profile of its own (no folders saved there), made to
+    // look like the browser in question: no folder picker, and its own marks.
+    const firstRunAs = async (label, setUp, arg) => {
+      const fresh = await browser.newContext();
+      const p = await fresh.newPage();
+      p.on("pageerror", (e) => problems.push("page error (" + label + " tab): " + e.message));
+      p.on("console", (m) => { if (m.type() === "error" && !/code generator has deoptimised/.test(m.text())) problems.push("console (" + label + " tab): " + m.text()); });
+      await p.addInitScript(setUp, arg);
+      await p.goto(url);
+      await p.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
+      // A real 153 shows its notice first; this profile has no saved folders, so going on is safe.
+      const on = p.getByRole("button", { name: "Open the vault anyway" });
+      if (await on.count()) await on.click();
+      return { p, close: () => fresh.close() };
+    };
+
+    await step("Brave with folder access still switched off is told how to switch it on", async () => {
+      const { p, close } = await firstRunAs("Brave", () => {
+        // What Brave does: it takes the File System Access API out, and says it is Brave.
+        Object.defineProperty(window, "showDirectoryPicker", { value: undefined, configurable: true });
+        if (!navigator.brave) Object.defineProperty(Navigator.prototype, "brave", { get: () => ({ isBrave: () => Promise.resolve(true) }), configurable: true });
+      });
+      await p.getByText("Brave blocks folder access by default").waitFor();
+      t.ok(true, "it says Brave blocks folder access, rather than showing an empty vault");
+      t.ok(await p.getByText("brave://flags", { exact: true }).isVisible() && /File System Access/.test(await p.locator("body").innerText()), "and where to turn it on: brave://flags, the File System Access entry");
+      t.ok(await p.getByRole("button", { name: "Import a folder (read-only)" }).isVisible(), "and offers to read a folder without it meanwhile");
+      t.eq(await p.getByText("Add a folder").count(), 0, "it doesn't offer a folder picker that isn't there");
+      await close();
+    });
+
+    await step("a browser with no folder access at all (Firefox, Safari) is told what it can and can't do", async () => {
+      const { p, close } = await firstRunAs("Firefox", (ua) => {
+        Object.defineProperty(window, "showDirectoryPicker", { value: undefined, configurable: true });
+        Object.defineProperty(Navigator.prototype, "userAgent", { get: () => ua });
+        try { delete window.chrome; } catch (e) { /* not there */ }
+        // When this test runs in Brave itself, the tab still carries Brave's own
+        // mark, and the page would rightly say "Brave". A Firefox has none. Set on
+        // the navigator object, which wins whether or not Brave's can be removed.
+        Object.defineProperty(navigator, "brave", { get: () => undefined, configurable: true });
+      }, "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0");
+      await p.getByText("Firefox can't file cards automatically").waitFor();
+      t.ok(true, "it names the browser and says it can't file cards");
+      t.ok(/Chrome or Edge/.test(await p.locator("body").innerText()) && await p.getByRole("button", { name: "Import a folder (read-only)" }).isVisible(),
+        "points to a browser that can, and offers to read a folder meanwhile");
+      await close();
     });
 
     console.log("\nthroughout");

@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.6.28";
+const APP_VERSION = "1.8.1";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -538,8 +538,23 @@ function orphanCardIds(cards, roots) {
 
 /** Drop index records (card, text, thumbnail) by id. Never touches files. */
 async function dbDelCardRecords(ids) {
-  for (const id of ids) {
-    await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
+  if (!ids || !ids.length) return;
+  try {
+    // All in one transaction: a folder of thousands goes in a moment, not a card at a time.
+    const db = await dbOpen();
+    const tx = db.transaction([STORE_CARDS, STORE_BODIES, STORE_THUMBS], "readwrite");
+    const cards = tx.objectStore(STORE_CARDS), bodies = tx.objectStore(STORE_BODIES), thumbs = tx.objectStore(STORE_THUMBS);
+    for (const id of ids) {
+      cards.delete(id); bodies.delete(id); thumbs.delete(id);
+      bodies.delete(prevBodyKey(id));   // its text before an outside change, if kept
+    }
+    await txDone(tx);
+  } catch (e) {
+    // Whatever stopped the batch, each record still gets its own try.
+    for (const id of ids) {
+      await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
+      await dbDel(STORE_BODIES, prevBodyKey(id));
+    }
   }
 }
 
@@ -652,10 +667,32 @@ const BROWSER_LABEL = (function () {
   return "this browser";
 })();
 
+/* The system the browser runs on: "windows", "mac" or "linux". The vault
+   comes with a launcher for each, and a few words (the launcher's name, where
+   a dragged card lands) depend on it. Anything unrecognised counts as Windows. */
+function osKindOf(ua) {
+  const s = String(ua || "");
+  if (/Macintosh|Mac OS X/.test(s)) return "mac";
+  if (/Linux|X11|CrOS/.test(s)) return "linux";
+  return "windows";
+}
+const OS_KIND = osKindOf(typeof navigator !== "undefined" ? navigator.userAgent : "");
+
+/** The launcher to run on that system: the file a message tells you to start. */
+function startScriptFor(os) {
+  return os === "mac" ? "Start RP Card Vault.command" : os === "linux" ? "start.sh" : "Start RP Card Vault.bat";
+}
+const START_SCRIPT = startScriptFor(OS_KIND);
+/** The key held to add to a selection or reach a shortcut, as that system's keyboard names it. */
+function modKeyFor(os) { return os === "mac" ? "\u2318" : "Ctrl"; }
+const MOD_KEY = modKeyFor(OS_KIND);
+/** Where a card dragged out of the window lands, as that system calls it. */
+const FILE_MANAGER = OS_KIND === "mac" ? "Finder" : OS_KIND === "linux" ? "your file manager" : "Explorer";
+
 /* ── themes ──────────────────────────────────────────────────────────────
    Every colour on the page is one of these variables. A theme sets them all;
    an accent colour, if you pick one, replaces the main accent (and its dim and
-   glow). "auto" follows Windows' light or dark setting. */
+   glow). "auto" follows the system's light or dark setting. */
 const THEME_VARS = ["--bg-primary", "--bg-secondary", "--bg-tertiary", "--bg-elevated", "--bg-input",
   "--border-subtle", "--border-accent", "--text-primary", "--text-secondary", "--text-muted",
   "--accent-warm", "--accent-warm-dim", "--accent-warm-glow", "--accent-red", "--accent-green",
@@ -738,7 +775,7 @@ function browserUpdatePage(label) {
 // No port here on purpose. Each copy can have its own (vault.local), and this
 // string is shown from a file:// page where there's no origin to read: naming
 // one port could send the reader to the wrong vault.
-const SERVE_HINT = "Run \"Start RP Card Vault.bat\" from the folder this file is in — " +
+const SERVE_HINT = "Run \"" + START_SCRIPT + "\" from the folder this file is in — " +
   "or in a terminal there:  node serve.js  — then open the address it prints.";
 
 /* The address this copy is actually being served from, and the same port under
@@ -771,6 +808,46 @@ async function probeStorage() {
   }
 }
 
+/**
+ * Whether the vault's saved data can really be read. That the database opens
+ * isn't proof: a store can still fail to read (a damaged file on disk, say),
+ * and the vault's own readers answer "nothing there" when a read fails. The
+ * vault would then open looking empty, and the first setting you changed
+ * would be saved over the real ones. So the stores startup relies on are
+ * read first, and if that fails nothing is loaded and nothing is written.
+ * Saved folders are only counted, never read back (see dbHas).
+ */
+async function probeReads() {
+  try {
+    const db = await dbOpen();
+    const stores = [STORE_KV, STORE_ROOTS, STORE_CARDS, STORE_EDITS];
+    const tx = db.transaction(stores, "readonly");
+    for (const name of stores) tx.objectStore(name).count();
+    tx.objectStore(STORE_KV).get(SETTINGS_KEY);
+    await txDone(tx);
+    return { ok: true, msg: "" };
+  } catch (e) {
+    return { ok: false, msg: (e && e.message) || String(e) };
+  }
+}
+
+/**
+ * Ask the browser to keep the vault's data. Left to itself a browser may
+ * clear a site's saved data when the disk runs low, without asking: tags,
+ * notes and edits would go with it. Asking costs nothing and shows nothing.
+ * Returns "kept" (it has agreed), "may-clear" (it wouldn't promise; it tends
+ * to once the vault is installed as an app or used often) or "unknown" (this
+ * browser has no way to ask).
+ */
+async function keepStorage(nav) {
+  const st = nav && nav.storage;
+  if (!st || typeof st.persist !== "function") return "unknown";
+  try {
+    if (typeof st.persisted === "function" && await st.persisted()) return "kept";
+    return (await st.persist()) ? "kept" : "may-clear";
+  } catch (e) { return "unknown"; }
+}
+
 /* --- typed accessors --- */
 
 const SETTINGS_KEY = "settings";
@@ -784,11 +861,12 @@ const DEFAULT_SETTINGS = {
   normalizeTags: true,
   showNsfw: true,
   tileSize: 150,
-  theme: "vault",                // see THEMES; "auto" follows Windows' light or dark setting
+  theme: "vault",                // see THEMES; "auto" follows the system's light or dark setting
   startSort: "name",             // the sort the grid opens with: a SORTS key, or "last" for the last one used
   lastSort: "name",              // kept up to date while startSort is "last"
   accentColor: "",               // "#rrggbb" replaces the theme's main accent; "" keeps it
   customFlags: [],               // flags of your own: see sanitizeCustomFlags
+  savedViews: [],                // the sidebar as you had it, by name: see sanitizeSavedViews
   viewMode: "grid",              // grid | list
   autoRescan: false,
   trashKey: "",                  // "rootId::dir" - where "move to trash" sends things
@@ -867,6 +945,79 @@ function migrateDestinations(settings) {
   if (!s.destinations.some((d) => d.id === s.defaultDestination)) s.defaultDestination = s.destinations[0] ? s.destinations[0].id : "";
   delete s.frontendKey; delete s.frontendMode; delete s.frontendApiUrl; delete s.frontendApiUser;
   return s;
+}
+
+/* ── where a card stands with a front end ────────────────────────────────
+   The vault never asks a front end what it holds. It goes by two things it
+   knows for itself:
+
+   - A folder destination is a folder you've linked, so it is in the index
+     like any other: a card is "there" when a file with the same bytes is in
+     it, and a "different version" is there when one with the same name,
+     description and first message (or the same name and creator) is.
+   - An upload leaves a mark on the card's record: when, and which file it
+     was (its byte signature). The card is "sent" while its file is still one
+     that was sent, and "changed since sent" once it isn't. So a copy of a sent
+     card that was reworked doesn't pass for the one the front end has.
+
+   The mark says what the vault sent, not what the front end did with it since:
+   a card deleted or edited there still reads as sent. */
+const SENT_STATES = {
+  home:    { label: "The front end's own copy", short: "in front end", color: "cyan",  in: true },
+  there:   { label: "In the front end",          short: "in front end", color: "green", in: true },
+  sent:    { label: "Sent",                      short: "sent",         color: "green", in: true },
+  changed: { label: "Changed since it was sent", short: "changed since sent", color: "warm", in: false, changed: true },
+  differs: { label: "A different version is there", short: "different version there", color: "warm", in: false, changed: true },
+  gone:    { label: "Sent before, not there now", short: "no longer there", color: "muted", in: false },
+  none:    { label: "Not sent",                  short: "not sent",     color: "muted", in: false },
+};
+const SENT_SIGS_KEPT = 8;
+
+/** The patch that marks a card's record as sent to a destination: when, and which file. */
+function sentPatch(edit, destId, sig, now) {
+  const all = Object.assign({}, (edit && edit.sent) || {});
+  const was = all[destId] || {};
+  const sigs = [sig].concat((was.sigs || []).filter((x) => x && x !== sig)).filter(Boolean).slice(0, SENT_SIGS_KEPT);
+  all[destId] = { at: now, sigs };
+  return { sent: all };
+}
+
+/** The mark a destination left on a record, or null. */
+function sentMarkOf(edit, destId) {
+  const m = edit && edit.sent && edit.sent[destId];
+  return m && typeof m === "object" ? m : null;
+}
+
+/** What a folder destination holds, from the index: its files' signatures and its cards' fingerprints. */
+function destinationFolderIndex(records, rootId, dir) {
+  const out = { rootId, dir: dir || "", bySig: new Set(), byFp: new Set(), byLfp: new Set() };
+  for (const r of records || []) {
+    if (!recInDir(r, rootId, dir || "")) continue;
+    if (r.sig) out.bySig.add(r.sig);
+    if (r.ok && r.fp) out.byFp.add(r.fp);
+    if (r.ok && r.hasName && r.lfp) out.byLfp.add(r.lfp);
+  }
+  return out;
+}
+
+/**
+ * Where a card stands with one destination: { state, at }, state a key of
+ * SENT_STATES. `folder` is destinationFolderIndex for a folder destination
+ * (null when its folder isn't linked any more).
+ */
+function destinationStatus(rec, edit, dest, folder) {
+  const mark = dest ? sentMarkOf(edit, dest.id) : null;
+  const at = mark ? mark.at || 0 : 0;
+  if (!dest || !rec) return { state: "none", at: 0 };
+  if (dest.type === "folder") {
+    if (!folder) return { state: mark ? "gone" : "none", at };
+    if (recInDir(rec, folder.rootId, folder.dir)) return { state: "home", at };
+    if (rec.sig && folder.bySig.has(rec.sig)) return { state: "there", at };
+    if (rec.ok && ((rec.fp && folder.byFp.has(rec.fp)) || (rec.hasName && rec.lfp && folder.byLfp.has(rec.lfp)))) return { state: "differs", at };
+    return { state: mark ? "gone" : "none", at };
+  }
+  if (!mark) return { state: "none", at: 0 };
+  return { state: rec.sig && (mark.sigs || []).indexOf(rec.sig) >= 0 ? "sent" : "changed", at };
 }
 
 /** The destination Send uses when you don't pick one. */
@@ -2124,10 +2275,12 @@ function cardRecordBase(root, info, size, mtime) {
  * Why a file that's in the folder couldn't be opened. Chrome and Edge list a
  * file whose full path is over Windows' 260-character limit, then can't open
  * it ("not found"); the vault can't see the folders above a linked one, so the
- * name's length is the best clue it can give.
+ * name's length is the best clue it can give. Other systems have no such
+ * limit: there, a listed file that isn't found has gone since the listing.
  */
-function unopenedFileMessage(rel, e) {
+function unopenedFileMessage(rel, e, os) {
   if (e && e.name === "NotFoundError") {
+    if ((os || OS_KIND) !== "windows") return "This file was in the folder's list but couldn't be opened: it was most likely moved or removed just then. Rescan to check.";
     const name = String(rel || "").split("/").pop();
     return "Windows can't open this file. Its full path is most likely over Windows' 260-character limit" +
       (name.length > 100 ? " (the file name alone is " + name.length + " characters)" : "") +
@@ -2920,6 +3073,12 @@ function setFolderRolesNow(roles) { FOLDER_ROLES_NOW = roles || {}; }
 function referenceFolderError(root, dir, folderRoles) {
   if (!root) return "";
   const roles = folderRoles === undefined ? FOLDER_ROLES_NOW : folderRoles;
+  // The vault's own backups of a folder's cards sit in "_vault backups/<that
+  // folder>": they may be written wherever the cards themselves may be. Without
+  // this, a writable folder inside a Reference one could never be saved to.
+  const b = String(dir || "");
+  const of = b === BACKUP_FOLDER_NAME ? "" : b.indexOf(BACKUP_FOLDER_NAME + "/") === 0 ? b.slice(BACKUP_FOLDER_NAME.length + 1) : null;
+  if (of !== null) return referenceFolderError(root, of, roles) ? "\"" + [root.name, b].join("/") + "\" holds the backups of a Reference folder, which is never written to." : "";
   // A folder registered before roles existed has none: it was never meant to be read-only.
   if (effectiveFolderRole(root.id, dir || "", roles, root.role || "library") !== "reference") return "";
   return "\"" + [root.name].concat(dir ? [dir] : []).join("/") + "\" is a Reference folder, which is never written to. Give it another role to change cards there.";
@@ -3190,11 +3349,12 @@ async function moveCardTo(rec, srcRoot, destRoot, destDir) {
   // 2. write the copy (collision-safe; may land under a numbered name)
   const written = await copyIntoRoot(destRoot, destDirs, rec.file, new Blob([bytes]), srcSig);
 
-  // 3. verify the copy really exists and matches, byte signature for byte signature
+  // 3. verify the copy really exists and matches, byte for byte. (A byte
+  //    signature only samples the start and end of a big file, so damage in
+  //    the middle of the copy would pass it.)
   const checkFile = await written.fh.getFile();
   if (checkFile.size !== srcFile.size) throw new Error("Copy verification failed (size mismatch) — source left untouched");
-  const checkSig = await byteSignature(checkFile);
-  if (checkSig !== srcSig) throw new Error("Copy verification failed (content mismatch) — source left untouched");
+  if (!sameBytes(bytes, new Uint8Array(await checkFile.arrayBuffer()))) throw new Error("Copy verification failed (content mismatch) — source left untouched");
 
   // 4. only now remove the original
   await srcDirHandle.removeEntry(rec.file);
@@ -3461,6 +3621,76 @@ function editAfterSave(saved, live, fp) {
   if (cur.lorebook && cur.lorebook !== saved.lorebook) out.lorebook = cur.lorebook;
   const pending = proposalOf(cur);
   if (proposalCount(pending) > 0) out.aiProposal = pending;
+  // Where it was sent, and as which file: the saved file is a new one, so it
+  // reads as changed since then until it's sent again.
+  if (cur.sent && Object.keys(cur.sent).length) out.sent = cur.sent;
+  return out;
+}
+
+/** Whether an edit record holds anything at all: something of yours, or a change waiting to be saved. */
+function editHolds(edit) {
+  if (!edit) return false;
+  return isEdited(edit) || vaultTagsOf(edit).length > 0 || flagsOf(edit).length > 0 || !!String(edit.notes || "").trim() ||
+    !!edit.rating || !!edit.favorite || proposalCount(proposalOf(edit)) > 0 || !!(edit.sent && Object.keys(edit.sent).length);
+}
+
+/**
+ * Two edit records that have become one card's: `mine` (already under that
+ * card's fingerprint) with whatever `other` adds. Nothing of either is lost:
+ * notes are joined, tags and flags pooled, and where both say something
+ * different about the card's text, `mine` stands.
+ */
+function mergeEditRecords(mine, other, fp, now) {
+  const a = mine || {}, b = other || {};
+  const out = Object.assign({}, b, a, { fingerprint: fp, updatedAt: now });
+  out.fields = Object.assign({}, b.fields || {}, a.fields || {});
+  out.tags = Array.isArray(a.tags) ? a.tags : Array.isArray(b.tags) ? b.tags : null;
+  const tags = vaultTagsOf(a).slice();
+  for (const t of vaultTagsOf(b)) if (!tags.some((x) => normTagName(x) === normTagName(t))) tags.push(t);
+  out.vaultTags = tags;
+  out.flags = addFlagEntries(flagsOf(a), flagsOf(b), now);
+  const na = String(a.notes || "").trim(), nb = String(b.notes || "").trim();
+  out.notes = !nb || na === nb || na.indexOf(nb) >= 0 ? (a.notes || "") : !na ? (b.notes || "") : a.notes + "\n\n" + b.notes;
+  out.rating = a.rating || b.rating || 0;
+  out.favorite = !!(a.favorite || b.favorite);
+  if (a.sent || b.sent) out.sent = Object.assign({}, b.sent || {}, a.sent || {});
+  return out;
+}
+
+/**
+ * A card's notes, favourite, rating, flags, vault-only tags and unsaved
+ * changes are kept under a fingerprint of its name, description and first
+ * message, so that copies of one card share them. When a rescan finds a file
+ * it knew with a new fingerprint (the card was edited somewhere else), the
+ * record has to follow the file, or everything on it drops out of sight.
+ *
+ * `pairs` are { from, to }: the old and new fingerprint of each such file.
+ * `editOf(fp)` gives a record; `inUse(fp)` says whether some card still has
+ * that fingerprint (a copy that wasn't edited keeps the record as well).
+ * Returns { puts, dels, moved }: records to store, fingerprints whose record
+ * is no longer anyone's, and the [from, to] of those (what else is kept by
+ * fingerprint, cached AI answers, goes with them).
+ */
+function editsFollowingCards(pairs, editOf, inUse, now) {
+  const puts = new Map(), dels = new Set(), moved = [];
+  for (const p of pairs || []) {
+    if (!p || !p.from || !p.to || p.from === p.to) continue;
+    const old = editOf(p.from);
+    if (!editHolds(old)) continue;
+    const there = puts.has(p.to) ? puts.get(p.to) : editOf(p.to);
+    puts.set(p.to, editHolds(there) ? mergeEditRecords(there, old, p.to, now) : Object.assign({}, old, { fingerprint: p.to, updatedAt: now }));
+    if (!inUse(p.from) && !dels.has(p.from)) { dels.add(p.from); moved.push([p.from, p.to]); }
+  }
+  return { puts: Array.from(puts.values()), dels: Array.from(dels), moved };
+}
+
+/** The { from, to } fingerprints of the files a scan read again and found changed. */
+function changedFingerprints(before, after) {
+  const out = [];
+  for (const r of after || []) {
+    const prev = before && before.get(r.id);
+    if (prev && prev.ok && r.ok && prev.fp && r.fp && prev.fp !== r.fp) out.push({ from: prev.fp, to: r.fp });
+  }
   return out;
 }
 
@@ -3819,6 +4049,508 @@ function backupsToPrune(names, file, keep, newest) {
   return mine.slice(keep).map((x) => x.n);
 }
 
+/* ── cards that read alike ────────────────────────────────────────────────
+   The duplicate finder knows two cards are one when their name, description
+   and first message match to the letter. A rework, a touched-up repost or the
+   same character under another name gets past that. This compares wording
+   instead: every run of three words in a card's text, and how many of those
+   runs two cards share. So that thousands of cards needn't each be compared
+   with every other, each card is boiled down to a short signature (MinHash)
+   that lets likely pairs be found directly. All of it runs on this computer. */
+const SIMILAR_HASHES = 63, SIMILAR_ROWS = 3;
+const SIMILAR_MIN = 0.6;          // how much of their wording two cards share to count as alike
+const SIMILAR_MIN_WORDS = 12;     // a card with less text than this says too little to compare
+
+/** The text a card is compared by: what it says about the character. */
+function similarityText(body) {
+  const b = body || {};
+  return [b.description, b.personality, b.scenario, b.first_mes].map((x) => String(x || "")).join("\n");
+}
+
+/** A piece of text as the set of its three-word runs, each as a number; null when there's too little of it. */
+function textShingles(text) {
+  const words = String(text || "").toLowerCase().replace(/\{\{[^}]*\}\}/g, " ").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (words.length < SIMILAR_MIN_WORDS) return null;
+  const out = new Set();
+  for (let i = 0; i + 2 < words.length; i++) {
+    const run = words[i] + " " + words[i + 1] + " " + words[i + 2];
+    let h = 0x811c9dc5;
+    for (let k = 0; k < run.length; k++) { h ^= run.charCodeAt(k); h = Math.imul(h, 0x01000193); }
+    out.add(h >>> 0);
+  }
+  return out;
+}
+
+const SIMILAR_SEEDS = (function () {
+  const a = new Uint32Array(SIMILAR_HASHES), b = new Uint32Array(SIMILAR_HASHES);
+  let x = 0x9e3779b9;
+  const next = () => { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x; };
+  for (let i = 0; i < SIMILAR_HASHES; i++) { a[i] = next() | 1; b[i] = next(); }
+  return { a, b };
+})();
+
+/** A set of runs boiled down to a signature: for each of a fixed set of scramblings, the smallest value any run takes. */
+function minHashSignature(shingles) {
+  const sig = new Uint32Array(SIMILAR_HASHES).fill(0xffffffff);
+  const { a, b } = SIMILAR_SEEDS;
+  for (const h of shingles) {
+    for (let i = 0; i < SIMILAR_HASHES; i++) {
+      const v = (Math.imul(h, a[i]) + b[i]) >>> 0;
+      if (v < sig[i]) sig[i] = v;
+    }
+  }
+  return sig;
+}
+
+/** How alike two signatures are, 0 to 1: about the share of three-word runs the two texts have in common. */
+function signatureSimilarity(x, y) {
+  let same = 0;
+  for (let i = 0; i < SIMILAR_HASHES; i++) if (x[i] === y[i]) same++;
+  return same / SIMILAR_HASHES;
+}
+
+/**
+ * Groups of cards that read alike. `items` are { id, fp, sig }; cards with
+ * the same fingerprint are already known duplicates, so a pair of those
+ * doesn't make a group by itself. Returns [{ ids, score }], most alike first:
+ * score is the likeness of the pairs that hold the group together, averaged.
+ */
+function similarGroups(items, min) {
+  const floor = min || SIMILAR_MIN;
+  const list = items || [];
+  const buckets = new Map();
+  list.forEach((it, idx) => {
+    for (let b = 0; b + SIMILAR_ROWS <= SIMILAR_HASHES; b += SIMILAR_ROWS) {
+      let key = b + ":";
+      for (let r = 0; r < SIMILAR_ROWS; r++) key += it.sig[b + r] + ",";
+      const got = buckets.get(key);
+      if (got) got.push(idx); else buckets.set(key, [idx]);
+    }
+  });
+  const parent = list.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const seen = new Set(), links = [];
+  for (const group of buckets.values()) {
+    if (group.length < 2 || group.length > 200) continue;   // a bucket that big is boilerplate, not likeness
+    for (let i = 0; i < group.length; i++) for (let j = i + 1; j < group.length; j++) {
+      const x = group[i], y = group[j], pair = x * list.length + y;
+      if (seen.has(pair)) continue;
+      seen.add(pair);
+      if (list[x].fp && list[x].fp === list[y].fp) continue;
+      const score = signatureSimilarity(list[x].sig, list[y].sig);
+      if (score < floor) continue;
+      links.push({ x, y, score });
+      parent[find(x)] = find(y);
+    }
+  }
+  const groups = new Map();
+  for (const l of links) {
+    const root = find(l.x);
+    if (!groups.has(root)) groups.set(root, { members: new Set(), total: 0, n: 0 });
+    const g = groups.get(root);
+    g.members.add(l.x); g.members.add(l.y); g.total += l.score; g.n++;
+  }
+  return Array.from(groups.values())
+    .map((g) => ({ ids: Array.from(g.members).sort((p, q) => p - q).map((i) => list[i].id), score: g.total / g.n }))
+    .sort((p, q) => q.score - p.score || q.ids.length - p.ids.length);
+}
+
+/* ── renaming card files from a pattern ───────────────────────────────────
+   "{creator} - {name}" names each file after its card. The plan is worked
+   out first and shown, so nothing is renamed that you haven't seen. */
+const RENAME_TOKENS = [
+  { key: "name", what: "the card's name" }, { key: "creator", what: "its creator" }, { key: "version", what: "its version" },
+  { key: "tag", what: "its first tag" }, { key: "spec", what: "its format (v2, v3)" }, { key: "date", what: "the file's date" },
+];
+const RENAME_PATTERNS = ["{name}", "{creator} - {name}", "{name} ({creator})", "{name} v{version}"];
+
+/** The file name, without its extension, that a pattern gives a card. */
+function renameBase(pattern, rec) {
+  const r = rec || {};
+  const vals = {
+    name: r.name || baseName(r.file || ""), creator: r.creator || "", version: r.version || "", spec: r.spec && r.spec !== "none" ? r.spec : "",
+    tag: (r.tags || [])[0] || "", date: r.mtime ? fmtDateShort(r.mtime) : "",
+  };
+  let out = String(pattern || "").replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(vals, k.toLowerCase()) ? String(vals[k.toLowerCase()]) : m));
+  // A card with no creator mustn't come out as " - Ada" or "Ada ()".
+  out = out.replace(/\(\s*\)|\[\s*\]/g, "").replace(/\bv(?=\s|$)/g, "").replace(/\s+/g, " ")
+    .replace(/(\s[-–_,]\s)(?:[-–_,]\s)+/g, "$1").replace(/^[\s\-–_.,]+|[\s\-–_.,]+$/g, "");
+  return safeFileName(out);
+}
+
+/**
+ * What a pattern would do to some cards: [{ id, from, to, action, why }], with
+ * action "rename", "same" (already named that), or "skip" (and why). Names
+ * stay unique within a folder, whatever their case, as Windows needs: a name
+ * taken by another file there, or by an earlier card in the plan, gets " (2)".
+ * `others` are every card in the index; `lockOf(rec)` says why a card's file
+ * can't be changed ("" when it can).
+ */
+function planRename(recs, pattern, others, lockOf) {
+  const folderKey = (r) => dirKey(r.rootId, r.dir || "");
+  const moving = new Set((recs || []).map((r) => r.id));
+  const taken = new Map();
+  const names = (k) => { if (!taken.has(k)) taken.set(k, new Set()); return taken.get(k); };
+  for (const r of others || []) if (!moving.has(r.id)) names(folderKey(r)).add(String(r.file).toLowerCase());
+  const plan = [], pending = [];
+  for (const r of recs || []) {
+    const lock = lockOf ? lockOf(r) : "";
+    if (lock) { plan.push({ id: r.id, from: r.file, to: r.file, action: "skip", why: lock === "imported" ? "in an imported, read-only folder" : "in a Reference folder" }); names(folderKey(r)).add(String(r.file).toLowerCase()); continue; }
+    if (!r.ok) { plan.push({ id: r.id, from: r.file, to: r.file, action: "skip", why: "not readable as a card, so there's nothing to name it from" }); names(folderKey(r)).add(String(r.file).toLowerCase()); continue; }
+    const item = { id: r.id, from: r.file, to: r.file, action: "same", why: "" };
+    plan.push(item);
+    pending.push({ r, item });
+  }
+  // Cards that keep their name hold on to it before any other card is given one.
+  const want = pending.map((p) => renameBase(pattern, p.r) + (p.r.ext ? "." + p.r.ext : ""));
+  pending.forEach((p, i) => { if (want[i].toLowerCase() === String(p.r.file).toLowerCase()) names(folderKey(p.r)).add(want[i].toLowerCase()); });
+  pending.forEach((p, i) => {
+    if (want[i].toLowerCase() === String(p.r.file).toLowerCase()) return;
+    const set = names(folderKey(p.r));
+    const base = baseName(want[i]), ext = p.r.ext ? "." + p.r.ext : "";
+    let name = want[i];
+    for (let n = 2; set.has(name.toLowerCase()); n++) name = base + " (" + n + ")" + ext;
+    set.add(name.toLowerCase());
+    p.item.to = name;
+    p.item.action = "rename";
+  });
+  return plan;
+}
+
+/**
+ * Give one card's file a new name, in its own folder. Like a move: the file is
+ * copied under the new name, the copy is compared with it byte for byte, and
+ * only then is the old one removed. Returns { skipped } or { name }: the name
+ * it got, which is numbered if a different file already had the one asked for.
+ */
+async function renameCardFile(rec, root, newName) {
+  if (!root) throw new Error("Folder for this card is no longer registered");
+  if (isImportRoot(root)) throw new Error("Imported folders are read-only");
+  const ref = referenceFolderError(root, rec.dir);
+  if (ref) throw new Error(ref);
+  const clean = safeFileName(baseName(newName)) + (extOf(newName) ? "." + extOf(newName) : "");
+  if (extOf(clean) !== extOf(rec.file)) throw new Error("A rename can't change the file's type");
+  if (clean.toLowerCase() === String(rec.file).toLowerCase()) return { skipped: true, reason: "already named that" };
+  if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
+  const dirs = rec.dir ? rec.dir.split("/") : [];
+  const dir = await getDirByPath(root.handle, dirs, false);
+  const srcFh = await dir.getFileHandle(rec.file, { create: false });
+  const srcFile = await srcFh.getFile();
+  const bytes = new Uint8Array(await srcFile.arrayBuffer());
+  const written = await copyIntoRoot(root, dirs, clean, new Blob([bytes]), await byteSignature(srcFile));
+  // The "copy" may be the file itself under another spelling: then there is nothing to remove.
+  if (await written.fh.isSameEntry(srcFh)) return { skipped: true, reason: "already named that" };
+  if (!sameBytes(bytes, new Uint8Array(await (await written.fh.getFile()).arrayBuffer()))) {
+    throw new Error("Copy verification failed (content mismatch) — the file keeps its name");
+  }
+  await dir.removeEntry(rec.file);
+  await logOp("rename", { card: rec.name, path: root.name + "/" + rec.rel, to: written.name });
+  return { skipped: false, name: written.name };
+}
+
+/* ── saved views ──────────────────────────────────────────────────────────
+   A view is the sidebar as you had it: the search, the sort, the tags, flags,
+   folders and limits picked. Views are kept in your settings (so vault-data
+   backups carry them), by name. */
+const SAVED_VIEWS_MAX = 40;
+
+/** A filter state with only its own fields, each of the kind it should be. */
+function cleanFilters(f) {
+  const x = f && typeof f === "object" ? f : {};
+  const list = (v) => (Array.isArray(v) ? v.map(String) : []);
+  const flags = {};
+  for (const k of Object.keys(x.flags && typeof x.flags === "object" ? x.flags : {}).sort()) if (x.flags[k]) flags[k] = true;
+  return {
+    q: String(x.q || ""), deep: !!x.deep, sort: SORTS.some((o) => o.key === x.sort) ? x.sort : "name",
+    tagsInc: list(x.tagsInc), tagsExc: list(x.tagsExc), tagMode: x.tagMode === "or" ? "or" : "and",
+    dirs: list(x.dirs), specs: list(x.specs), flags, flagKeys: list(x.flagKeys),
+    tokenMin: Number(x.tokenMin) > 0 ? Number(x.tokenMin) : 0, tokenMax: Number(x.tokenMax) > 0 ? Number(x.tokenMax) : 0,
+  };
+}
+
+/** Whether two filter states show the same cards in the same order. */
+function sameFilters(a, b) {
+  return JSON.stringify(cleanFilters(a)) === JSON.stringify(cleanFilters(b));
+}
+
+/** The saved views in some settings, checked: [{ id, name, filters }]. */
+function sanitizeSavedViews(list) {
+  const out = [], seen = new Set();
+  for (const v of Array.isArray(list) ? list : []) {
+    if (!v || typeof v !== "object") continue;
+    const name = String(v.name || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    const id = String(v.id || "");
+    if (!name || !id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name, filters: cleanFilters(v.filters) });
+    if (out.length >= SAVED_VIEWS_MAX) break;
+  }
+  return out;
+}
+
+/** The views with one more saved under `name`: a view of that name (in any case) is replaced, where it was. */
+function savedViewsWith(list, name, filters, newId) {
+  const views = sanitizeSavedViews(list);
+  const clean = String(name || "").replace(/\s+/g, " ").trim().slice(0, 40);
+  if (!clean) return views;
+  const at = views.findIndex((v) => v.name.toLowerCase() === clean.toLowerCase());
+  const view = { id: at >= 0 ? views[at].id : String(newId), name: clean, filters: cleanFilters(filters) };
+  if (at >= 0) views[at] = view; else views.push(view);
+  return views.slice(0, SAVED_VIEWS_MAX);
+}
+
+/** A saved view's filters, ready to use: folders that aren't linked any more are left out. */
+function viewFiltersFor(view, roots) {
+  const f = cleanFilters(view && view.filters);
+  const known = new Set((roots || []).map((r) => r.id));
+  f.dirs = f.dirs.filter((k) => known.has(parseDirKey(k).rootId));
+  return f;
+}
+
+/** A name to offer for the view on screen, from what it filters by. */
+function suggestViewName(filters) {
+  const f = cleanFilters(filters);
+  const parts = [];
+  if (f.q) parts.push("\"" + f.q + "\"");
+  for (const t of f.tagsInc.slice(0, 2)) parts.push(t);
+  for (const k of Object.keys(f.flags).slice(0, 2)) parts.push(k);
+  for (const d of f.dirs.slice(0, 1)) parts.push(parseDirKey(d).dir.split("/").pop() || "folder");
+  return parts.join(" + ").slice(0, 40) || "My view";
+}
+
+/* ── lorebook checks ──────────────────────────────────────────────────────
+   Things in a lorebook worth a look before the card goes to a front end.
+   None of them is a mistake for certain (an entry may be meant to come in
+   only when you bring its subject up), so they are notes, not errors. */
+
+/**
+ * A lorebook key as a test of some text: a key written /like this/i is a
+ * regular expression, as SillyTavern takes them; anything else is looked for
+ * as it is, in any case. null for a regex that doesn't compile.
+ * The test takes the text and the same text in lower case.
+ */
+function loreKeyTest(key) {
+  const k = String(key == null ? "" : key).trim();
+  if (!k) return null;
+  const m = /^\/(.+)\/([a-z]*)$/i.exec(k);
+  if (m) {
+    let re;
+    try { re = new RegExp(m[1], m[2].replace(/[^imsu]/g, "")); } catch (e) { return null; }
+    return (text) => re.test(text);
+  }
+  const low = k.toLowerCase();
+  return (text, lower) => lower.indexOf(low) >= 0;
+}
+
+/**
+ * `lb` is a lorebook as the vault holds it; `cardText` everything else the
+ * card says (its fields and greetings), which is what a front end has to go
+ * on before you've typed a word. Returns { notes, tokens }: notes are
+ * { kind, level ("warn" | "info"), text, entries } with entries numbered from
+ * 1 as the Lorebook tab numbers them; tokens are { all, always, budget }.
+ */
+function lorebookChecks(lb, cardText) {
+  const entries = (lb && Array.isArray(lb.entries)) ? lb.entries : [];
+  const notes = [];
+  const nums = (list) => list.map((i) => i + 1);
+  const say = (kind, level, text, list) => notes.push({ kind, level, text, entries: nums(list) });
+  const plural = (n, one, many) => (n === 1 ? one : many);
+  const on = (e) => e && e.enabled !== false;
+  const text = String(cardText || ""), lower = text.toLowerCase();
+
+  const noKeys = [], badRegex = [], silent = [], empty = [], off = [];
+  const byKey = new Map(), byContent = new Map();
+  const contents = entries.map((e) => (on(e) ? String(e.content || "") : ""));
+  const contentsLower = contents.map((c) => c.toLowerCase());
+  entries.forEach((e, i) => {
+    if (!e) return;
+    if (!on(e)) { off.push(i); return; }
+    const content = String(e.content || "").trim();
+    if (!content) empty.push(i);
+    else { const k = content.replace(/\s+/g, " "); if (!byContent.has(k)) byContent.set(k, []); byContent.get(k).push(i); }
+    const keys = (e.keys || []).map((k) => String(k).trim()).filter(Boolean);
+    for (const k of new Set(keys.map((x) => x.toLowerCase()))) { if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(i); }
+    if (e.constant) return;
+    if (!keys.length) { noKeys.push(i); return; }
+    const tests = keys.map(loreKeyTest);
+    if (tests.some((t) => !t)) badRegex.push(i);
+    // Its own content doesn't count: an entry can't bring itself in.
+    if (!tests.some((t) => t && (t(text, lower) || contents.some((c, j) => j !== i && c && t(c, contentsLower[j]))))) silent.push(i);
+  });
+
+  if (noKeys.length) say("nokeys", "warn", plural(noKeys.length, "This entry has", "These entries have") + " no keys and " + plural(noKeys.length, "isn't", "aren't") + " always on, so nothing can ever bring " + plural(noKeys.length, "it", "them") + " in.", noKeys);
+  if (badRegex.length) say("badregex", "warn", plural(badRegex.length, "This entry has", "These entries have") + " a key written as a /regular expression/ that isn't a valid one, so it will never match.", badRegex);
+  if (empty.length) say("empty", "warn", plural(empty.length, "This entry is", "These entries are") + " turned on but " + plural(empty.length, "has", "have") + " no text.", empty);
+  for (const [, list] of byContent) if (list.length > 1) say("duplicate", "warn", "These entries have the same text, so it can come in " + (list.length === 2 ? "twice" : list.length + " times") + ".", list);
+  const shared = Array.from(byKey).filter((x) => x[1].length > 1);
+  for (const [k, list] of shared.slice(0, 12)) say("shared", "info", "\"" + k + "\" is a key of " + list.length + " entries, so they come in together.", list);
+  if (shared.length > 12) say("shared", "info", (shared.length - 12) + " more keys are shared between entries.", []);
+  if (silent.length) say("silent", "info", "None of " + plural(silent.length, "this entry's", "these entries'") + " keys appears in the card's own text or in another entry: " + plural(silent.length, "it comes", "they come") + " in only once the chat brings one up.", silent);
+  if (off.length) say("off", "info", off.length + " " + plural(off.length, "entry is", "entries are") + " turned off.", off);
+
+  const live = entries.filter(on);
+  const tokens = {
+    all: live.reduce((a, e) => a + estimateTokens(e.content), 0),
+    always: live.filter((e) => e.constant).reduce((a, e) => a + estimateTokens(e.content), 0),
+    budget: lb && lb.tokenBudget != null && Number(lb.tokenBudget) > 0 ? Number(lb.tokenBudget) : 0,
+  };
+  if (tokens.budget) {
+    if (tokens.always > tokens.budget) say("budget", "warn", "The always-on entries alone come to about " + fmtNum(tokens.always) + " tokens, over the book's budget of " + fmtNum(tokens.budget) + ": some of them will be left out.", []);
+    else if (tokens.all > tokens.budget) say("budget", "info", "Every entry at once would come to about " + fmtNum(tokens.all) + " tokens, over the book's budget of " + fmtNum(tokens.budget) + ": when many are brought in together, some are left out.", []);
+  }
+  return { notes, tokens };
+}
+
+/* ── a greeting as a front end shows it ───────────────────────────────── */
+
+/**
+ * Card text with its placeholders filled in: {{char}} and {{user}} (and the
+ * older <BOT> and <USER>) become the names, a few that stand for nothing are
+ * taken out, and a {{random:…}} shows its first choice. Any other {{…}} is
+ * left as written, since what it becomes is up to the front end.
+ */
+function fillPlaceholders(text, names) {
+  const n = names || {};
+  const char = String(n.char || "Character"), user = String(n.user || "You");
+  let trimmed = false;
+  let s = String(text == null ? "" : text)
+    .replace(/\{\{\/\/[\s\S]*?\}\}/g, "")
+    .replace(/\{\{\s*char\s*\}\}|<BOT>/gi, () => char)
+    .replace(/\{\{\s*user\s*\}\}|<USER>/gi, () => user)
+    .replace(/\{\{\s*(?:noop|original)\s*\}\}/gi, "")
+    .replace(/\{\{\s*newline\s*\}\}/gi, "\n")
+    .replace(/\{\{\s*(?:random|pick)\s*::?([\s\S]*?)\}\}/gi, (m, list) => String(list.indexOf("::") >= 0 ? list.split("::")[0] : list.split(",")[0]).trim())
+    .replace(/\s*\{\{\s*trim\s*\}\}\s*/gi, () => { trimmed = true; return ""; });
+  return trimmed ? s.trim() : s;
+}
+
+/** The placeholders left in some text after fillPlaceholders: the ones only a front end can fill. */
+function placeholdersLeft(text) {
+  const out = [];
+  for (const m of String(text || "").matchAll(/\{\{[^{}\n]{1,60}\}\}/g)) if (out.indexOf(m[0]) < 0) out.push(m[0]);
+  return out;
+}
+
+/* ── a card's history ─────────────────────────────────────────────────────
+   Two ways a card's file changes without the vault's doing: you edit it in
+   your front end, or you go back to an earlier copy. The vault notes the
+   first when a scan finds it (rec.changedOutside, with the card's text as it
+   was kept beside the new one, to show what changed), and offers the second
+   from the backups every Save to card leaves in "_vault backups". */
+
+/** Where the card's text as it was before an outside change is kept, beside its current text. */
+const PREV_BODY_SUFFIX = "\u0000before";
+function prevBodyKey(id) { return id + PREV_BODY_SUFFIX; }
+
+/** A card as named pieces of text, for comparing two versions of it: [{ key, label, text }]. */
+function cardCompareParts(body) {
+  const b = body || {};
+  const out = [{ key: "name", label: "Name", text: String(b.name || "") }];
+  for (const f of CARD_FIELDS) out.push({ key: f.key, label: f.label, text: String(b[f.key] || "") });
+  out.push({ key: "tags", label: "Tags", text: (b.tags || []).join(", ") });
+  out.push({ key: "alternate_greetings", label: "Alternate greetings",
+    text: (b.alternate_greetings || []).map((g, i) => "— greeting " + (i + 1) + " —\n" + g).join("\n\n") });
+  out.push({ key: "lorebook", label: "Lorebook", text: agentLoreText(b.lorebook) });
+  return out;
+}
+
+/** What differs between two versions of a card: [{ key, label, before, after }]. */
+function cardChanges(before, after) {
+  const a = cardCompareParts(before), b = cardCompareParts(after);
+  const out = [];
+  for (let i = 0; i < a.length; i++) if (a[i].text !== b[i].text) out.push({ key: a[i].key, label: a[i].label, before: a[i].text, after: b[i].text });
+  return out;
+}
+
+/** A backup's time from its stamp ("20261107-090503"), as a number of milliseconds, or 0. */
+function backupStampTime(stamp) {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(String(stamp || ""));
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : 0;
+}
+
+/** One card file's backups among a backup folder's file names, newest first: [{ name, stamp, at }]. */
+function cardBackupsOf(names, file) {
+  const ext = extOf(file);
+  const re = new RegExp("^" + reEscape(baseName(file)) + " (\\d{8}-\\d{6})(?: \\((\\d+)\\))?" + (ext ? "\\." + reEscape(ext) : "") + "$", "i");
+  const out = [];
+  for (const n of names || []) {
+    const m = re.exec(n);
+    if (m) out.push({ name: n, stamp: m[1], at: backupStampTime(m[1]), k: m[1] + "." + String(m[2] || 1).padStart(4, "0") });
+  }
+  out.sort((x, y) => (x.k < y.k ? 1 : x.k > y.k ? -1 : 0));
+  return out.map((x) => ({ name: x.name, stamp: x.stamp, at: x.at }));
+}
+
+/** The folder a card's backups are in, or null when there is none yet. */
+async function cardBackupDir(rec, root) {
+  const dirs = [BACKUP_FOLDER_NAME].concat(rec.dir ? rec.dir.split("/") : []);
+  try { return await getDirByPath(root.handle, dirs, false); } catch (e) { return null; }
+}
+
+/** The backups Save to card has left of one card, newest first: [{ name, stamp, at, size }]. */
+async function listCardBackups(rec, root) {
+  if (!root || isImportRoot(root) || !root.handle) return [];
+  if (!(await verifyPermission(root.handle, false))) throw new Error("Permission denied for " + root.name);
+  const dir = await cardBackupDir(rec, root);
+  if (!dir) return [];
+  const sizes = new Map();
+  for await (const [n, e] of dir.entries()) {
+    if (e.kind !== "file") continue;
+    let size = 0;
+    try { size = (await e.getFile()).size; } catch (x) { size = 0; }
+    sizes.set(n, size);
+  }
+  return cardBackupsOf(Array.from(sizes.keys()), rec.file).map((b) => Object.assign({ size: sizes.get(b.name) }, b));
+}
+
+/** One backup's bytes, and the card in it: { bytes, parsed }. */
+async function readCardBackup(rec, root, name) {
+  const dir = await cardBackupDir(rec, root);
+  if (!dir || !cardBackupsOf([name], rec.file).length) throw new Error("That isn't a backup of this card");
+  const bytes = new Uint8Array(await (await (await dir.getFileHandle(name, { create: false })).getFile()).arrayBuffer());
+  return { bytes, parsed: await parseCardBytes(bytes, rec.file) };
+}
+
+/**
+ * Put a backup back as the card's file. The file as it is now is backed up
+ * first (so going back can itself be undone), the backup must read as a card,
+ * and what was written is read back and compared, byte for byte; if it isn't
+ * what the backup holds, the file is put back as it was.
+ */
+async function restoreCardBackup(rec, root, name, opts) {
+  opts = opts || {};
+  if (!root) throw new Error("Folder for this card is no longer registered");
+  if (isImportRoot(root)) throw new Error("Imported folders are read-only");
+  const ref = referenceFolderError(root, rec.dir);
+  if (ref) throw new Error(ref);
+  if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
+  const backup = await readCardBackup(rec, root, name);
+  if (!backup.parsed || !backup.parsed.ok) throw new Error("That backup can't be read as a card" + (backup.parsed && backup.parsed.err ? " (" + backup.parsed.err + ")" : "") + ", so it wasn't put back");
+  const dirs = rec.dir ? rec.dir.split("/") : [];
+  const fh = await (await getDirByPath(root.handle, dirs, false)).getFileHandle(rec.file, { create: false });
+  const current = new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  if (sameBytes(current, backup.bytes)) return { same: true, data: backup.parsed.data, backupPath: "" };
+  let backupPath = "";
+  if (opts.backup !== false) {
+    const bName = baseName(rec.file) + " " + stampNow() + (rec.ext ? "." + rec.ext : "");
+    const res = await copyIntoRoot(root, [BACKUP_FOLDER_NAME].concat(dirs), bName, new Blob([current]), "");
+    backupPath = [root.name, BACKUP_FOLDER_NAME].concat(dirs, [res.name]).join("/");
+  }
+  const write = async (bytes) => { const w = await fh.createWritable(); await w.write(new Blob([bytes])); await w.close(); };
+  try { await write(backup.bytes); }
+  catch (e) { try { await write(current); } catch (e2) { /* the copy just made is the way back */ } throw new Error("Couldn't write the file: " + e.message); }
+  const back = new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  if (!sameBytes(back, backup.bytes)) {
+    let ok = true;
+    try { await write(current); } catch (e) { ok = false; }
+    throw new Error("The file read back isn't what the backup holds. " + (ok ? "It has been put back as it was." : backupPath ? "Recover it from " + backupPath + "." : "It could not be put back."));
+  }
+  await logOp("restoreBackup", { card: rec.name, path: root.name + "/" + rec.rel, from: name, backup: backupPath || "(none)" });
+  let sig = "";
+  try { sig = await byteSignature(await fh.getFile()); } catch (e) { sig = ""; }
+  return { same: false, data: backup.parsed.data, backupPath, sig };
+}
+
 /* ── automatic backups of vault data ──────────────────────────────────────
    Tags, notes, edits and chats live only in the browser, which a "clear
    browsing data" wipes. So a copy of Export vault data is written, every day
@@ -3828,16 +4560,46 @@ function backupsToPrune(names, file, keep, newest) {
 const VAULT_DATA_FOLDER = "_vault data";
 const VAULT_DATA_PREFIX = "rp-card-vault-data ";
 const AUTO_BACKUP_KEY = "autoBackupAt";
+const RESTORE_OFFER_KEY = "restoreOfferDismissed";   // the backup you said "not now" to: not offered again
 const AUTO_BACKUP_DAYS = [1, 3, 7];
 const AUTO_BACKUP_KEEP = [3, 7, 14, 30];
 
 function vaultDataFileName(stamp) { return VAULT_DATA_PREFIX + stamp + ".json"; }
 
+/** The vault-data backups among a folder's file names, newest first. */
+function vaultDataBackupNames(names) {
+  const re = new RegExp("^" + reEscape(VAULT_DATA_PREFIX) + "(\\d{8}-\\d{6})\\.json$");
+  return (names || []).filter((n) => re.test(n)).sort().reverse();
+}
+
 /** Which vault-data backups to remove so that the newest `keep` remain. */
 function vaultDataFilesToPrune(names, keep) {
   if (!(keep > 0)) return [];
-  const re = new RegExp("^" + reEscape(VAULT_DATA_PREFIX) + "(\\d{8}-\\d{6})\\.json$");
-  return names.filter((n) => re.test(n)).sort().reverse().slice(keep);
+  return vaultDataBackupNames(names).slice(keep);
+}
+
+/** When a backup was made, from its name ("2026-11-07 09:00"), or "". */
+function vaultDataBackupDate(name) {
+  const m = /(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}\.json$/.exec(String(name || ""));
+  return m ? m[1] + "-" + m[2] + "-" + m[3] + " " + m[4] + ":" + m[5] : "";
+}
+
+/** How much a vault-data export holds: its card records (tags, notes, edits…) and agent chats. */
+function vaultDataWeight(data) {
+  const d = data && typeof data === "object" ? data : {};
+  return (Array.isArray(d.edits) ? d.edits.length : 0) + (Array.isArray(d.agentChats) ? d.agentChats.length : 0);
+}
+
+/*
+ * Whether a backup holds far more than the vault does now. That is what a
+ * cleared browser looks like from here: the vault starts again empty, and its
+ * daily backups of next to nothing would push the real ones out of the folder
+ * within a week. A backup like that is never pruned, and the vault offers to
+ * bring it back. The margin keeps ordinary tidying (a few records fewer than
+ * last week) from counting.
+ */
+function backupOutweighs(backupWeight, nowWeight) {
+  return Number(backupWeight) > Number(nowWeight) * 1.5 + 20;
 }
 
 /** Whether a backup is due: never made, or older than `days`. */
@@ -3897,11 +4659,33 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
   const dirs = rec.dir ? rec.dir.split("/") : [];
   const dir = await getDirByPath(root.handle, dirs, false);
   const fh = await dir.getFileHandle(rec.file, { create: false });
-  const originalBytes = new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  const fileNow = await fh.getFile();
+  const originalBytes = new Uint8Array(await fileNow.arrayBuffer());
 
-  // Start from the file's own card, so nothing the vault doesn't model is lost.
-  const raw = await rawCardFromBytes(originalBytes, rec.file);
-  const v3 = buildV3Payload(body, edit, rawCharacterBook(raw), raw);
+  // The index holds the card as it was when the vault last read it. If the
+  // file has changed since (edited in the front end, say), writing from the
+  // index would quietly undo that change. So it's refused, and the caller
+  // reads the card again: the pending changes follow it, to be saved after a look.
+  if (rec.sig) {
+    let sigNow = "";
+    try { sigNow = await byteSignature(fileNow); } catch (e) { sigNow = ""; }
+    if (sigNow && sigNow !== rec.sig) {
+      const stale = new Error("This card's file has changed since the vault last read it (it was edited somewhere else), so nothing was written. Rescan its folder, check the card, then save.");
+      stale.code = "stale";
+      throw stale;
+    }
+  }
+
+  // Start from the file's own card, as it is now: nothing the vault doesn't
+  // model is lost, and every field the save doesn't change is the file's own.
+  // (`body`, the index's copy, is only what's used if the file can't be read
+  // as a card at all; with neither, there is nothing to build a card from.)
+  let parsedNow = null;
+  try { parsedNow = await parseCardBytes(originalBytes, rec.file); } catch (e) { parsedNow = null; }
+  const raw = parsedNow && parsedNow.ok ? parsedNow.raw : null;
+  const base = parsedNow && parsedNow.ok ? parsedNow.data : body;
+  if (!base) throw new Error("The vault couldn't read this file as a card" + (parsedNow && parsedNow.err ? " (" + parsedNow.err + ")" : "") + ", so there is nothing to save its changes onto. Nothing was written.");
+  const v3 = buildV3Payload(base, edit, rawCharacterBook(raw), raw);
 
   if (cardFormatOf(rec.file) === "png" && !isPng(originalBytes)) {
     throw new Error("Don't know how to write this file type in place — use Download copy");
@@ -4002,7 +4786,11 @@ async function saveCardToFile(rec, body, edit, roots, opts) {
     } catch (e) { /* no backup folder after all */ }
   }
 
-  return { data: verified.data, spec: verified.spec, backupPath, bytes: outBytes.length, pruned };
+  // The file's signature as it is now, so the index can tell this write from
+  // a change made somewhere else.
+  let sig = "";
+  try { sig = await byteSignature(await fh.getFile()); } catch (e) { sig = ""; }
+  return { data: verified.data, spec: verified.spec, backupPath, bytes: outBytes.length, pruned, sig };
 }
 
 /* ════════════════════════════════════════════
@@ -4538,18 +5326,18 @@ function aiSettingsProblems(s, relay) {
   const cfg = sanitizeAiSettings(s);
   const r = relay || {};
   if (r.available === false) {
-    out.push("The local server isn't answering. Start the vault with \"Start RP Card Vault.bat\" rather than opening the file directly.");
+    out.push("The local server isn't answering. Start the vault with \"" + START_SCRIPT + "\" rather than opening the file directly.");
     return out;
   }
   if (r.needsUpgrade) {
-    out.push("The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"Start RP Card Vault.bat\".");
+    out.push("The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"" + START_SCRIPT + "\".");
     return out;
   }
   if (relayIsStale(r)) {
     out.push(
       "The server answering is serve.js build " + (r.build || 0) + "; this page needs build " +
       EXPECTED_RELAY_BUILD + ". An older copy is probably still running in the background. " +
-      "Run \"Start RP Card Vault.bat\" to restart it."
+      "Run \"" + START_SCRIPT + "\" to restart it."
     );
     return out;
   }
@@ -5639,13 +6427,14 @@ const AGENT_TOOLS = [
       tag: { type: "string", description: "A card tag or vault-only tag." },
       creator: { type: "string" },
       folder: { type: "string", description: "Folder path, as shown in the vault." },
-      flag: { type: "string", description: "A flag key such as needsEdit, or favorite, edited, aiPending, animated (an animated picture)." },
+      flag: { type: "string", description: "A flag key such as needsEdit, or one of: favorite, edited, aiPending, animated (an animated picture), changedOutside (its file was changed outside the vault), sent (in the user's front end), notSent, changedSinceSent." },
+      issue: { type: "string", description: "Only cards the vault's own checks found something on: any, unreadable, or words from a check, such as: no name, empty description, no first message, no tags, heavy, short description, lorebook, example dialogue. Each line then says what was found. Use this instead of reading cards to find ones that need attention." },
       duplicates: { type: "string", enum: ["any", "exact", "content", "version"], description: "Only cards in a duplicate group of this kind (see list_duplicates)." },
       limit: { type: "integer", description: "Default 50." }, offset: { type: "integer" } } } },
   { name: "list_duplicates", group: "cards",
-    description: "The duplicate finder's groups, as the user sees them in Dupes: exact (identical files), content (the same card in different files), and version (version drift: same name and creator but different content; often one is a newer edit, but two unrelated cards can share a name, so check before calling them the same). Groups the user marked as not duplicates are left out. Each group lists its copies' ids and paths.",
+    description: "The duplicate finder's groups, as the user sees them in Dupes: exact (identical files), content (the same card in different files), and version (version drift: same name and creator but different content; often one is a newer edit, but two unrelated cards can share a name, so check before calling them the same). Groups the user marked as not duplicates are left out. Each group lists its copies' ids and paths. kind similar is something else: cards that share most of their wording without being the same card (a rework, a repost under another name), with how alike they are; it is worked out when you ask, and is not part of any.",
     parameters: { type: "object", properties: {
-      kind: { type: "string", enum: ["any", "exact", "content", "version"], description: "Default any." },
+      kind: { type: "string", enum: ["any", "exact", "content", "version", "similar"], description: "Default any." },
       limit: { type: "integer", description: "Groups to show. Default 20." }, offset: { type: "integer" } } } },
   { name: "grep_cards", group: "cards",
     description: "Search the text of every card (description, personality, scenario, greetings, examples, lorebook and so on) and return matching snippets. The way to find cards by theme, mood or content without reading them.",
@@ -5663,8 +6452,8 @@ const AGENT_TOOLS = [
       from: { type: "integer", description: "Where to read on from, as the end of a cut-short read says (default 0)." } },
       required: ["id"] } },
   { name: "inspect_card", group: "cards",
-    description: "A card's metadata: file, folder, creator, tokens, card tags, vault-only tags, flags, notes, rating, lorebook size, pending proposals.",
-    parameters: { type: "object", properties: { id: AGENT_ID_PARAM }, required: ["id"] } },
+    description: "A card's metadata: file, folder, creator, tokens, card tags, vault-only tags, flags, notes, rating, lorebook size, pending proposals, what the vault's own checks found, whether its file was changed outside the vault, and where it stands with the user's front end. With checks: true it also runs the lorebook checks (entries that can never trigger, bad keys, repeated text, the token budget).",
+    parameters: { type: "object", properties: { id: AGENT_ID_PARAM, checks: { type: "boolean", description: "Also run the lorebook checks. Reads the card's text." } }, required: ["id"] } },
   { name: "read_proposals", group: "ai",
     description: "The AI suggestions waiting in a card's Proposed changes: field rewrites (with the text they were made from), vault-only tags, flags and the critique verdict.",
     parameters: { type: "object", properties: { id: AGENT_ID_PARAM }, required: ["id"] } },
@@ -6896,9 +7685,29 @@ function agentCardLine(r) {
 /** The filters agentMatchCards knows. */
 const AGENT_CARD_FILTERS = ["query", "tag", "creator", "folder", "flag", "duplicates"];
 
+/* list_cards' flags for where a card stands with the front end Send uses (see SENT_STATES). */
+const AGENT_SENT_FLAGS = {
+  sent: (st) => !!(st && st.in),
+  notSent: (st) => !!(st && !st.in && !st.changed),
+  changedSinceSent: (st) => !!(st && st.changed),
+};
+
 /**
- * Cards matching list_cards' filters ({ query, tag, creator, folder, flag },
- * all optional), sorted by name. bulk_tags uses the same filters.
+ * What the vault's own checks found on a card, as it tells the agent: the
+ * warnings worked out when the card was read, or that it can't be read at
+ * all. `want` narrows it: "any", "unreadable", or words from a warning.
+ */
+function agentCardIssues(r, want) {
+  const all = r && r.ok === false ? ["Unreadable: " + (r.err || "not a card the vault can read")] : ((r && r.warnings) || []).slice();
+  const w = String(want || "any").trim().toLowerCase();
+  if (!w || w === "any") return all;
+  if (w === "unreadable") return all.filter((x) => /^Unreadable/.test(x));
+  return all.filter((x) => x.toLowerCase().indexOf(w) >= 0);
+}
+
+/**
+ * Cards matching list_cards' filters ({ query, tag, creator, folder, flag,
+ * issue }, all optional), sorted by name. bulk_tags uses the same filters.
  */
 function agentMatchCards(records, a, dupeIdx) {
   const f = a || {};
@@ -6909,8 +7718,10 @@ function agentMatchCards(records, a, dupeIdx) {
   const creator = String(f.creator || "").toLowerCase().trim();
   const folder = String(f.folder || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
   const flag = String(f.flag || "").trim();
+  const issue = String(f.issue || "").trim().toLowerCase();
   return (records || []).filter((r) => {
     if (r.aiPrivate) return false;   // private from the AI: not even its name
+    if (issue && !agentCardIssues(r, issue).length) return false;
     // Trashed cards only when their folder is named (the user asked about the trash).
     if (r.inTrash && !folder) return false;
     if (terms.length) {
@@ -6921,7 +7732,8 @@ function agentMatchCards(records, a, dupeIdx) {
     if (creator && String(r.creator || "").toLowerCase().indexOf(creator) < 0) return false;
     if (folder) { const d = String(r.dir || "").toLowerCase(); if (d !== folder && d.indexOf(folder + "/") !== 0) return false; }
     if (flag) {
-      if (flag === "favorite" || flag === "edited" || flag === "aiPending" || flag === "animated") { if (!r[flag]) return false; }
+      if (flag === "favorite" || flag === "edited" || flag === "aiPending" || flag === "animated" || flag === "changedOutside") { if (!r[flag]) return false; }
+      else if (Object.prototype.hasOwnProperty.call(AGENT_SENT_FLAGS, flag)) { if (!AGENT_SENT_FLAGS[flag](SENT_STATES[r.sentState] || null)) return false; }
       else if (!(r.flags || []).some((x) => x.key === flag)) return false;
     }
     if (dupKind) {
@@ -7471,7 +8283,7 @@ const AGENT_TOOL_IMPL = {
     return { ok: true, content: fmtNum(all.length) + " card" + (all.length === 1 ? "" : "s") + " match" + (all.length === 1 ? "es" : "") +
       (all.length > page.length ? " (showing " + (off + 1) + "–" + (off + page.length) + "; use offset for more)" : "") + ".\n" +
       // The user's Description previews switch (Agent options), not the model, decides.
-      page.map((r) => agentCardLine(r) + (ctx.previews && r.descPreview
+      page.map((r) => agentCardLine(r) + (String(a.issue || "").trim() ? " · found: " + agentCardIssues(r, a.issue).join("; ") : "") + (ctx.previews && r.descPreview
         ? " · starts: \"" + aiFenceText(String(r.descPreview).replace(/\s+/g, " ").trim().slice(0, AGENT_PREVIEW_CHARS)) + "\""
         : "")).join("\n") };
   },
@@ -7562,7 +8374,23 @@ const AGENT_TOOL_IMPL = {
   async list_duplicates(a, ctx) {
     const d = (ctx.vault.dupes && ctx.vault.dupes()) || {};
     const kind = String(a.kind || "any").toLowerCase().replace(/^versions?( drift)?$/, "version");
-    if (["any", "exact", "content", "version"].indexOf(kind) < 0) throw new Error("kind is one of any, exact, content, version.");
+    if (kind === "similar") {
+      if (!ctx.vault.similar) throw new Error("Similar cards can't be worked out here.");
+      await ctx.gate("reads", 1);
+      const sim = await ctx.vault.similar();
+      // Private cards take no part: a group needs two cards the agent may know of.
+      const groups = ((sim && sim.groups) || []).map((g) => ({ score: g.score, items: g.items.filter((x) => !x.aiPrivate) })).filter((g) => g.items.length > 1);
+      if (!groups.length) return { ok: true, content: "No two cards read alike, beyond the duplicates the other kinds list." };
+      const lim = Math.max(1, Math.min(100, Math.floor(Number(a.limit) || 20)));
+      const from = Math.max(0, Math.floor(Number(a.offset) || 0));
+      const shown = groups.slice(from, from + lim);
+      if (!shown.length) return { ok: true, content: fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + ", so there's nothing from offset " + from + "." };
+      return { ok: true, content: fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + " of cards that read alike without being the same card" +
+        (groups.length > shown.length ? "; showing " + (from + 1) + "–" + (from + shown.length) + ", use offset for more" : "") + ". They aren't copies: compare before calling one redundant.\n" +
+        shown.map((g, i) => (from + i + 1) + ". about " + Math.round(g.score * 100) + "% of their wording in common:\n" +
+          g.items.map((x) => "   - " + agentCardLine(x) + " · " + (x.dir ? x.dir + "/" : "") + x.file).join("\n")).join("\n") };
+    }
+    if (["any", "exact", "content", "version"].indexOf(kind) < 0) throw new Error("kind is one of any, exact, content, version, similar.");
     const tagged = [];
     for (const [list, k] of [[d.exact, "exact"], [d.content, "content"], [d.versions, "version"]]) {
       if (kind === "any" || kind === k) for (const g of list || []) tagged.push({ kind: k, items: g.items });
@@ -7598,7 +8426,24 @@ const AGENT_TOOL_IMPL = {
       "Lorebook entries: " + (r.loreCount || 0) + " · alternate greetings: " + (r.altCount || 0),
       "Unsaved vault edits: " + (r.pending || 0) + " · pending AI proposals: " + proposalCount(p),
       agentDupeLine(r, agentDupeIndex(ctx.vault.dupes && ctx.vault.dupes())),
+      "The vault's checks: " + (agentCardIssues(r, "any").join("; ") || "nothing found"),
     ];
+    if (r.changedOutside) lines.push("Changed outside the vault: yes, found " + fmtDate(r.changedOutside.at) + " (" + ((r.changedOutside.fields || []).join(", ") || "its file") + "). The user can see what changed in the card's History tab.");
+    if (r.sentState) lines.push("Front end: " + (SENT_STATES[r.sentState] || SENT_STATES.none).label.toLowerCase() + " (what the vault knows from its own sends and linked folders; it never asks the front end)");
+    if (a.checks) {
+      await ctx.gate("reads", 1);
+      const body = await agentChangeBody(ctx, r);
+      const lb = effectiveLorebook(body, edit);
+      if (!lb) lines.push("Lorebook checks: this card has no lorebook.");
+      else {
+        const cardText = agentCardTexts(body, edit).filter((x) => x.key !== "lorebook").map((x) => x.text).join("\n");
+        const res = lorebookChecks(lb, cardText);
+        const fix = res.notes.filter((n) => n.level === "warn").length;
+        lines.push("Lorebook checks: " + (res.notes.length ? fix + " to fix, " + (res.notes.length - fix) + " to know" : "nothing to note") +
+          " · always-on entries about " + fmtNum(res.tokens.always) + " tokens, everything about " + fmtNum(res.tokens.all) + (res.tokens.budget ? ", budget " + fmtNum(res.tokens.budget) : "") + ".");
+        for (const n of res.notes) lines.push("  " + (n.level === "warn" ? "To fix: " : "To know: ") + n.text + (n.entries.length ? " (" + (n.entries.length === 1 ? "entry " : "entries ") + n.entries.slice(0, 20).join(", ") + (n.entries.length > 20 ? " and more" : "") + ")" : ""));
+      }
+    }
     return { ok: true, content: lines.join("\n") };
   },
 
@@ -9025,12 +9870,12 @@ async function wsCall(route, body) {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
     });
   } catch (e) {
-    throw new Error("Couldn't reach the local server. Is \"Start RP Card Vault.bat\" running?");
+    throw new Error("Couldn't reach the local server. Is \"" + START_SCRIPT + "\" running?");
   }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
     const e = new Error(d.error || (r.status === 404 && !d.error
-      ? "The local server has no workspace. It's an older serve.js; run \"Start RP Card Vault.bat\"."
+      ? "The local server has no workspace. It's an older serve.js; run \"" + START_SCRIPT + "\"."
       : "The workspace request failed (HTTP " + r.status + ")."));
     e.status = r.status;
     throw e;
@@ -9748,6 +10593,7 @@ function CardTile({ rec, tileW, selected, focused, isDupe, commonSpec, onClick, 
           position: "absolute", top: 5, left: 5, display: "flex", gap: 3, flexWrap: "wrap", maxWidth: tileW - 10,
         }}>
           {rec.animated ? <Pill color="green" style={onArt("green")} title="Animated picture">{"▶"}</Pill> : null}
+          {rec.changedOutside ? <Pill color="warm" style={onArt("warm")} title={"Changed outside the vault: " + (rec.changedOutside.fields || []).join(", ") + ". The card's History tab shows what changed."}>{"✎"}</Pill> : null}
           {/* Only on cards whose format differs from most of the library: a v3 badge on every card says nothing. */}
           {rec.spec !== commonSpec || rec.spec === "none" ? (
             <Pill color={SPEC_COLOR[rec.spec] || "red"} style={onArt(SPEC_COLOR[rec.spec] || "red")} title={rec.spec === "none" ? "No card data found" : "Card format " + rec.spec}>{rec.spec === "none" ? "?" : rec.spec}</Pill>
@@ -9863,8 +10709,15 @@ const FLAGS = [
   { key: "flagged",    label: "Flagged",          color: "warm" },
   { key: "unsaved",    label: "Unsaved edits",    color: "purple" },
   { key: "aiPending",  label: "AI suggestions",   color: "blue" },
+  { key: "changedOutside", label: "Changed outside", color: "warm" },
   // Not a narrowing filter: it brings trashed cards back into view.
   { key: "trash",      label: "Show trash",       color: "muted" },
+];
+// Where cards stand with the destination Send uses; shown once there is one.
+const SENT_FLAGS = [
+  { key: "sentIn",      label: "In front end",        color: "green" },
+  { key: "sentNot",     label: "Not sent",            color: "muted" },
+  { key: "sentChanged", label: "Changed since sent",  color: "warm" },
 ];
 
 function SectionHead({ children, right }) {
@@ -9920,7 +10773,7 @@ function FolderNode({ node, root, filters, patch, collapsed, setCollapsed, onDro
         title={(node.dir || root.name) + (readOnly ? "  (read-only — can't accept moves)" : "\nDrop cards here to move them") +
           "\n" + node.own + " here, " + node.count + " including subfolders" +
           "\nRole: " + (ROOT_ROLES[inheritedRole] || {}).label + (explicitRole ? " (labelled)" : " (inherited)") +
-          "\nClick to filter · Ctrl-click to add · Right-click to label"}
+          "\nClick to filter · " + MOD_KEY + "-click to add · Right-click to label"}
         style={{
           display: "flex", alignItems: "center", gap: 5, cursor: "pointer",
           padding: "3px 12px 3px " + (10 + node.depth * 11) + "px",
@@ -9991,7 +10844,7 @@ function FolderTree({ trees, filters, patch, collapsed, setCollapsed, onDropCard
 function FilterSidebar({
   filters, setFilters, tagIndex, roots, rootCounts, total, shown,
   settings, onOpenTagManager, folderTrees, onDropCards, dragActive, onNewFolder,
-  folderRoles, onFolderMenu, flagCounts, dupeExcluder, mode, onMode, agent, keysOff,
+  folderRoles, onFolderMenu, flagCounts, dupeExcluder, mode, onMode, agent, keysOff, onSaveViews,
 }) {
   const agentMode = mode === "agent";
   const [tagQuery, setTagQuery] = useState("");
@@ -10035,12 +10888,45 @@ function FilterSidebar({
     filters.specs.length + filters.dirs.length + (filters.flagKeys || []).length +
     (filters.tokenMin ? 1 : 0) + (filters.tokenMax ? 1 : 0);
 
+  const views = sanitizeSavedViews(settings && settings.savedViews);
+  const saveView = () => {
+    const name = window.prompt("Save this view (the search, sort, tags, flags and folders picked now) as:", suggestViewName(filters));
+    if (name === null || !String(name).trim()) return;
+    if (onSaveViews) onSaveViews(savedViewsWith(views, name, filters, "v" + uid()));
+  };
   const sortBlock = (
     <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--border-subtle)", flexShrink: 0 }}>
       <label style={tinyLabel}>Sort</label>
       <select value={filters.sort} onChange={(e) => patch({ sort: e.target.value })} aria-label="Sort" style={selectStyle}>
         {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
       </select>
+      <div className="saved-views" style={{ marginTop: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <label style={Object.assign({}, tinyLabel, { marginBottom: 0 })}>Views</label>
+          <SmallBtn color="cyan" onClick={saveView} title="Keep the search, sort, tags, flags and folders picked now, under a name">+ save this view</SmallBtn>
+        </div>
+        {views.length === 0 ? (
+          <div style={{ fontSize: 9.5, color: "var(--text-muted)", lineHeight: 1.5 }}>None yet. Set the filters up the way you like them, then save the view to come back to it.</div>
+        ) : views.map((v) => {
+          const on = sameFilters(filters, viewFiltersFor(v, roots));
+          return (
+            <div key={v.id} className="saved-view" style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 0" }}>
+              <div role="button" tabIndex={0} aria-pressed={on} className="no-sel" title={"Show this view" + (on ? " (showing now)" : "")}
+                onClick={() => setFilters(viewFiltersFor(v, roots))}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setFilters(viewFiltersFor(v, roots)); } }}
+                style={{ flex: 1, minWidth: 0, cursor: "pointer", fontSize: 11.5, padding: "2px 6px", borderRadius: "var(--radius-sm)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  color: on ? "var(--accent-warm)" : "var(--text-secondary)", background: on ? acRgba("warm", 0.12) : "transparent" }}>
+                {v.name}
+              </div>
+              <span role="button" tabIndex={0} aria-label={"Delete the view " + v.name} title="Delete this view" className="no-sel"
+                onClick={() => { if (window.confirm("Delete the view \"" + v.name + "\"?\n\nOnly the saved view goes; no cards are touched.")) onSaveViews && onSaveViews(views.filter((x) => x.id !== v.id)); }}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.click(); }}
+                style={{ cursor: "pointer", color: "var(--text-muted)", fontSize: 11, padding: "0 4px" }}>✕</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 
@@ -10102,7 +10988,7 @@ function FilterSidebar({
           </SectionHead>
           <div style={{ fontSize: 9.5, color: "var(--text-muted)", padding: "0 12px 5px", lineHeight: 1.5 }}>
             Drag cards onto a folder to move them — or out of the window entirely
-            to drop a real file into Explorer. <kbd>S</kbd> sends to your front end.
+            to drop a real file into {FILE_MANAGER}. <kbd>S</kbd> sends to your front end.
           </div>
           <FolderTree trees={folderTrees} filters={filters} patch={patch}
             collapsed={collapsed} setCollapsed={setCollapsed}
@@ -10134,7 +11020,7 @@ function FilterSidebar({
 
           <SectionHead>Flags</SectionHead>
           <div style={{ display: "flex", gap: 5, padding: "0 12px", flexWrap: "wrap" }}>
-            {FLAGS.map((f) => {
+            {FLAGS.slice(0, -1).concat(settings && (settings.destinations || []).length ? SENT_FLAGS : [], FLAGS.slice(-1)).map((f) => {
               const on = !!filters.flags[f.key];
               return (
                 <div key={f.key} onClick={() => {
@@ -10838,7 +11724,7 @@ function WorkspaceModal({ onClose, onToast, initialPath }) {
  * loop and tools, handed the workspace, the vault (read-only), the model via
  * the relay, and your approval.
  */
-function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, shuffleSeed, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, privateFolders, onCardFiles, dupes }) {
+function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex, sortKey, shuffleSeed, onOpenAiSettings, onToast, onPatchEdit, onPatchMany, onOpenCard, roots, privateFolders, onCardFiles, dupes, onSimilar }) {
   const [sessions, setSessions] = useState([]);
   const [sess, setSess] = useState(() => newAgentSession(uid(), Date.now()));
   const [input, setInput] = useState("");
@@ -10861,7 +11747,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
   const rateLog = useRef([]);
   const listRef = useRef(null);
   const latest = useRef(null);
-  latest.current = { ai, relay, agent, records, editsMap, tagIndex, onPatchEdit, onPatchMany, roots, privateFolders, onCardFiles, dupes };
+  latest.current = { ai, relay, agent, records, editsMap, tagIndex, onPatchEdit, onPatchMany, roots, privateFolders, onCardFiles, dupes, onSimilar };
 
   const ready = aiReady(ai, relay);
 
@@ -10955,6 +11841,8 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
     records: () => latest.current.records,
     // The duplicate finder's groups, exactly as the Dupes view shows them.
     dupes: () => latest.current.dupes,
+    // Cards that read alike, worked out afresh each time it's asked for.
+    similar: () => latest.current.onSimilar(),
     body: (id) => dbGet(STORE_BODIES, id),
     edit: (fp) => latest.current.editsMap.get(fp),
     notes: (fp) => dbAllByIndex(STORE_AINOTES, "fingerprint", fp),
@@ -11797,8 +12685,107 @@ const TABS = [
   { key: "tags",     label: "Tags & Notes" },
   { key: "ai",       label: "✦ AI" },
   { key: "gallery",  label: "Gallery" },
+  { key: "history",  label: "History" },
   { key: "raw",      label: "Raw" },
 ];
+
+/**
+ * A card's History tab: what changed in its file outside the vault (when a
+ * scan found that), and the backups Save to card has left of it, each of which
+ * can be compared with the card as it is now, or put back.
+ * `history` is { prev(), list(), read(name), restore(name), dismiss() }.
+ */
+function CardHistory({ rec, body, history, locked }) {
+  const [was, setWas] = useState(undefined);     // the card's text before the outside change: undefined while it's fetched, null if it isn't kept
+  const [backups, setBackups] = useState(null);  // null while loading
+  const [err, setErr] = useState("");
+  const [open, setOpen] = useState(null);        // { name, changes } | { name, error }
+  const [busy, setBusy] = useState("");
+  const changed = rec.changedOutside;
+  const changedAt = changed ? changed.at : 0;
+
+  useEffect(() => {
+    let live = true;
+    setWas(undefined);
+    if (changedAt) history.prev().then((b) => { if (live) setWas(b || null); }, () => { if (live) setWas(null); });
+    return () => { live = false; };
+  }, [rec.id, changedAt]);
+
+  useEffect(() => {
+    let live = true;
+    setBackups(null); setErr(""); setOpen(null);
+    history.list().then((l) => { if (live) setBackups(l); }, (e) => { if (live) { setBackups([]); setErr((e && e.message) || String(e)); } });
+    return () => { live = false; };
+  }, [rec.id, rec.sig]);
+
+  const compare = async (name) => {
+    if (open && open.name === name) { setOpen(null); return; }
+    setBusy(name);
+    try {
+      const b = await history.read(name);
+      setOpen(b ? { name, changes: cardChanges(b, body) } : { name, error: "That backup can't be read as a card." });
+    } catch (e) { setOpen({ name, error: (e && e.message) || String(e) }); }
+    setBusy("");
+  };
+  const outside = changed && was ? cardChanges(was, body) : [];
+  const note = { fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.6 };
+  const diffs = (list, labels) => list.map((c) => (
+    <div key={c.key} style={{ marginBottom: 10 }}>
+      <label style={tinyLabel}>{c.label}</label>
+      <DiffView before={c.before} after={c.after} labels={labels} />
+    </div>
+  ));
+
+  return (
+    <div>
+      {changed ? (
+        <div style={{ marginBottom: 16, padding: 10, borderRadius: "var(--radius-sm)", background: acRgba("warm", 0.08), border: "1px solid " + acRgba("warm", 0.3) }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 8 }}>
+            <div style={{ flex: 1, fontSize: 11.5, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+              <strong style={{ color: "var(--accent-warm)" }}>This card's file was changed outside the vault</strong> (found {fmtDate(changed.at)}):{" "}
+              {(changed.fields || []).join(", ")}. Your notes, tags and unsaved changes stayed with it.
+            </div>
+            <SmallBtn color="muted" onClick={history.dismiss} title="Stop marking this card as changed, and forget its earlier text">Dismiss</SmallBtn>
+          </div>
+          {was === undefined ? <div style={note}>Fetching its earlier text…</div>
+            : outside.length ? diffs(outside, ["Before", "Now"])
+            : <div style={note}>{was === null ? "Its earlier text isn't kept any more, so there is nothing to compare with." : "It reads the same as before now."}</div>}
+        </div>
+      ) : null}
+
+      <label style={tinyLabel}>Backups from Save to card</label>
+      {backups === null ? <div style={note}>Looking in {BACKUP_FOLDER_NAME}…</div> : null}
+      {err ? <div style={Object.assign({}, note, { color: "var(--accent-red)" })}>{err}</div> : null}
+      {backups && !backups.length && !err ? (
+        <div style={note}>
+          None yet. Each Save to card keeps a copy of the file as it was in {BACKUP_FOLDER_NAME}, in this card's folder
+          (unless backups are turned off in Settings), and they are listed here.
+        </div>
+      ) : null}
+      {(backups || []).map((b) => (
+        <div key={b.name} style={{ borderBottom: "1px solid rgba(42,47,61,0.5)", padding: "6px 0" }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{b.at ? fmtDate(b.at) : b.stamp}</div>
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", fontFamily: "'JetBrains Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={b.name}>{fmtBytes(b.size)} · {b.name}</div>
+            </div>
+            <SmallBtn color="cyan" disabled={!!busy} active={!!(open && open.name === b.name)} onClick={() => compare(b.name)}
+              title="What differs between this backup and the card as it is now">{busy === b.name ? "…" : "Compare"}</SmallBtn>
+            <SmallBtn color="warm" disabled={!!busy || !!locked} onClick={() => history.restore(b.name)}
+              title={locked ? "This card's file can't be changed here (an imported or Reference folder)" : "Put this backup back as the card's file. The file as it is now is backed up first."}>Restore</SmallBtn>
+          </div>
+          {open && open.name === b.name ? (
+            <div style={{ marginTop: 8 }}>
+              {open.error ? <div style={Object.assign({}, note, { color: "var(--accent-red)" })}>{open.error}</div>
+                : open.changes.length ? diffs(open.changes, ["This backup", "Now"])
+                : <div style={note}>This backup's card reads the same as the card does now.</div>}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function StatRow({ k, v, color }) {
   return (
@@ -12697,6 +13684,109 @@ const LoreEntryRow = React.memo(function LoreEntryRow({ e, i, rowApi }) {
  * vault's edits like any field (the file changes on Save to card, which
  * keeps every lorebook field the vault doesn't show).
  */
+/** Rename the selected cards' files from a pattern, after showing what each would become. */
+function RenameModal({ recs, allRecs, lockOf, onClose, onRename }) {
+  const [pattern, setPattern] = useState(RENAME_PATTERNS[1]);
+  const plan = useMemo(() => planRename(recs, pattern, allRecs, lockOf), [recs, pattern, allRecs, lockOf]);
+  const todo = plan.filter((p) => p.action === "rename");
+  const same = plan.filter((p) => p.action === "same").length;
+  const skipped = plan.filter((p) => p.action === "skip");
+  const shown = todo.concat(skipped).slice(0, 300);
+  return (
+    <Modal title="Rename card files" icon={"\u270E"} width={720} onClose={onClose}
+      subtitle={fmtNum(recs.length) + " selected · " + fmtNum(todo.length) + " would be renamed" + (same ? " · " + fmtNum(same) + " already named that" : "") + (skipped.length ? " · " + fmtNum(skipped.length) + " can't be" : "")}
+      footer={<SmallBtn color="warm" disabled={!todo.length} onClick={() => onRename(todo)}>Rename {fmtNum(todo.length)} file{todo.length === 1 ? "" : "s"}</SmallBtn>}>
+      <label style={tinyLabel}>Name each file</label>
+      <input value={pattern} onChange={(e) => setPattern(e.target.value)} aria-label="File name pattern" spellCheck={false}
+        style={Object.assign({}, inputBase, { fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: "7px 9px" })} />
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", margin: "7px 0 4px" }}>
+        {RENAME_PATTERNS.map((p) => <SmallBtn key={p} color="cyan" active={p === pattern} onClick={() => setPattern(p)}>{p}</SmallBtn>)}
+      </div>
+      <div style={{ fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 10 }}>
+        {RENAME_TOKENS.map((t) => "{" + t.key + "} " + t.what).join(" · ")}. The file keeps its type and its folder.
+        Only the file's name changes: the card inside, and your notes and tags, are untouched. Each file is copied
+        under its new name and checked before the old one is removed. A name already taken gets a number.
+      </div>
+      <div className="vault-scroll rename-plan" style={{ maxHeight: 340, overflowY: "auto", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", background: "var(--bg-input)" }}>
+        {shown.length === 0 ? <div style={{ padding: 12, fontSize: 11.5, color: "var(--text-muted)" }}>Every selected card is already named that.</div> : null}
+        {shown.map((p) => (
+          <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr 18px 1fr", gap: 6, padding: "4px 9px", fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+            borderBottom: "1px solid rgba(42,47,61,0.5)", color: "var(--text-secondary)", wordBreak: "break-word" }}>
+            <span>{p.from}</span>
+            <span style={{ color: "var(--text-muted)" }}>{p.action === "rename" ? "→" : "✕"}</span>
+            <span style={{ color: p.action === "rename" ? "var(--accent-green)" : "var(--text-muted)" }}>{p.action === "rename" ? p.to : p.why}</span>
+          </div>
+        ))}
+        {todo.length + skipped.length > shown.length ? <div style={{ padding: "6px 9px", fontSize: 10.5, color: "var(--text-muted)" }}>… and {fmtNum(todo.length + skipped.length - shown.length)} more</div> : null}
+      </div>
+    </Modal>
+  );
+}
+
+/** What's worth a look in a lorebook, above its entries. Worked out a moment after you stop typing. */
+function LoreChecks({ body, edit }) {
+  const [open, setOpen] = useState(false);
+  const [res, setRes] = useState(null);
+  const first = useRef(true);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const cardText = agentCardTexts(body, edit).filter((x) => x.key !== "lorebook").map((x) => x.text).join("\n");
+      setRes(lorebookChecks(effectiveLorebook(body, edit), cardText));
+    }, first.current ? 0 : 400);
+    first.current = false;
+    return () => clearTimeout(t);
+  }, [body, edit && edit.lorebook, edit && edit.fields, edit && edit.greetings]);
+  if (!res) return null;
+  const warn = res.notes.filter((n) => n.level === "warn").length;
+  const color = warn ? "warm" : res.notes.length ? "blue" : "green";
+  return (
+    <div className="lore-checks" style={{ marginBottom: 10, borderRadius: "var(--radius-sm)", border: "1px solid " + acRgba(color, 0.3), background: acRgba(color, 0.06) }}>
+      <div className="no-sel" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(!open)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(!open); } }}
+        style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 9px", cursor: "pointer", fontSize: 11.5, color: "var(--text-secondary)" }}>
+        <span style={{ color: ac(color), fontWeight: 600 }}>Checks</span>
+        <span style={{ flex: 1 }}>
+          {res.notes.length ? (warn ? warn + " to fix" + (res.notes.length > warn ? ", " + (res.notes.length - warn) + " to know" : "") : res.notes.length + " to know") : "nothing to note"}
+          {" · always on " + fmtTokens(res.tokens.always) + " · everything " + fmtTokens(res.tokens.all) + (res.tokens.budget ? " · budget " + fmtNum(res.tokens.budget) : "")}
+        </span>
+        <span style={{ color: "var(--text-muted)" }}>{open ? "▾" : "▸"}</span>
+      </div>
+      {open ? (
+        <div style={{ padding: "2px 9px 8px" }}>
+          {res.notes.length ? res.notes.map((n, i) => (
+            <div key={i} style={{ display: "flex", gap: 7, fontSize: 11, lineHeight: 1.55, padding: "3px 0", color: "var(--text-secondary)" }}>
+              <span style={{ color: n.level === "warn" ? "var(--accent-warm)" : "var(--accent-blue)" }}>{n.level === "warn" ? "⚠" : "·"}</span>
+              <span>{n.text}{n.entries.length ? <span style={{ color: "var(--text-muted)" }}>{" "}({n.entries.length > 12 ? "entries " + n.entries.slice(0, 12).join(", ") + " and " + (n.entries.length - 12) + " more" : (n.entries.length === 1 ? "entry " : "entries ") + n.entries.join(", ")})</span> : null}</span>
+            </div>
+          )) : <div style={{ fontSize: 11, color: "var(--text-muted)" }}>Every entry has keys and text, and none repeats another.</div>}
+          <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 5, lineHeight: 1.5 }}>
+            Token counts are estimates (about four characters to a token). Entries are numbered as they are listed below.
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// The name used for {{user}} in a greeting's preview, remembered while the page is open.
+let PREVIEW_USER_NAME = "You";
+
+/** A greeting as a front end shows it: placeholders filled in, markdown drawn. Card text stays text: no HTML is run. */
+function GreetingPreview({ text, names }) {
+  const filled = fillPlaceholders(text, names);
+  const left = placeholdersLeft(filled);
+  return (
+    <div className="greeting-preview" style={{ padding: "9px 11px", borderRadius: "var(--radius-sm)", background: "var(--bg-input)", border: "1px solid var(--border-subtle)" }}>
+      {filled.trim() ? <Markdown text={filled} /> : <div style={{ fontSize: 11, color: "var(--text-muted)" }}>(empty)</div>}
+      {left.length ? (
+        <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.5 }}>
+          Left as written, for the front end to fill: {left.slice(0, 6).join(" ")}{left.length > 6 ? " …" : ""}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function LorebookEditor({ body, edit, onPatchEdit }) {
   const lb = effectiveLorebook(body, edit);
   const edited = !!(edit && edit.lorebook);
@@ -12734,6 +13824,7 @@ function LorebookEditor({ body, edit, onPatchEdit }) {
         <StatRow k="Scan depth" v={lb.scanDepth === null || lb.scanDepth === undefined ? "—" : asStr(lb.scanDepth)} />
         <StatRow k="Token budget" v={lb.tokenBudget === null || lb.tokenBudget === undefined ? "—" : fmtNum(lb.tokenBudget)} />
       </div>
+      <LoreChecks body={body} edit={edit} />
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
         {edited ? <Pill color="warm">edited</Pill> : null}
         <span style={{ fontSize: 10, color: "var(--text-muted)", flex: 1, minWidth: 160 }}>
@@ -12749,7 +13840,7 @@ function LorebookEditor({ body, edit, onPatchEdit }) {
   );
 }
 
-function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate, writeBlock, onPlay }) {
+function Inspector({ history, sendStatus, rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, dupeGroup, onJumpTo, onSaveToCard, onOpenFlag, ai, aiRelay, onRunAi, onClearAiNotes, onOpenAiSettings, onSaveAi, onDuplicate, writeBlock, onPlay }) {
   const [tab, setTab] = useState("overview");
   const [body, setBody] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -12769,6 +13860,8 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
   }, [rec.id, rec.fp, rec.scannedAt]);
 
   useEffect(() => { setTab("overview"); }, [rec.id]);
+  const [greetPreview, setGreetPreview] = useState(false);
+  const [previewUser, setPreviewUser] = useState(PREVIEW_USER_NAME);
 
   // The full-size picture: the card's own, with its embedded ones a step away.
   // `owned` items were loaded for the viewer and go when it closes.
@@ -12958,6 +14051,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             : t.key === "tags" ? tags.length + vaultTags.length + flags.length
             : t.key === "ai" ? proposalCount(edit && edit.aiProposal)
             : t.key === "gallery" ? rec.assetCount
+            : t.key === "history" ? (rec.changedOutside ? 1 : 0)
             : 0;
           return (
             <div key={t.key} onClick={() => setTab(t.key)} className="no-sel inspector-tab" role="tab" aria-selected={on} tabIndex={0}
@@ -13016,6 +14110,20 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
               <StatRow k="Embedded assets" v={fmtNum(rec.assetCount)} />
               <StatRow k="Content fingerprint" v={rec.fp.slice(0, 16)} />
             </div>
+
+            {sendStatus && sendStatus.length ? (
+              <div style={{ marginBottom: 14 }}>
+                <label style={tinyLabel}>Front end</label>
+                {sendStatus.map((x) => (
+                  <StatRow key={x.id} k={x.name} color={SENT_STATES[x.state].color}
+                    v={SENT_STATES[x.state].label + (x.at && x.state !== "none" ? " · " + fmtDateShort(x.at) : "")} />
+                ))}
+                <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 5, lineHeight: 1.5 }}>
+                  What the vault knows for itself: the files in a folder destination, and what it has uploaded.
+                  It never asks a front end what it holds, so a card changed or removed there still reads as sent.
+                </div>
+              </div>
+            ) : null}
 
             {body.source && body.source.length ? (
               <div style={{ marginBottom: 14 }}>
@@ -13083,6 +14191,35 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
 
         {!loading && body && tab === "greet" ? (
           <Fragment>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+              <SmallBtn color="cyan" active={greetPreview} onClick={() => setGreetPreview(!greetPreview)}
+                title="Show the greetings as a front end would: names filled in for {{char}} and {{user}}, and *markdown* drawn">{greetPreview ? "Back to editing" : "Preview"}</SmallBtn>
+              {greetPreview ? (
+                <label style={{ fontSize: 10.5, color: "var(--text-muted)", display: "flex", gap: 6, alignItems: "center" }}>
+                  {"{{user}} is"}
+                  <input value={previewUser} aria-label="Name shown for {{user}}" onChange={(e) => { PREVIEW_USER_NAME = e.target.value; setPreviewUser(e.target.value); }}
+                    style={Object.assign({}, inputBase, { width: 110, padding: "3px 7px", fontSize: 11 })} />
+                </label>
+              ) : null}
+            </div>
+            {greetPreview ? (
+              <Fragment>
+                <label style={tinyLabel}>First message</label>
+                <GreetingPreview text={effectiveField(body, edit, "first_mes")} names={{ char: body.nickname || effectiveField(body, edit, "name") || rec.name, user: previewUser }} />
+                <label style={Object.assign({}, tinyLabel, { marginTop: 14 })}>Alternate greetings ({greetings.length})</label>
+                {greetings.length === 0 ? <div style={{ fontSize: 11, color: "var(--text-muted)" }}>None.</div> : null}
+                {greetings.map((g, i) => (
+                  <div key={i} style={{ marginBottom: 10 }}>
+                    <div style={Object.assign({}, monoTiny, { color: "var(--text-muted)", marginBottom: 3 })}>#{i + 1} · {fmtTokens(estimateTokens(g))}</div>
+                    <GreetingPreview text={g} names={{ char: body.nickname || effectiveField(body, edit, "name") || rec.name, user: previewUser }} />
+                  </div>
+                ))}
+                <div style={{ fontSize: 9.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                  A preview, not a promise: each front end draws text its own way. Card text is shown as text, so any HTML in it appears as written.
+                </div>
+              </Fragment>
+            ) : null}
+            {greetPreview ? null : (<Fragment>
             <Field label="First message">
               <EditableText value={effectiveField(body, edit, "first_mes")} original={body.first_mes || ""} rows={7}
                 onChange={(v) => setField("first_mes", v)} onRevert={() => setField("first_mes", body.first_mes || "")} />
@@ -13106,6 +14243,7 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
             {edit && edit.greetings ? (
               <SmallBtn color="muted" onClick={() => onPatchEdit({ greetings: null })}>revert all greetings</SmallBtn>
             ) : null}
+            </Fragment>)}
           </Fragment>
         ) : null}
 
@@ -13200,6 +14338,10 @@ function Inspector({ rec, roots, edit, tagIndex, onPatchEdit, onClose, onToast, 
 
         {tab === "gallery" ? (
           <CardGallery rec={rec} roots={roots} still={!onPlay} onView={(items, start) => setViewer({ items, start, owned: false })} />
+        ) : null}
+
+        {!loading && body && tab === "history" && history ? (
+          <CardHistory rec={rec} body={body} history={history} locked={readOnlyRoot || !!writeBlock} />
         ) : null}
 
         {!loading && body && tab === "raw" ? (
@@ -13803,7 +14945,7 @@ function IngestModal({ roots, records, settings, tagMeta, folderRoles, dupeExclu
   );
 }
 
-function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, onRestore, onToast, onResolve, onCompare, externalKeepers }) {
+function DupesModal({ similar, onFindSimilar, dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, onRestore, onToast, onResolve, onCompare, externalKeepers }) {
   const [tab, setTab] = useState("exact");
   const [keepers, setKeepers] = useState(externalKeepers || {});
   useEffect(() => { if (externalKeepers) setKeepers((k) => Object.assign({}, k, externalKeepers)); }, [externalKeepers]);
@@ -13811,8 +14953,11 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
   const groups = tab === "exact" ? dupes.exact
     : tab === "content" ? dupes.content
     : tab === "versions" ? dupes.versions
+    : tab === "similar" ? ((similar && similar.groups) || [])
     : dupes.dismissed;
-  const isDismissedTab = tab === "dismissed";
+  // Cards that only read alike aren't copies: nothing there is marked to keep, trashed or deleted in bulk.
+  const isSimilarTab = tab === "similar";
+  const isDismissedTab = tab === "dismissed" || isSimilarTab;
   const kindOf = (g) => (g.kind === "version" ? "versions" : g.kind);
 
   const keeperOf = (g) => keepers[g.kind + g.key] || (defaultKeeper(g.items, roots) || {}).id;
@@ -13850,6 +14995,7 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
     exact:   { label: "Exact copies", n: dupes.exact.length, hint: "Byte-identical files. Safe to thin out — these are literally the same file in more than one place, which is exactly what an Archive folder is for." },
     content: { label: "Same content", n: dupes.content.length, hint: "Same name, description and greeting, but the files differ — usually a re-encoded PNG or a JSON/PNG pair of the same card." },
     versions:{ label: "Version drift", n: dupes.versions.length, hint: "Same character and creator, different content. One of these is probably a newer edit of the other — but this is also where false positives live, since two unrelated cards can share a name. Mark those as not duplicates and they'll stay out of the way." },
+    similar: { label: "Similar text", n: similar ? similar.groups.length : "?", hint: "Cards whose description, personality, scenario and first message share most of their wording without being the same card: a rework, a touched-up repost, the same character under another name. Each group shows how alike its cards are. These aren't copies, so nothing here is trashed for you: compare them and decide. Worked out when you ask, on this computer; nothing is sent anywhere." },
     dismissed:{ label: "Not duplicates", n: dupes.dismissed.length, hint: "Groups you've marked as false positives. They no longer count as duplicates anywhere in the vault. Restore one if you change your mind." },
   };
 
@@ -13881,15 +15027,16 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
             </Fragment>
           ) : null}
           <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-muted)", maxWidth: 220, lineHeight: 1.4 }}>
-            {isDismissedTab
+            {isSimilarTab ? "Alike, not copies: nothing here is removed for you."
+              : isDismissedTab
               ? "Restore a group to have it counted again."
               : "One copy of every card always survives — the one marked KEEP."}
           </span>
         </Fragment>
       }>
       <div style={{ display: "flex", gap: 5, marginBottom: 12, flexWrap: "wrap" }}>
-        {["exact", "content", "versions", "dismissed"].map((k) => (
-          <SmallBtn key={k} color={k === "versions" ? "warm" : k === "content" ? "blue" : k === "dismissed" ? "green" : "red"}
+        {["exact", "content", "versions", "similar", "dismissed"].map((k) => (
+          <SmallBtn key={k} color={k === "versions" ? "warm" : k === "content" ? "blue" : k === "dismissed" ? "green" : k === "similar" ? "purple" : "red"}
             active={tab === k} onClick={() => setTab(k)}>
             {TAB_INFO[k].label} ({TAB_INFO[k].n})
           </SmallBtn>
@@ -13897,9 +15044,19 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
       </div>
       <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 12 }}>{TAB_INFO[tab].hint}</div>
 
+      {isSimilarTab ? (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+          <SmallBtn color="purple" onClick={onFindSimilar}>{similar ? "Look again" : "Find similar cards"}</SmallBtn>
+          <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>
+            {similar ? fmtNum(similar.compared) + " cards compared " + fmtDate(similar.at) + (similar.short ? " · " + fmtNum(similar.short) + " had too little text to compare" : "")
+              : "Reads every card's text once. A few seconds for a few thousand cards."}
+          </span>
+        </div>
+      ) : null}
       {!groups.length ? (
         <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-          {isDismissedTab ? "You haven't marked anything as a false positive yet." : "Nothing in this category."}
+          {isSimilarTab ? (similar ? "No two cards read alike, beyond the duplicates on the other tabs." : "")
+            : isDismissedTab ? "You haven't marked anything as a false positive yet." : "Nothing in this category."}
         </div>
       ) : null}
 
@@ -13907,8 +15064,8 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
         <div key={g.kind + g.key} style={{
           marginBottom: 8, padding: 9, background: "var(--bg-tertiary)",
           borderRadius: "var(--radius-sm)",
-          border: "1px solid " + (isDismissedTab ? acRgba("green", 0.28) : "var(--border-subtle)"),
-          opacity: isDismissedTab ? 0.85 : 1,
+          border: "1px solid " + (isSimilarTab ? acRgba("purple", 0.28) : isDismissedTab ? acRgba("green", 0.28) : "var(--border-subtle)"),
+          opacity: isDismissedTab && !isSimilarTab ? 0.85 : 1,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <div style={{ width: 24, height: 32, flexShrink: 0 }}>
@@ -13917,14 +15074,15 @@ function DupesModal({ dupes, roots, onClose, onSelectIds, onJumpTo, onDismiss, o
             <span style={{ fontSize: 12.5, fontWeight: 500 }}>{g.items[0].name}</span>
             <Pill color="muted">{g.items.length} files</Pill>
             {g.items[0].creator ? <Pill color="blue">@{g.items[0].creator}</Pill> : null}
-            {isDismissedTab ? <Pill color="green">{TAB_INFO[kindOf(g)] ? TAB_INFO[kindOf(g)].label : g.kind}</Pill> : null}
+            {isSimilarTab ? <Pill color="purple" title="About how much of their wording these cards share">{Math.round(g.score * 100)}% alike</Pill>
+              : isDismissedTab ? <Pill color="green">{TAB_INFO[kindOf(g)] ? TAB_INFO[kindOf(g)].label : g.kind}</Pill> : null}
             <span style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
               {g.items.length > 1 ? (
                 <SmallBtn color="cyan" onClick={() => onCompare(g)} title="See exactly how these copies differ">
                   ⧉ compare
                 </SmallBtn>
               ) : null}
-              {isDismissedTab ? (
+              {isSimilarTab ? null : isDismissedTab ? (
                 <SmallBtn color="warm" onClick={() => { onRestore(kindOf(g), g.key); onToast && onToast("Restored — counted as a duplicate again", "warm"); }}>
                   treat as duplicate again
                 </SmallBtn>
@@ -14568,9 +15726,9 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
 
   const relayNote =
     relay.available === null ? { color: "muted", text: "Checking for the local server…" }
-    : relay.available === false ? { color: "red", text: "The local server isn't answering. The vault has to be opened through \"Start RP Card Vault.bat\", not straight from the file. Nothing can be sent until then." }
-    : relay.needsUpgrade ? { color: "warm", text: "The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"Start RP Card Vault.bat\"." }
-    : relayIsStale(relay) ? { color: "warm", text: "The server answering is serve.js build " + (relay.build || 0) + "; this page needs build " + EXPECTED_RELAY_BUILD + ". An older copy is still running in the background. Run \"Start RP Card Vault.bat\" — it stops the old one and starts the current one." }
+    : relay.available === false ? { color: "red", text: "The local server isn't answering. The vault has to be opened through \"" + START_SCRIPT + "\", not straight from the file. Nothing can be sent until then." }
+    : relay.needsUpgrade ? { color: "warm", text: "The server hosting this page is an older serve.js with no AI relay. Copy the new serve.js next to the page and run \"" + START_SCRIPT + "\"." }
+    : relayIsStale(relay) ? { color: "warm", text: "The server answering is serve.js build " + (relay.build || 0) + "; this page needs build " + EXPECTED_RELAY_BUILD + ". An older copy is still running in the background. Run \"" + START_SCRIPT + "\" — it stops the old one and starts the current one." }
     : { color: relay.hasKey ? "green" : "cyan",
         text: "Local server build " + relay.build + " ready" + (relay.baseUrl ? " · " + relay.baseUrl : " · no endpoint saved yet") +
           (relay.hasKey ? " · an API key is held in its memory." : " · no API key held (local endpoints usually don't need one).") };
@@ -14987,7 +16145,7 @@ function DestinationRow({ dest, isDefault, status, folderOptions, onChange, onRe
           </div>
           {status && status.available === false ? (
             <div style={{ fontSize: 10.5, color: "var(--accent-red)", marginBottom: 6 }}>
-              The local server isn't answering, so uploads can't work. Start the vault with Start RP Card Vault.bat.
+              The local server isn't answering, so uploads can't work. Start the vault with {START_SCRIPT}.
             </div>
           ) : null}
           {connected ? (
@@ -15099,14 +16257,14 @@ function ProblemLog({ info, onToast }) {
   const text = useMemo(build, [tick, showNames, info]);
   const copy = async () => {
     try { await navigator.clipboard.writeText(build()); onToast("Problem log copied", "green"); }
-    catch (e) { onToast("Couldn't copy: select the log below and press Ctrl+C", "warm"); }
+    catch (e) { onToast("Couldn't copy: select the log below and press " + MOD_KEY + "+C", "warm"); }
   };
   return (
     <div className="problem-log" style={{ marginBottom: 16 }}>
       <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.7, marginBottom: 8 }}>
         Errors and warnings from this session, to paste into a bug report. Kept only while this page is open:
         nothing is saved or sent anywhere. What you see is exactly what gets copied, with API keys, tokens and
-        passwords, email addresses, your Windows user name, addresses on your network, destination user names
+        passwords, email addresses, your user name on this computer, addresses on your network, destination user names
         and private cards' names taken out.
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
@@ -15209,7 +16367,7 @@ function ArchiveBox({ onExport, onOpen, onRestore, onToast }) {
   );
 }
 
-function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage, problemLogInfo, onExportArchive, onOpenArchive, onRestoreArchive }) {
+function SettingsModal({ storageKept, settings, onSave, onClose, onToast, onHardReset, onExportVault, onImportVault, cardCount, trashOptions, destStatus, onConnectDest, onDisconnectDest, onBackupNow, lastAutoBackup, flagUsage, problemLogInfo, onExportArchive, onOpenArchive, onRestoreArchive }) {
   const importRef = useRef(null);
   return (
     <Modal title="Settings" icon={"⚙"} width={640} onClose={onClose}
@@ -15220,7 +16378,7 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
           <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>Theme</span>
           <select value={settings.theme || "vault"} onChange={(e) => onSave({ theme: e.target.value })} aria-label="Theme"
             style={Object.assign({}, selectStyle, { width: "auto", flex: "1 1 180px", padding: "5px 8px" })}>
-            {THEME_CHOICES.map((k) => <option key={k} value={k}>{k === "auto" ? "Match Windows (Vault or Parchment)" : THEMES[k].label}</option>)}
+            {THEME_CHOICES.map((k) => <option key={k} value={k}>{k === "auto" ? "Match your system (Vault or Parchment)" : THEMES[k].label}</option>)}
           </select>
           <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>Accent</span>
           <input type="color" aria-label="Accent colour" value={settings.accentColor || THEMES[themeKeyFor(settings.theme, false)].colors[THEME_VARS.indexOf("--accent-warm")]}
@@ -15252,7 +16410,7 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
         </div>
         <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: -6, lineHeight: 1.5 }}>
           They also play in the card panel, unless set to Never. Always play plays every animated card on screen, which
-          can slow the vault down when many are showing. Turning off Windows' animation effects stops them all.
+          can slow the vault down when many are showing. Turning off your system's animation effects stops them all.
         </div>
         <Toggle color="warm" checked={settings.normalizeTags} onChange={(v) => onSave({ normalizeTags: v })}
           label="Normalize tag case and separators" />
@@ -15401,6 +16559,11 @@ function SettingsModal({ settings, onSave, onClose, onToast, onHardReset, onExpo
           the browser can't take it with it. To restore, use Import vault data and pick one of those files. It includes your
           agent chats, so keep it somewhere private.
         </div>
+        <div className="storage-kept" style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.65, marginBottom: 8 }}>
+          {storageKept === "kept" ? <span><strong style={{ color: "var(--accent-green)" }}>{BROWSER_LABEL} has agreed to keep the vault's data</strong>: it won't clear it by itself when disk space runs low.</span>
+            : storageKept === "may-clear" ? <span><strong style={{ color: "var(--accent-warm)" }}>{BROWSER_LABEL} hasn't promised to keep the vault's data</strong>: it may clear it by itself if disk space runs very low. It usually agrees once the vault is installed as an app (the install button in the address bar) or has been used for a while. These backups cover you either way.</span>
+            : <span>This browser has no way to be asked to keep the vault's data, so these backups are what protects it.</span>}
+        </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
           <select value={settings.autoBackupKey == null ? "auto" : settings.autoBackupKey} onChange={(e) => onSave({ autoBackupKey: e.target.value })}
             style={Object.assign({}, selectStyle, { width: "auto", flex: "1 1 180px", padding: "4px 8px" })} aria-label="Backup folder">
@@ -15520,6 +16683,12 @@ function App() {
   const [roots, setRoots] = useState([]);
   const [cards, setCards] = useState([]);
   const [editsMap, setEditsMap] = useState(new Map());
+  // The edits as they are now, for work that outlives a render (a scan).
+  const editsRef = useRef(editsMap);
+  editsRef.current = editsMap;
+  // Card files the vault has just written itself (a save, a backup put back),
+  // by record id: the scan that follows doesn't take them for outside changes.
+  const ownWritesRef = useRef(new Set());
   // Edits saved in another window of the vault come in here (see announceEdits).
   useEffect(() => {
     const ch = vaultEditsChannel();
@@ -15552,6 +16721,10 @@ function App() {
   const sidHintsRef = useRef({});  // new record id → short id, left by the vault's own moves
 
   const [storage, setStorage] = useState({ ok: true, msg: "" });
+  // Set when the saved data couldn't be read at startup: the vault stops there, having loaded and written nothing.
+  const [readFailure, setReadFailure] = useState("");
+  // Whether the browser has agreed to keep the vault's data: "kept", "may-clear" or "unknown".
+  const [storageKept, setStorageKept] = useState("unknown");
 
   /* ---- boot ---- */
   useEffect(() => {
@@ -15559,7 +16732,14 @@ function App() {
     const el = document.getElementById("root");
     if (el) el.setAttribute("data-mounted", "1");
     (async () => {
-      setStorage(await probeStorage());
+      const st = await probeStorage();
+      setStorage(st);
+      if (st.ok) {
+        // A database that opens but can't be read must not pass for an empty vault.
+        const read = await probeReads();
+        if (!read.ok) { logProblem("Storage", "The vault's saved data couldn't be read", read.msg); setReadFailure(read.msg || "unknown error"); return; }
+        keepStorage(navigator).then(setStorageKept);
+      }
       let [s, tm, rts, cds0, eds, di, fr, dm, ais, ags, sidNext] = await Promise.all([
         loadSettings(), loadTagMeta(), dbAll(STORE_ROOTS), dbAll(STORE_CARDS), dbAll(STORE_EDITS),
         loadDupeIgnore(), loadFolderRoles(), loadDupeMode(), loadAiSettings(), loadAgentSettings(),
@@ -15660,6 +16840,17 @@ function App() {
     });
   }, []);
 
+  /* ---- where each card stands with the destination Send uses ---- */
+  const sendDest = useMemo(() => defaultDestinationOf(settings), [settings.destinations, settings.defaultDestination]);
+  /** A folder destination's place in the index, or null (an upload destination, or a folder no longer linked). */
+  const destFolderIndex = useCallback((dest) => {
+    if (!dest || dest.type !== "folder" || !dest.folderKey) return null;
+    const k = parseDirKey(dest.folderKey);
+    if (!roots.some((r) => r.id === k.rootId)) return null;
+    return destinationFolderIndex(cards, k.rootId, k.dir);
+  }, [cards, roots]);
+  const sendDestIndex = useMemo(() => destFolderIndex(sendDest), [destFolderIndex, sendDest]);
+
   /* ---- merged records ---- */
   const records = useMemo(() => {
     const inTrash = makeTrashTest(settings);
@@ -15683,11 +16874,12 @@ function App() {
         aiPending: proposalCount(e && e.aiProposal) > 0,
         inTrash: inTrash(c.rootId, c.dir),
         aiPrivate: isPrivate(c.rootId, c.dir),
+        sentState: sendDest ? destinationStatus(c, e, sendDest, sendDestIndex).state : "",
       });
       r.search = searchBlobFor(r);
       return r;
     });
-  }, [cards, editsMap, settings.trashKey, settings.privateFolders]);
+  }, [cards, editsMap, settings.trashKey, settings.privateFolders, sendDest, sendDestIndex]);
 
   const recById = useMemo(() => {
     const m = new Map();
@@ -15814,6 +17006,10 @@ function App() {
       if (fl.flagged && !r.flags.length) return false;
       if (fl.unsaved && !r.pending) return false;
       if (fl.aiPending && !r.aiPending) return false;
+      if (fl.changedOutside && !r.changedOutside) return false;
+      if (fl.sentIn && !(SENT_STATES[r.sentState] || {}).in) return false;
+      if (fl.sentNot && (!r.sentState || (SENT_STATES[r.sentState] || {}).in || (SENT_STATES[r.sentState] || {}).changed)) return false;
+      if (fl.sentChanged && !(SENT_STATES[r.sentState] || {}).changed) return false;
 
       if (flagSel && !r.flags.some((f) => flagSel.has(f.key))) return false;
 
@@ -16097,6 +17293,7 @@ function App() {
   const writeCardEdits = useCallback(async (rec, edit, backup, keep) => {
     const body = await dbGet(STORE_BODIES, rec.id);
     const res = await saveCardToFile(rec, body, edit, roots, { backup, keep });
+    ownWritesRef.current.add(rec.id);
     const newFp = await contentFingerprint(res.data);
     // The card as the file now has it, straight away: the rescan that follows
     // can take a while on a big folder. Until then the inspector would show the
@@ -16117,11 +17314,54 @@ function App() {
       return next;
     });
     setCards((prev) => prev.map((c) => (c.id === rec.id
-      ? Object.assign({}, c, { fp: newFp, scannedAt: Date.now(), name: res.data.name || c.name, tags: res.data.tags })
+      ? Object.assign({}, c, { fp: newFp, sig: res.sig || c.sig, scannedAt: Date.now(), name: res.data.name || c.name, tags: res.data.tags })
       : c)));
     if (newFp !== rec.fp) await dbDel(STORE_EDITS, rec.fp);
     return res;
   }, [roots]);
+
+  /** Put one of a card's backups back as its file, after asking. */
+  const restoreBackup = useCallback(async (rec, name) => {
+    const root = roots.find((r) => r.id === rec.rootId);
+    const keep = settings.backupBeforeSave !== false;
+    const pending = pendingEditCount(editsRef.current.get(rec.fp));
+    if (!window.confirm(
+      "Put this backup back as the card's file?\n\n" + name + "\n→ " + (root ? root.name + "/" : "") + rec.rel + "\n\n" +
+      (keep ? "The file as it is now is copied to " + BACKUP_FOLDER_NAME + "/ first, so you can go back again."
+        : "BACKUPS ARE OFF, so the file as it is now will be gone.") +
+      (pending ? "\n\nThis card has " + pending + " change(s) waiting for Save to card. They stay waiting, on top of the backup's text." : "")
+    )) return;
+    try {
+      const res = await restoreCardBackup(rec, root, name, { backup: keep });
+      if (res.same) { showToast("That backup is the same as the file is now: nothing to put back", "warm"); return; }
+      ownWritesRef.current.add(rec.id);
+      showToast("Put back " + name + (res.backupPath ? " · the file as it was is in " + BACKUP_FOLDER_NAME + "/" : ""), "green");
+      runScanRef.current(rec.rootId, false, { quiet: true });
+    } catch (e) {
+      showToast("Couldn't put the backup back: " + e.message, "red");
+    }
+  }, [roots, settings.backupBeforeSave, showToast]);
+
+  /** Stop marking a card as changed outside the vault, and forget its earlier text. */
+  const dismissChanged = useCallback(async (rec) => {
+    const strip = (c) => { const x = Object.assign({}, c); delete x.changedOutside; return x; };
+    const raw = await dbGet(STORE_CARDS, rec.id);
+    if (raw) await dbPut(STORE_CARDS, strip(raw));
+    await dbDel(STORE_BODIES, prevBodyKey(rec.id));
+    setCards((prev) => prev.map((c) => (c.id === rec.id ? strip(c) : c)));
+  }, []);
+
+  /** What a card's History tab works with. */
+  const cardHistoryFor = useCallback((rec) => {
+    const root = roots.find((r) => r.id === rec.rootId);
+    return {
+      prev: () => dbGet(STORE_BODIES, prevBodyKey(rec.id)),
+      list: () => listCardBackups(rec, root),
+      read: async (name) => { const b = await readCardBackup(rec, root, name); return b.parsed && b.parsed.ok ? b.parsed.data : null; },
+      restore: (name) => restoreBackup(rec, name),
+      dismiss: () => dismissChanged(rec),
+    };
+  }, [roots, restoreBackup, dismissChanged]);
 
   const saveToCard = useCallback(async (rec) => {
     const edit = editsMap.get(rec.fp);
@@ -16155,6 +17395,12 @@ function App() {
       return true;
     } catch (e) {
       setScan(SCAN_IDLE);
+      if (e && e.code === "stale") {
+        // Read it again straight away: the changes waiting to be saved follow the card.
+        showToast(rec.name + " was changed outside the vault since it was last read, so nothing was written. Reading it again now: check the card, then save.", "warm");
+        runScanRef.current(rec.rootId, false, { quiet: true });
+        return false;
+      }
       showToast("Save failed: " + e.message, "red");
       return false;
     }
@@ -16195,6 +17441,8 @@ function App() {
         touched.add(rec.rootId);
       } catch (e) {
         failed++;
+        // A card changed outside the vault is read again, so it can be saved after a look.
+        if (e && e.code === "stale") touched.add(rec.rootId);
         if (errs.length < 3) errs.push(rec.file + ": " + e.message);
       }
     }
@@ -16259,13 +17507,49 @@ function App() {
         for (const r of res.records) delete sidHintsRef.current[r.id];
         if (a.next !== sidNextRef.current) { sidNextRef.current = a.next; await dbPut(STORE_KV, a.next, SID_KEY); }
       }
+      // A card whose file changed, and not by the vault's own hand, is marked
+      // so, with its text as it was kept beside the new (see "a card's history").
+      {
+        const bodyOf = new Map(res.bodies.map((b) => [b.__key, b.__val]));
+        for (let i = 0; i < res.records.length; i++) {
+          const r = res.records[i], prev = existing.get(r.id);
+          const own = ownWritesRef.current.has(r.id);
+          ownWritesRef.current.delete(r.id);
+          if (!prev || !prev.ok || !r.ok || !prev.sig || !r.sig || prev.sig === r.sig || !bodyOf.has(r.id)) continue;
+          if (own) { await dbDel(STORE_BODIES, prevBodyKey(r.id)); continue; }
+          // Changed twice before you looked: compared with what you last saw.
+          const was = (prev.changedOutside && await dbGet(STORE_BODIES, prevBodyKey(r.id))) || await dbGet(STORE_BODIES, r.id);
+          const changes = was ? cardChanges(was, bodyOf.get(r.id)) : [];
+          if (!changes.length) { await dbDel(STORE_BODIES, prevBodyKey(r.id)); continue; }
+          res.records[i] = Object.assign({}, r, { changedOutside: { at: Date.now(), fields: changes.map((c) => c.label) } });
+          await dbPut(STORE_BODIES, was, prevBodyKey(r.id));
+        }
+      }
       await dbPutMany(STORE_CARDS, res.records);
       await dbPutMany(STORE_BODIES, res.bodies);
       await dbPutMany(STORE_THUMBS, res.thumbs);
-      for (const id of res.removed) {
-        await dbDel(STORE_CARDS, id); await dbDel(STORE_BODIES, id); await dbDel(STORE_THUMBS, id);
-      }
+      await dbDelCardRecords(res.removed);
       working = working.filter((c) => c.rootId !== root.id).concat(res.records);
+      // A card edited somewhere else has a new fingerprint: its notes, favourite,
+      // flags and unsaved changes follow it (see editsFollowingCards).
+      {
+        const pairs = changedFingerprints(existing, res.records);
+        if (pairs.length) {
+          const fps = new Set(working.map((c) => c.fp));
+          const f = editsFollowingCards(pairs, (fp) => editsRef.current.get(fp), (fp) => fps.has(fp), Date.now());
+          if (f.puts.length) {
+            setEditsMap((prev) => {
+              const next = new Map(prev);
+              for (const fp of f.dels) next.delete(fp);
+              for (const e of f.puts) next.set(e.fingerprint, e);
+              return next;
+            });
+            await dbPutMany(STORE_EDITS, f.puts);
+            for (const fp of f.dels) await dbDel(STORE_EDITS, fp);
+            for (const m of f.moved) await migrateAiNotes(m[0], m[1]);
+          }
+        }
+      }
       // Merge into what's on screen now, not into this scan's starting copy:
       // another scan or a removed folder may have changed it meanwhile.
       const fresh = res.records;
@@ -16452,6 +17736,9 @@ function App() {
   }, [buildVaultExport, showToast]);
 
   const [lastAutoBackup, setLastAutoBackup] = useState(0);
+  // A backup in the backup folder that holds far more than this vault does:
+  // { name, label, weight, data }. Shown as an offer to bring it back.
+  const [restoreOffer, setRestoreOffer] = useState(null);
   useEffect(() => { dbGet(STORE_KV, AUTO_BACKUP_KEY).then((v) => setLastAutoBackup(Number(v) || 0)); }, []);
 
   // Write a copy of the vault data into the backup folder: when one is due
@@ -16471,13 +17758,31 @@ function App() {
     if (!granted) { if (asked) showToast("No write access to " + target.root.name, "red"); return false; }
     try {
       const dir = await getDirByPath(target.root.handle, target.dirs.concat([VAULT_DATA_FOLDER]), true);
+      const data = await buildVaultExport();
+      const nowWeight = vaultDataWeight(data);
+      const listNames = async () => { const out = []; for await (const [n, e] of dir.entries()) if (e.kind === "file") out.push(n); return out; };
+      const readBackup = async (n) => {
+        try { return JSON.parse(await (await (await dir.getFileHandle(n)).getFile()).text()); } catch (e) { return null; }
+      };
+      // A backup here that holds far more than the vault does now means the
+      // browser's copy was lost (cleared, or a new computer): offer it back.
+      // Until the vault has something of its own again, nothing is written,
+      // so those backups aren't crowded out by backups of an empty vault.
+      const dismissed = await dbGet(STORE_KV, RESTORE_OFFER_KEY);
+      for (const n of vaultDataBackupNames(await listNames())) {
+        const old = await readBackup(n);
+        if (!old || !Array.isArray(old.edits) || !backupOutweighs(vaultDataWeight(old), nowWeight)) continue;
+        if (n !== dismissed) setRestoreOffer({ name: n, label: target.label, weight: vaultDataWeight(old), data: old });
+        if (!asked && nowWeight === 0) return false;
+        break;
+      }
       const fh = await dir.getFileHandle(vaultDataFileName(stampNow()), { create: true });
       const w = await fh.createWritable();
-      await w.write(new Blob([JSON.stringify(await buildVaultExport(), null, 2)], { type: "application/json" }));
+      await w.write(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
       await w.close();
-      const names = [];
-      for await (const [n, e] of dir.entries()) if (e.kind === "file") names.push(n);
-      for (const n of vaultDataFilesToPrune(names, Number(settings.autoBackupKeep) || 7)) {
+      for (const n of vaultDataFilesToPrune(await listNames(), Number(settings.autoBackupKeep) || 7)) {
+        // One that holds far more than the vault does now is never the one to go.
+        if (backupOutweighs(vaultDataWeight(await readBackup(n)), nowWeight)) continue;
         try { await dir.removeEntry(n); } catch (e) { /* tried again next time */ }
       }
       const at = Date.now();
@@ -16887,6 +18192,70 @@ function App() {
     runScanRef.current(Array.from(touched), false, { quiet: true });
     return { moved, skipped, failed, label, errs };
   }, [recById, roots, showToast, folderRoles]);
+
+  /* ---- cards that read alike ---- */
+  const [similar, setSimilar] = useState(null);   // { groups, compared, at } once looked for
+  /** Compare every card's wording: { groups, compared, short, at }. Also what the agent's list_duplicates kind "similar" asks for. */
+  const computeSimilar = useCallback(async () => {
+    const items = [];
+    let short = 0;
+    await scanAllBodies((id, body) => {
+      const r = recById.get(id);
+      if (!r || !r.ok || r.inTrash || (dupeExcluder && dupeExcluder(r))) return;
+      const runs = textShingles(similarityText(body));
+      if (!runs) { short++; return; }
+      items.push({ id, fp: r.fp, sig: minHashSignature(runs) });
+    });
+    const groups = similarGroups(items, SIMILAR_MIN).map((g, i) => ({
+      key: "sim" + i + ":" + g.ids[0], kind: "similar", score: g.score,
+      items: g.ids.map((id) => recById.get(id)).filter(Boolean),
+    })).filter((g) => g.items.length > 1);
+    const out = { groups, compared: items.length, short, at: Date.now() };
+    setSimilar(out);
+    return out;
+  }, [recById, dupeExcluder]);
+
+  const findSimilar = useCallback(async () => {
+    if (scan.running) { showToast("Wait for the current job to finish first", "warm"); return; }
+    setScan({ running: true, done: 0, total: 0, label: "Reading and comparing every card's text…", rootName: "Similar cards" });
+    try {
+      await new Promise((r) => setTimeout(r, 30));
+      const { groups } = await computeSimilar();
+      showToast(groups.length ? fmtNum(groups.length) + " group" + (groups.length === 1 ? "" : "s") + " of cards that read alike" : "No two cards read alike beyond the duplicates already found", groups.length ? "cyan" : "green");
+    } catch (e) {
+      showToast("Couldn't compare the cards: " + ((e && e.message) || String(e)), "red");
+    }
+    setScan(SCAN_IDLE);
+  }, [scan.running, computeSimilar, showToast]);
+
+  /* ---- rename from a pattern ---- */
+  const [renameIds, setRenameIds] = useState(null);
+  const renameCards = useCallback(async (todo) => {
+    setRenameIds(null);
+    if (!todo.length) return;
+    setScan({ running: true, done: 0, total: todo.length, label: "Renaming…", rootName: "Rename" });
+    let done = 0, skipped = 0, failed = 0;
+    const errs = [], touched = new Set();
+    for (let i = 0; i < todo.length; i++) {
+      const rec = recById.get(todo[i].id);
+      if (!rec) { skipped++; continue; }
+      const root = roots.find((x) => x.id === rec.rootId);
+      setScan({ running: true, done: i, total: todo.length, label: rec.file, rootName: "Rename" });
+      try {
+        const res = await renameCardFile(rec, root, todo[i].to);
+        if (res.skipped) { skipped++; continue; }
+        done++;
+        touched.add(rec.rootId);
+        // The card keeps its short id under its new name.
+        if (rec.sid) sidHintsRef.current[rec.rootId + ":" + (rec.dir ? rec.dir + "/" : "") + res.name] = rec.sid;
+      } catch (e) { failed++; if (errs.length < 3) errs.push(rec.file + ": " + e.message); }
+    }
+    setScan(SCAN_IDLE);
+    await logOp("bulkRename", { renamed: done, skipped, failed });
+    showToast(done + " file" + (done === 1 ? "" : "s") + " renamed" + (skipped ? ", " + skipped + " left as they were" : "") + (failed ? ", " + failed + " failed — " + errs.join(" | ") : ""), failed ? "red" : "green");
+    setSelection(new Set());
+    if (touched.size) runScanRef.current(Array.from(touched), false, { quiet: true });
+  }, [recById, roots, showToast]);
 
   /* ---- trash + delete ---- */
 
@@ -17537,12 +18906,24 @@ function App() {
     return moveCards(movable, root, dir, { noConfirm: true, silent: true });
   }, [settings.autoFileAfterSend, settings.afterSendKey, roots, recById, moveCards, showToast]);
 
+  /** Mark the cards a send reached: when, and which file each was. Done before any filing away moves them. */
+  const markSent = useCallback((ids, dest) => {
+    const now = Date.now(), list = [], seen = new Set();
+    for (const id of ids) {
+      const rec = recById.get(id);
+      if (!rec || !rec.fp || !rec.sig || seen.has(rec.fp + rec.sig)) continue;
+      seen.add(rec.fp + rec.sig);
+      list.push({ fp: rec.fp, patch: (cur) => sentPatch(cur, dest.id, rec.sig, now) });
+    }
+    if (list.length) patchManyEdits(list);
+  }, [recById, patchManyEdits]);
+
   /** Upload into a front end with an import API (SillyTavern, Lumiverse, any HTTP importer). */
   const sendViaApi = useCallback(async (ids, dest) => {
     const recs = ids.map((id) => recById.get(id)).filter(Boolean);
     if (!recs.length) return;
     if (destStatus.available === false) {
-      showToast("The local server isn't answering — start the vault with \"Start RP Card Vault.bat\"", "red");
+      showToast("The local server isn't answering — start the vault with \"" + START_SCRIPT + "\"", "red");
       return;
     }
     if (!destStatus.byId[dest.id]) {
@@ -17577,6 +18958,7 @@ function App() {
       }
     }
     setScan(SCAN_IDLE);
+    markSent(okIds, dest);
     await logOp("apiImport", { count: recs.length, to: dest.name, ok, failed });
     const filed = await autoFileAfterSend(okIds);
     showToast(
@@ -17585,7 +18967,7 @@ function App() {
       (failed ? " · " + failed + " failed — " + errs.join(" | ") : ""),
       failed ? "red" : "green"
     );
-  }, [recById, roots, destStatus, showToast, autoFileAfterSend]);
+  }, [recById, roots, destStatus, showToast, autoFileAfterSend, markSent]);
 
   /** Copy into a folder destination. */
   const sendToFolder = useCallback(async (ids, dest) => {
@@ -17601,7 +18983,7 @@ function App() {
     if (!(await verifyPermission(root.handle, true))) { showToast("Write permission denied for " + root.name, "red"); return; }
     setScan({ running: true, done: 0, total: recs.length, label: "Sending…", rootName: root.name });
     let sent = 0, already = 0, failed = 0;
-    const okIds = [], errs = [];
+    const okIds = [], errs = [], reached = [];
     for (let i = 0; i < recs.length; i++) {
       const rec = recs[i];
       setScan({ running: true, done: i, total: recs.length, label: rec.file, rootName: root.name });
@@ -17609,6 +18991,7 @@ function App() {
         const { bytes } = await readOriginalBytes(rec, roots);
         const out = await copyIntoRoot(root, dir ? dir.split("/") : [], rec.file, new Blob([bytes]), rec.sig);
         if (out.skipped) already++; else sent++;
+        reached.push(rec.id);
         // "Already there" can be the card's own file, when it lives in the
         // destination folder. It's the front end's copy, so it isn't filed away.
         let own = false;
@@ -17617,6 +19000,7 @@ function App() {
       } catch (e) { failed++; errs.push(rec.file + ": " + ((e && e.message) || String(e))); }
     }
     setScan(SCAN_IDLE);
+    markSent(reached, dest);
     await logOp("sendToFrontend", { count: recs.length, to: root.name + (dir ? "/" + dir : ""), sent, already, failed });
     const filed = await autoFileAfterSend(okIds);
     showToast(
@@ -17628,7 +19012,7 @@ function App() {
       failed ? "red" : "green"
     );
     runScanRef.current(root.id, false, { quiet: true });
-  }, [folderTargetOf, recById, roots, showToast, autoFileAfterSend]);
+  }, [folderTargetOf, recById, roots, showToast, autoFileAfterSend, markSent]);
 
   // Cards that left the vault (moved, filed away after a send, renamed and
   // rescanned) leave the selection too, so S and Send never act on ghosts.
@@ -17936,7 +19320,7 @@ function App() {
       // The flag dialog is a dialog too, with its own state: while it's up, keys
       // mustn't reach the card behind it. Nor while a right-click menu is up:
       // Escape closes the menu (the menu sees to that), not the inspector too.
-      const dialog = modal || flagModal || ctxMenu;
+      const dialog = modal || flagModal || ctxMenu || renameIds;
       if (e.key === "Escape" && !dialog && focusId) setFocusId(null);
       if (!focusId || dialog) return;
       // Ctrl+F is the browser's find and Ctrl+S its save, Alt+arrows its back
@@ -17965,7 +19349,7 @@ function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [focusId, filtered, modal, flagModal, ctxMenu, patchEdit, selection]);
+  }, [focusId, filtered, modal, flagModal, ctxMenu, renameIds, patchEdit, selection]);
 
   /* ---- grid geometry ---- */
   const tileW = settings.tileSize;
@@ -18003,6 +19387,32 @@ function App() {
     [roots, records]
   );
 
+  if (readFailure) {
+    return (
+      <Empty icon="⚠" title="The vault couldn't read its saved data"
+        hint={"The browser opened the vault's database but a read from it failed, so the vault has stopped here rather than open looking empty. Nothing has been loaded and nothing has been changed: your tags, notes and settings are as they were."}>
+        <div style={{ marginTop: 6, maxWidth: 560, fontSize: 12, lineHeight: 1.7, color: "var(--text-secondary)", textAlign: "left" }}>
+          <div><strong>1.</strong> Close any other tab or window of the vault, then reload this page.</div>
+          <div><strong>2.</strong> If it says the same, close {BROWSER_LABEL} completely and open it again.</div>
+          <div><strong>3.</strong> If it still can't, the browser's copy is damaged. Your vault-data backups are in the{" "}
+            <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>{VAULT_DATA_FOLDER}</code> folder inside one of your card folders:
+            start afresh below, add the folder again, and the vault offers to bring the newest one back.</div>
+        </div>
+        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+          <SmallBtn color="warm" style={{ padding: "8px 16px", fontSize: 12 }} onClick={() => window.location.reload()}>Reload</SmallBtn>
+          <SmallBtn color="red" style={{ padding: "8px 16px", fontSize: 12 }} title="Erase this browser's copy of the vault's data. Card files and backups are not touched."
+            onClick={() => {
+              if (!window.confirm("Erase this browser's copy of the vault's data and start afresh?\n\nYour card files, and the backups in " + VAULT_DATA_FOLDER + ", are not touched. After the reload, add your card folder again and the vault offers to bring the newest backup back.")) return;
+              const reload = () => window.location.reload();
+              dbOpen().then((db) => { try { db.close(); } catch (e) { /* not open */ } }, () => {}).then(() => {
+                try { const r = indexedDB.deleteDatabase(DB_NAME); r.onsuccess = reload; r.onerror = reload; r.onblocked = reload; } catch (e) { reload(); }
+              });
+            }}>Start afresh</SmallBtn>
+        </div>
+        <div style={{ marginTop: 10, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "var(--text-muted)", maxWidth: 560, wordBreak: "break-word" }}>{readFailure}</div>
+      </Empty>
+    );
+  }
   if (!ready) {
     return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-muted)", fontSize: 13 }}>Opening vault…</div>;
   }
@@ -18096,6 +19506,29 @@ function App() {
         style={{ display: "none" }}
         onChange={(e) => { const fl = e.target.files; e.target.value = ""; handlePickedFolder(fl); }} />
 
+      {/* ── a backup that holds more than this vault does ── */}
+      {restoreOffer ? (
+        <div style={{
+          flexShrink: 0, padding: "9px 16px", display: "flex", gap: 10, alignItems: "center",
+          background: acRgba("green", 0.09), borderBottom: "1px solid " + acRgba("green", 0.3),
+        }}>
+          <span style={{ fontSize: 14 }}>{"\u{1F4BE}"}</span>
+          <div style={{ fontSize: 11.5, lineHeight: 1.6, color: "var(--text-secondary)", flex: 1 }}>
+            <strong style={{ color: "var(--accent-green)" }}>A backup of your vault data is in {restoreOffer.label}</strong>
+            {vaultDataBackupDate(restoreOffer.name) ? ", made " + vaultDataBackupDate(restoreOffer.name) : ""}: {fmtNum(restoreOffer.weight)} records
+            of tags, notes, ratings, edits and chats, which is more than this vault holds now. If this browser's
+            copy was cleared, or this is a new computer, bring it back. It's kept in the folder either way.
+          </div>
+          <SmallBtn color="green" onClick={async () => {
+            const offer = restoreOffer;
+            setRestoreOffer(null);
+            try { await applyVaultData(offer.data); }
+            catch (e) { showToast("Couldn't bring the backup back: " + e.message, "red"); }
+          }}>Bring it back</SmallBtn>
+          <SmallBtn color="muted" onClick={() => { dbPut(STORE_KV, restoreOffer.name, RESTORE_OFFER_KEY); setRestoreOffer(null); }}>not now</SmallBtn>
+        </div>
+      ) : null}
+
       {/* ── overlapping registered folders ── */}
       {nestedWarn.length ? (
         <div style={{
@@ -18186,12 +19619,12 @@ function App() {
                   <strong style={{ color: "var(--accent-warm)" }}>1.</strong> Put{" "}
                   <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--accent-cyan)" }}>serve.js</code>{" "}
                   and{" "}
-                  <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--accent-cyan)" }}>Start RP Card Vault.bat</code>{" "}
+                  <code style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "var(--accent-cyan)" }}>{START_SCRIPT}</code>{" "}
                   in the same folder as this file.
                 </div>
                 <div style={{ marginBottom: 10, color: "var(--text-secondary)" }}>
                   <strong style={{ color: "var(--accent-warm)" }}>2.</strong> Double-click{" "}
-                  <strong>Start RP Card Vault.bat</strong>. A console window opens and your browser follows automatically.
+                  <strong>{START_SCRIPT}</strong>{OS_KIND === "linux" ? " (in a terminal: ./start.sh)" : ""}. A console window opens and your browser follows automatically.
                 </div>
                 <div style={{ marginBottom: 14, color: "var(--text-secondary)" }}>
                   <strong style={{ color: "var(--accent-warm)" }}>3.</strong> Leave that console open while you use the vault.
@@ -18201,7 +19634,7 @@ function App() {
                   background: "var(--bg-input)", border: "1px solid var(--border-subtle)",
                   borderRadius: "var(--radius-sm)", padding: "8px 10px", color: "var(--text-muted)",
                 }}>
-                  no .bat? &nbsp;cd into the folder and run:&nbsp;
+                  no launcher? &nbsp;cd into the folder and run:&nbsp;
                   <span style={{ color: "var(--accent-green)" }}>node serve.js</span>
                 </div>
                 <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 12, lineHeight: 1.6 }}>
@@ -18250,18 +19683,19 @@ function App() {
               filters={filters} setFilters={setFilters} tagIndex={tagIndex}
               roots={roots} rootCounts={rootCounts} total={records.length} shown={filtered.length}
               settings={settings} onOpenTagManager={() => setModal("tags")}
+              onSaveViews={(list) => patchSettings({ savedViews: list })}
               folderTrees={folderTrees} onDropCards={onDropCards} dragActive={dragActive}
               onNewFolder={() => newFolder(null, "")}
               folderRoles={folderRoles} onFolderMenu={openFolderMenu} flagCounts={flagCounts}
               dupeExcluder={dupeExcluder}
-              keysOff={!!(modal || flagModal || ctxMenu)}
+              keysOff={!!(modal || flagModal || ctxMenu || renameIds)}
               mode={sideMode}
               onMode={(m) => { setSideMode(m); if (m === "agent") setAgentOpened(true); }}
               agent={agentOpened ? (
                 <AgentPanel ai={aiSettings} relay={aiRelay} agent={agentSettings} onSaveAgent={patchAgentSettings}
                   records={records} editsMap={editsMap} tagIndex={tagIndex} sortKey={filters.sort} shuffleSeed={shuffleSeed} onPatchEdit={patchEdit}
                   onPatchMany={patchManyEdits} roots={roots} privateFolders={settings.privateFolders}
-                  onCardFiles={{ create: createCardFile, copy: copyCardFile, move: moveCardFile }} dupes={dupes}
+                  onCardFiles={{ create: createCardFile, copy: copyCardFile, move: moveCardFile }} dupes={dupes} onSimilar={computeSimilar}
                   onOpenCard={(id) => setFocusId(id)}
                   onOpenAiSettings={() => setModal("ai")} onToast={showToast} />
               ) : null} />
@@ -18334,6 +19768,7 @@ function App() {
                         {writableRoots.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                       </select>
                     ) : null}
+                    <SmallBtn color="cyan" onClick={() => setRenameIds(Array.from(selection))} title="Rename these cards' files from a pattern, like {creator} - {name}">Rename…</SmallBtn>
                     <SmallBtn color="warm" onClick={() => trashCards(Array.from(selection))} title="Relocate to your trash folder">{"\u{1F5D1}"}</SmallBtn>
                     <SmallBtn color="red" onClick={() => deleteCards(Array.from(selection))} title="Delete permanently from disk">✕</SmallBtn>
                     <SmallBtn color="muted" onClick={() => setSelection(new Set())}>clear</SmallBtn>
@@ -18408,6 +19843,8 @@ function App() {
 
             {focusRec ? (
               <Inspector rec={focusRec} roots={roots} edit={focusEdit} tagIndex={tagIndex}
+                history={cardHistoryFor(focusRec)}
+                sendStatus={(settings.destinations || []).map((d) => Object.assign({ id: d.id, name: d.name }, destinationStatus(focusRec, focusEdit, d, destFolderIndex(d))))}
                 dupeGroup={focusDupeGroup}
                 onSaveToCard={() => saveToCard(focusRec)} onPlay={playPicture}
                 writeBlock={referenceFolderError(roots.find((r) => r.id === focusRec.rootId), focusRec.dir, folderRoles)}
@@ -18441,8 +19878,14 @@ function App() {
           onDone={(ids) => runScan(ids, false, { quiet: true })} />
       ) : null}
 
+      {renameIds ? (
+        <RenameModal recs={renameIds.map((id) => recById.get(id)).filter(Boolean)} allRecs={records}
+          lockOf={(r) => cardFileLock(r, roots, folderRoles)} onClose={() => setRenameIds(null)} onRename={renameCards} />
+      ) : null}
+
       {modal === "dupes" ? (
         <DupesModal dupes={dupes} roots={roots} onClose={() => setModal(null)}
+          similar={similar} onFindSimilar={findSimilar}
           onSelectIds={(ids) => setSelection(new Set(ids))}
           onResolve={resolveDupeGroups}
           onCompare={(g) => setCompare(g)}
@@ -18483,7 +19926,7 @@ function App() {
       ) : null}
 
       {modal === "settings" ? (
-        <SettingsModal settings={settings} onSave={patchSettings} onClose={() => setModal(null)}
+        <SettingsModal settings={settings} onSave={patchSettings} onClose={() => setModal(null)} storageKept={storageKept}
           onToast={showToast} onHardReset={hardReset} onExportVault={exportVault}
           onImportVault={importVault} cardCount={cards.length} trashOptions={moveTargets}
           destStatus={destStatus} onConnectDest={connectDest} onDisconnectDest={disconnectDest}

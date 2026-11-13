@@ -23,7 +23,8 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const children = [];
 process.on("exit", () => { for (const c of children) try { c.kill(); } catch (e) {} });
 
-const { mod: V } = loadPureRegion(["migrateDestinations", "sanitizeDestination", "defaultDestinationOf", "DEST_KINDS", "DEFAULT_SETTINGS", "destSendStopsRun"]);
+const { mod: V } = loadPureRegion(["migrateDestinations", "sanitizeDestination", "defaultDestinationOf", "DEST_KINDS", "DEFAULT_SETTINGS", "destSendStopsRun",
+  "SENT_STATES", "sentPatch", "sentMarkOf", "destinationFolderIndex", "destinationStatus", "editAfterSave", "mergeEditRecords"]);
 
 function freePort() {
   return new Promise((resolve) => {
@@ -151,6 +152,51 @@ async function main() {
   for (let i = 0; i < 50; i++) { if ((await call("GET", "/__vault/status")).status === 200) break; await wait(100); }
   const card = (txt) => Buffer.from("\x89PNG fake " + (txt || "CARD-BYTES"), "latin1");
   const send = (id, name, bytes) => call("POST", "/__vault/dest/send?id=" + id + "&name=" + encodeURIComponent(name), bytes, "application/octet-stream");
+
+  console.log("\nwhere a card stands with a front end, from what the vault knows itself");
+  {
+    const rec = (id, dir, sig, fp, lfp) => ({ id: "r:" + id, rootId: "r", dir, rel: (dir ? dir + "/" : "") + id, sig, fp, lfp, ok: true, hasName: true });
+    const upload = { id: "d1", type: "lumiverse", name: "Lumiverse" };
+    const ada = rec("ada.png", "", "sig-1", "fp-ada", "lfp-ada");
+
+    t.eq(V.destinationStatus(ada, null, upload, null).state, "none", "a card never uploaded: not sent");
+    const sent = V.sentPatch(null, "d1", "sig-1", 1000);
+    t.eq([sent.sent.d1.at, sent.sent.d1.sigs], [1000, ["sig-1"]], "an upload leaves a mark on the card's record: when, and which file");
+    t.eq(V.destinationStatus(ada, sent, upload, null), { state: "sent", at: 1000 }, "that file reads as sent");
+
+    // The question that started this: a copy of the card, reworked. It shares the record (same name,
+    // description and first message), but it isn't the file the front end was given.
+    const rework = rec("ada rework.png", "", "sig-2", "fp-ada", "lfp-ada");
+    t.eq(V.destinationStatus(rework, sent, upload, null).state, "changed", "a reworked copy that shares the card's record doesn't pass for the one that was sent");
+    const reworkedMore = rec("ada new.png", "", "sig-3", "fp-other", "lfp-ada");
+    t.eq(V.destinationStatus(reworkedMore, null, upload, null).state, "none", "and one reworked into a card of its own (a new description, say) has never been sent");
+    const both = V.sentPatch(sent, "d1", "sig-2", 2000);
+    t.eq([V.destinationStatus(ada, both, upload, null).state, V.destinationStatus(rework, both, upload, null).state, both.sent.d1.sigs], ["sent", "sent", ["sig-2", "sig-1"]],
+      "once the rework is sent too, both read as sent: the mark keeps each file that went");
+    t.eq(V.destinationStatus(rec("ada.png", "", "sig-9", "fp-ada", "lfp-ada"), both, upload, null).state, "changed", "a card saved since (its file is a new one) reads as changed since it was sent");
+    t.eq(V.destinationStatus(ada, both, { id: "d2", type: "sillytavern" }, null).state, "none", "a mark is one destination's: another has its own");
+    let many = null;
+    for (let i = 0; i < 12; i++) many = V.sentPatch(many, "d1", "s" + i, i);
+    t.eq([many.sent.d1.sigs.length, many.sent.d1.sigs[0]], [8, "s11"], "the mark keeps the latest few files, newest first");
+
+    // A save keeps the mark, and so does a record joined to another.
+    const saved = V.editAfterSave(Object.assign({ fields: { description: "x" } }, sent), Object.assign({ fields: { description: "x" } }, sent), "fp-new");
+    t.eq(saved.sent, sent.sent, "Save to card carries the mark to the card's new record");
+    t.eq(V.mergeEditRecords({ sent: { d2: { at: 5, sigs: ["z"] } } }, sent, "fp", 9).sent, { d1: sent.sent.d1, d2: { at: 5, sigs: ["z"] } }, "two records joined keep both their marks");
+
+    // A folder destination is a linked folder: the index says what's in it, mark or no mark.
+    const folder = { id: "d3", type: "folder", name: "SillyTavern folder", folderKey: "r::Frontend" };
+    const inFrontend = [rec("ada.png", "Frontend", "sig-1", "fp-ada", "lfp-ada"), rec("old bram.png", "Frontend", "sig-b0", "fp-bram-old", "lfp-bram"), rec("x.png", "Elsewhere", "sig-c", "fp-c", "lfp-c")];
+    const idx = V.destinationFolderIndex(inFrontend, "r", "Frontend");
+    t.eq(V.destinationStatus(ada, null, folder, idx).state, "there", "a card whose very file is in the folder: in the front end");
+    t.eq(V.destinationStatus(rework, null, folder, idx).state, "differs", "the reworked copy: a different version is there");
+    t.eq(V.destinationStatus(rec("bram.png", "", "sig-b1", "fp-bram-new", "lfp-bram"), null, folder, idx).state, "differs", "a card with the same name and creator but new text: a different version is there");
+    t.eq(V.destinationStatus(rec("x.png", "", "sig-c", "fp-c", "lfp-c"), null, folder, idx).state, "none", "a card that's only in some other folder: not sent");
+    t.eq(V.destinationStatus(inFrontend[0], null, folder, idx).state, "home", "the file in the folder itself: the front end's own copy");
+    t.eq(V.destinationStatus(rec("cora.png", "", "sig-d", "fp-d", "lfp-d"), V.sentPatch(null, "d3", "sig-d", 7), folder, idx), { state: "gone", at: 7 }, "one that was sent there and isn't any more (removed in the front end): sent before, not there now");
+    t.eq(V.destinationStatus(ada, sent, folder, null).state, "none", "with the destination's folder no longer linked, only its own mark counts");
+    t.ok(Object.keys(V.SENT_STATES).every((k) => V.SENT_STATES[k].label && V.SENT_STATES[k].color), "every state has its words and its colour");
+  }
 
   console.log("\nSillyTavern");
   {

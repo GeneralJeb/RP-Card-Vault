@@ -45,7 +45,8 @@ function skip(label, why) {
   console.log("  – " + label + " (skipped: " + why + ")");
 }
 
-function done() {
+/** Print the summary and exit. `code`, when given and nothing failed, is the exit code to use instead of 0. */
+function done(code) {
   finished = true;
   console.log("\n" + "-".repeat(60));
   if (failures.length) {
@@ -54,7 +55,7 @@ function done() {
     process.exit(1);
   }
   console.log("all " + pass + " checks passed");
-  process.exit(0);
+  process.exit(code || 0);
 }
 
 /**

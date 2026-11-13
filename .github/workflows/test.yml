@@ -1,5 +1,8 @@
 # Runs every test suite on each pull request and on each push to dev and main.
 # Windows, because the launcher tests run the real .bat, .vbs and .ps1 files.
+# Two more jobs follow: the browser test in Chrome and in Brave (the first job
+# runs it in Edge), and the suites on Linux and on a Mac, where start.sh and
+# stop.sh are run for real.
 name: Tests
 
 on:
@@ -30,3 +33,57 @@ jobs:
           name: browser-test-failure
           path: ${{ runner.temp }}/vault-browser-fail.png
           if-no-files-found: ignore
+
+  # The browser test again, in the other browsers people run the vault in.
+  # Chrome comes with GitHub's Windows machines; Brave is installed for the run.
+  # A failed Brave run is shown as failed without failing the pull request,
+  # because the install comes from outside and can fail for its own reasons.
+  browsers:
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, brave]
+    runs-on: windows-latest
+    continue-on-error: ${{ matrix.browser == 'brave' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Install Brave
+        if: matrix.browser == 'brave'
+        run: choco install brave -y --no-progress
+      - run: node test/browser.test.js ${{ matrix.browser }}
+      - name: Keep the browser test's screenshot when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-failure-${{ matrix.browser }}
+          path: ${{ runner.temp }}/vault-browser-fail.png
+          if-no-files-found: ignore
+
+  # The vault runs on Linux and on a Mac too. Linux runs everything. The Mac
+  # runs the two suites that touch the system itself: its launchers, and the
+  # page in a browser (the first installed of Edge, Chrome and Brave).
+  other-systems:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            run: npm test
+          - os: macos-latest
+            run: node test/launchers.test.js && node test/browser.test.js
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: ${{ matrix.run }}

@@ -18,6 +18,10 @@ const { mod: V } = loadPureRegion([
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
   "writeCardFile", "cardFormatOf", "pngWithoutCard", "reusableRecord",
+  "lorebookChecks", "loreKeyTest", "fillPlaceholders", "placeholdersLeft",
+  "renameBase", "planRename", "renameCardFile", "RENAME_PATTERNS",
+  "similarityText", "textShingles", "minHashSignature", "signatureSimilarity", "similarGroups", "SIMILAR_MIN",
+  "cardChanges", "cardCompareParts", "cardBackupsOf", "backupStampTime", "listCardBackups", "readCardBackup", "restoreCardBackup", "prevBodyKey",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -165,7 +169,7 @@ async function main() {
     // Save to card, end to end, into a folder held in memory.
     const fsys = memFs("Scratch");
     fsys.put("ada.png", first);
-    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png", sig: "s" };
+    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png" };
     const edit = { fields: { description: "A clockmaker who hates being late." } };
     const res = await V.saveCardToFile(rec, parsed.data, edit, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
     const onDisk = await V.parseCardBytes(fsys.get("ada.png"), "ada.png");
@@ -186,7 +190,7 @@ async function main() {
       const bytes = ext === "png" ? V.writeCardIntoPng(PNG_1PX, card, V.buildV2Payload(card)) : enc(card);
       fsys.put("ada." + ext, bytes);
       const parsed = await V.parseCardBytes(bytes, "ada." + ext);
-      const rec = { id: "r:ada." + ext, rootId: "r", rel: "ada." + ext, dir: "", file: "ada." + ext, ext, sig: "s" };
+      const rec = { id: "r:ada." + ext, rootId: "r", rel: "ada." + ext, dir: "", file: "ada." + ext, ext };
       await V.saveCardToFile(rec, parsed.data, { fields: { description: "Edited." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
       const d = (await V.parseCardBytes(fsys.get("ada." + ext), "ada." + ext)).raw.data;
       t.ok(d.description === "Edited." && (d.assets || []).length === 2 && d.assets[1].name === "happy"
@@ -222,7 +226,7 @@ async function main() {
       return fh;
     };
     const parsed = await V.parseCardBytes(orig, "ada.png");
-    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png", sig: "s" };
+    const rec = { id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png" };
     let err = "";
     try { await V.saveCardToFile(rec, parsed.data, { fields: { personality: "Punctual." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false }); }
     catch (e) { err = e.message; }
@@ -243,6 +247,306 @@ async function main() {
     catch (e) { err = e.message; }
     t.ok(/Restore failed/.test(err) && /backups are off/i.test(err) && !/recover from/.test(err),
       "a failed restore with backups off doesn't send you looking for a backup (" + (err || "no error") + ")");
+  }
+
+  console.log("\nSave to card never writes over a change made somewhere else");
+  {
+    const card = (over) => ({ spec: "chara_card_v3", spec_version: "3.0", data: Object.assign({
+      name: "Ada", description: "A clockmaker.", personality: "Dry.", scenario: "A workshop.", first_mes: "You're late.",
+      mes_example: "", creator_notes: "", system_prompt: "", post_history_instructions: "", tags: ["victorian"], creator: "someone",
+      character_version: "1", alternate_greetings: ["Hello again."], extensions: {} }, over || {}) });
+    const pngOf = (c) => V.writeCardIntoPng(PNG_1PX, c, V.buildV2Payload(c));
+    const info = { rel: "ada.png", dir: "", file: "ada.png", ext: "png" };
+    const scanned = async (fsys, root) => V.processCardFile(root, info, await (await root.handle.getFileHandle("ada.png")).getFile());
+
+    // The card is indexed; then the front end rewrites its file; then, with no rescan, a tag is added here and saved.
+    const fsys = memFs("Library");
+    fsys.put("ada.png", pngOf(card()));
+    const root = { id: "r", name: "Library", role: "library", handle: fsys.handle };
+    const first = await scanned(fsys, root);
+    const outside = pngOf(card({ description: "A clockmaker who lost her hand in the fire.", alternate_greetings: ["Hello again.", "Mind the gears."] }));
+    fsys.put("ada.png", outside);
+    let err = null;
+    try { await V.saveCardToFile(first.rec, first.body.__val, { fields: {}, tags: ["victorian", "inventor"] }, [root], { keep: 5 }); } catch (e) { err = e; }
+    t.ok(err && err.code === "stale" && /changed since the vault last read it/.test(err.message), "a file changed since the vault read it is refused, saying so", err && err.message);
+    t.ok(V.sameBytes(fsys.get("ada.png"), outside), "and is left exactly as the front end wrote it");
+    t.eq(fsys.list("_vault backups").length, 0, "with no backup made for a save that didn't happen");
+
+    // Read again, the same change goes in on top of the front end's.
+    const again = await scanned(fsys, root);
+    const res = await V.saveCardToFile(again.rec, again.body.__val, { fields: {}, tags: ["victorian", "inventor"] }, [root], { keep: 5 });
+    const now = (await V.parseCardBytes(fsys.get("ada.png"), "ada.png")).data;
+    t.eq([now.description, now.alternate_greetings.length, now.tags.join()], ["A clockmaker who lost her hand in the fire.", 2, "victorian,inventor"],
+      "once the card is read again, the save keeps the front end's change and adds the vault's");
+    t.eq(res.sig, await V.byteSignature(new File([fsys.get("ada.png")], "ada.png")), "the save gives back the file's new signature");
+    let second = null;
+    try { await V.saveCardToFile(Object.assign({}, again.rec, { sig: res.sig }), now, { fields: { scenario: "A workshop at night." } }, [root], { keep: 5 }); } catch (e) { second = e; }
+    t.ok(!second, "so a second save straight after the first isn't taken for a change made elsewhere", second && second.message);
+
+    // The index has the card but not its text (it never made it into the cache).
+    const bare = memFs("Library");
+    bare.put("ada.png", pngOf(card()));
+    const bareRoot = { id: "r", name: "Library", role: "library", handle: bare.handle };
+    const rec = (await scanned(bare, bareRoot)).rec;
+    await V.saveCardToFile(rec, undefined, { fields: { description: "A clockmaker, rewritten." } }, [bareRoot], { backup: false });
+    const kept = (await V.parseCardBytes(bare.get("ada.png"), "ada.png")).data;
+    t.eq([kept.name, kept.description, kept.first_mes, kept.personality, kept.tags.join(), kept.alternate_greetings.length],
+      ["Ada", "A clockmaker, rewritten.", "You're late.", "Dry.", "victorian", 1],
+      "a save with no cached text takes every other field from the file, instead of writing them blank");
+
+    // A stale copy of the text in the index can't undo a field either: only what was edited is written.
+    const stale = memFs("Library");
+    stale.put("ada.png", pngOf(card({ scenario: "A workshop, rebuilt." })));
+    const staleRoot = { id: "r", name: "Library", role: "library", handle: stale.handle };
+    await V.saveCardToFile({ id: "r:ada.png", rootId: "r", rel: "ada.png", dir: "", file: "ada.png", ext: "png" },
+      (await V.parseCardBytes(pngOf(card()), "ada.png")).data, { fields: { personality: "Wry." } }, [staleRoot], { backup: false });
+    const merged = (await V.parseCardBytes(stale.get("ada.png"), "ada.png")).data;
+    t.eq([merged.scenario, merged.personality], ["A workshop, rebuilt.", "Wry."], "fields the save doesn't change are always the file's own");
+  }
+
+  console.log("\na writable folder inside a Reference one can be saved to, backups and all");
+  {
+    const v3 = V.newCardPayload({ name: "Ada", description: "A clockmaker.", first_mes: "You're late." });
+    const fsys = memFs("Shared");
+    fsys.put("mine/ada.png", V.writeCardIntoPng(PNG_1PX, v3, V.buildV2Payload(v3)));
+    const root = { id: "r", name: "Shared", role: "reference", handle: fsys.handle };
+    const roles = { "r::mine": "library" };
+    V.setFolderRolesNow(roles);
+    try {
+      t.eq(V.referenceFolderError(root, "mine", roles), "", "the folder itself may be written to");
+      t.eq(V.referenceFolderError(root, "_vault backups/mine", roles), "", "and so may its backups folder");
+      t.ok(/Reference/.test(V.referenceFolderError(root, "_vault backups/theirs", roles)) && /Reference/.test(V.referenceFolderError(root, "_vault backups", roles)),
+        "the backups of a Reference folder stay off limits");
+      const rec = { id: "r:mine/ada.png", rootId: "r", rel: "mine/ada.png", dir: "mine", file: "ada.png", ext: "png" };
+      const body = (await V.parseCardBytes(fsys.get("mine/ada.png"), "ada.png")).data;
+      const res = await V.saveCardToFile(rec, body, { fields: { description: "A clockmaker, edited." } }, [root], { keep: 5 });
+      t.ok(/^Shared\/_vault backups\/mine\/ada \d{8}-\d{6}\.png$/.test(res.backupPath), "Save to card works there, with its backup beside the others", res.backupPath);
+      t.eq((await V.parseCardBytes(fsys.get("mine/ada.png"), "ada.png")).data.description, "A clockmaker, edited.", "and the card has the change");
+    } finally { V.setFolderRolesNow({}); }
+  }
+
+  console.log("\na move checks every byte of the copy");
+  {
+    const big = new Uint8Array(600 * 1024);
+    for (let i = 0; i < big.length; i++) big[i] = i & 255;
+    const src = memFs("Inbox"), dst = memFs("Library");
+    src.put("big.png", big);
+    // A destination that damages the middle of what it's given: past where a sampled signature looks.
+    const real = dst.handle.getFileHandle;
+    dst.handle.getFileHandle = async function (name, o) {
+      const fh = await real.call(this, name, o);
+      const open = fh.createWritable;
+      fh.createWritable = async function () {
+        const w = await open.call(this);
+        const close = w.close;
+        w.close = async function () { await close.call(this); fh._n.bytes[300 * 1024] ^= 0xff; };
+        return w;
+      };
+      return fh;
+    };
+    const rec = { id: "s:big.png", rootId: "s", rel: "big.png", dir: "", file: "big.png", name: "big" };
+    let err = null;
+    try { await V.moveCardTo(rec, { id: "s", name: "Inbox", role: "inbox", handle: src.handle }, { id: "d", name: "Library", role: "library", handle: dst.handle }, ""); } catch (e) { err = e; }
+    t.ok(err && /content mismatch/.test(err.message) && /source left untouched/.test(err.message), "a copy damaged in the middle of a big file is caught", err && err.message);
+    t.ok(src.get("big.png") && V.sameBytes(src.get("big.png"), big), "and the original stays where it was");
+  }
+
+  console.log("\ncards that read alike");
+  {
+    const base = "Ada is a clockmaker who keeps a narrow workshop by the harbour. She repairs watches for sailors and builds automata in the back room when the tide is out. " +
+      "She is dry, patient and exact, and hates being kept waiting. Her left hand is brass from the wrist down, the work of her own bench. " +
+      "The town thinks her strange, and she lets it, because strange people are left alone to work. She keeps a ledger of every promise made to her.";
+    const sigOf = (text) => V.minHashSignature(V.textShingles(text));
+    const card = (id, fp, text) => ({ id, fp, sig: sigOf(text) });
+    const rework = base.replace("narrow workshop", "cramped workshop").replace("dry, patient and exact", "dry, patient and precise") + " Lately she has taken an apprentice.";
+    const other = "Bram keeps the lighthouse at the end of the northern breakwater. He is slow to speak and quick to notice weather. He has not left the rock in eleven years, " +
+      "and the supply boat brings him books that he reads aloud to the lamp. Gulls nest in the gallery and he knows each of them by the way it lands.";
+
+    t.ok(V.signatureSimilarity(sigOf(base), sigOf(base)) === 1, "a text is wholly like itself");
+    const alike = V.signatureSimilarity(sigOf(base), sigOf(rework)), unlike = V.signatureSimilarity(sigOf(base), sigOf(other));
+    t.ok(alike >= V.SIMILAR_MIN && alike < 1, "a reworked card still shares most of its wording with the original", alike);
+    t.ok(unlike < 0.15, "a different card shares next to none", unlike);
+    t.eq(V.textShingles("Too short to say anything."), null, "a card with only a few words isn't compared at all");
+    t.ok(V.signatureSimilarity(sigOf(base), sigOf(base.toUpperCase().replace(/\./g, " !! "))) === 1, "capitals and punctuation make no difference");
+    t.ok(V.signatureSimilarity(sigOf(base), sigOf(base.replace(/Ada/g, "{{char}}").replace(/She/g, "{{char}}"))) > 0.5, "nor much, a name swapped for a placeholder");
+    t.eq(V.similarityText({ description: "d", personality: "p", scenario: "s", first_mes: "f", creator_notes: "ignored" }), "d\np\ns\nf", "cards are compared by what they say about the character");
+
+    const groups = V.similarGroups([card("a", "fp-a", base), card("b", "fp-b", rework), card("c", "fp-c", other), card("a2", "fp-a", base)]);
+    t.eq(groups.length, 1, "the original and its rework make one group; the unrelated card is in none");
+    t.eq(groups[0].ids.slice().sort(), ["a", "a2", "b"], "an exact copy of the original joins it there, through the rework");
+    t.ok(groups[0].score >= V.SIMILAR_MIN && groups[0].score <= 1, "with how alike they are", groups[0].score);
+    t.eq(V.similarGroups([card("a", "fp-a", base), card("a2", "fp-a", base)]).length, 0, "two copies of one card are duplicates already, not a group of similar cards");
+    t.eq(V.similarGroups([card("a", "fp-a", base), card("c", "fp-c", other)]).length, 0, "and unlike cards make no group");
+    t.eq(V.similarGroups([]).length, 0, "nor does an empty library");
+
+    // Thousands of cards: found through their signatures, not by comparing each with every other.
+    const rnd = (() => { let x = 12345; return () => { x = (Math.imul(x, 1103515245) + 12345) >>> 0; return x; }; })();
+    const vocab = Array.from({ length: 4000 }, (_, i) => "w" + i);
+    const many = Array.from({ length: 3000 }, (_, i) => card("n" + i, "fp" + i, Array.from({ length: 150 }, () => vocab[rnd() % vocab.length]).join(" ")));
+    many.push(card("x1", "fpx1", base), card("x2", "fpx2", rework));
+    const t0 = Date.now();
+    const found = V.similarGroups(many);
+    t.ok(Date.now() - t0 < 5000, "3,000 cards are compared in a moment", (Date.now() - t0) + " ms");
+    t.eq(found.map((g) => g.ids.slice().sort().join()), ["x1,x2"], "and the one pair that reads alike is the only group found");
+  }
+
+  console.log("\nrenaming card files from a pattern");
+  {
+    const rec = (file, name, creator, more) => Object.assign({ id: "r:" + file, rootId: "r", dir: "", rel: file, file, ext: file.split(".").pop(), ok: true, name, creator: creator || "", version: "", spec: "v3", tags: [], mtime: 0 }, more || {});
+    const ada = rec("download (3).png", "Ada Clockmaker", "someone", { version: "2", tags: ["victorian"] });
+    t.eq(V.renameBase("{creator} - {name}", ada), "someone - Ada Clockmaker", "a pattern names a file after its card");
+    t.eq(V.renameBase("{name} v{version} [{tag}] ({spec})", ada), "Ada Clockmaker v2 [victorian] (v3)", "with its version, first tag and format");
+    const bare = rec("x.png", "Lune", "");
+    t.eq([V.renameBase("{creator} - {name}", bare), V.renameBase("{name} ({creator})", bare), V.renameBase("{name} v{version}", bare)], ["Lune", "Lune", "Lune"],
+      "a card with no creator or version doesn't come out as \" - Lune\", \"Lune ()\" or \"Lune v\"");
+    t.eq([V.renameBase("{name}", rec("x.png", "What? A/B: \"C\"", "")), V.renameBase("{name}", rec("x.png", "CON", "")), V.renameBase("{nonsense}", bare), V.renameBase("", bare)],
+      ["What_ A_B_ _C_", "_CON", "{nonsense}", "card"], "characters a file name can't have are replaced, a device name is avoided, and an unknown {word} stays as typed");
+
+    const lib = [ada, rec("Bram.png", "Bram Lighthouse", "tidewriter"), rec("bram2.png", "Bram Lighthouse", "tidewriter"), rec("Cora.json", "Cora", ""), rec("someone - Dora.png", "Dora", "someone"),
+      rec("broken.png", "broken", "", { ok: false }), rec("locked.png", "Eve", "x", { rootId: "ref", id: "ref:locked.png" }), rec("tidewriter - bram lighthouse.png", "Other", "z", { id: "r:other" })];
+    const plan = V.planRename(lib.slice(0, 7), "{creator} - {name}", lib, (r) => (r.rootId === "ref" ? "reference" : ""));
+    const row = (file) => plan.find((p) => p.from === file);
+    t.eq([row("download (3).png").to, row("download (3).png").action], ["someone - Ada Clockmaker.png", "rename"], "each card is given its new name, keeping its file type");
+    t.eq([row("Bram.png").to, row("bram2.png").to], ["tidewriter - Bram Lighthouse (2).png", "tidewriter - Bram Lighthouse (3).png"],
+      "a name another file in the folder already has (in any case), or an earlier card in the plan took, gets a number");
+    t.eq([row("Cora.json").to, row("someone - Dora.png").action], ["Cora.json", "same"], "a card already named that is left alone");
+    t.ok(row("broken.png").action === "skip" && /not readable/.test(row("broken.png").why) && row("locked.png").action === "skip" && /Reference/.test(row("locked.png").why),
+      "a file that isn't a card, or is in a read-only folder, is skipped, saying why");
+    t.eq(V.planRename([rec("ada.png", "Ada", "")], "{name}", [], null)[0].action, "same", "a name that differs only in its capitals counts as the same name");
+
+    // The rename itself, on a folder that ignores case.
+    const fsys = memFs("Library");
+    const bytes = V.solidPng(4, 4, [1, 2, 3]);
+    fsys.put("people/download.png", bytes);
+    fsys.put("people/taken.png", V.solidPng(4, 4, [9, 9, 9]));
+    const root = { id: "r", name: "Library", role: "library", handle: fsys.handle };
+    const file = { id: "r:people/download.png", rootId: "r", dir: "people", rel: "people/download.png", file: "download.png", ext: "png", name: "Ada" };
+    const done = await V.renameCardFile(file, root, "someone - Ada.png");
+    t.ok(!done.skipped && done.name === "someone - Ada.png" && fsys.get("people/download.png") === null && V.sameBytes(fsys.get("people/someone - Ada.png"), bytes),
+      "the file is there under its new name, byte for byte, and gone under the old one");
+    const second = await V.renameCardFile(Object.assign({}, file, { file: "someone - Ada.png", rel: "people/someone - Ada.png" }), root, "TAKEN.png");
+    t.ok(second.name === "TAKEN (2).png" && fsys.get("people/taken.png") && V.sameBytes(fsys.get("people/TAKEN (2).png"), bytes), "a name a different file has is never written over: the renamed file gets a number");
+    t.ok((await V.renameCardFile(Object.assign({}, file, { file: "TAKEN (2).png" }), root, "taken (2).png")).skipped, "the same name in other capitals is no rename");
+    const refused = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message; } };
+    t.ok(/file's type/.test(await refused(() => V.renameCardFile(Object.assign({}, file, { file: "TAKEN (2).png" }), root, "ada.json"))), "a rename can't change the file's type");
+    V.setFolderRolesNow({ "r::people": "reference" });
+    try { t.ok(/Reference folder/.test(await refused(() => V.renameCardFile(Object.assign({}, file, { file: "TAKEN (2).png" }), root, "ada.png"))), "and nothing is renamed in a Reference folder"); }
+    finally { V.setFolderRolesNow({}); }
+  }
+
+  console.log("\nlorebook checks");
+  {
+    const e = (keys, content, more) => Object.assign({ keys, secondaryKeys: [], content, comment: "", enabled: true, constant: false, selective: false, insertionOrder: 0 }, more || {});
+    const cardText = "Ada keeps a workshop by the harbour. The Engine hums under the floor.";
+    const lb = { tokenBudget: 20, entries: [
+      e(["engine"], "The engine is older than the town."),                 // 1: its key is in the card's text
+      e(["gull", "tern"], "Seabirds nest in the rafters."),                // 2: no key anywhere: only the chat brings it in
+      e([], "Never reachable."),                                           // 3: no keys, not always on
+      e([], "Always here.", { constant: true }),                           // 4: always on, so no keys needed
+      e(["Engine", "boiler"], "The boiler feeds the engine."),             // 5: shares "engine" with 1
+      e(["rafters"], "The rafters are oak."),                              // 6: its key is in entry 2's text
+      e(["/har(bour|bor)/i"], "The harbour freezes in winter."),           // 7: a regex key that matches the card
+      e(["/un(closed/"], "Broken key."),                                   // 8: a regex that isn't one
+      e(["oak"], ""),                                                      // 9: on, but empty
+      e(["x"], "Seabirds nest in the rafters."),                           // 10: the same text as 2
+      e(["ghost"], "Turned off.", { enabled: false }),                     // 11: off
+    ] };
+    const res = V.lorebookChecks(lb, cardText);
+    const of = (kind) => res.notes.filter((n) => n.kind === kind);
+    t.eq(of("nokeys")[0].entries, [3], "an entry with no keys that isn't always on is flagged: nothing can bring it in (an always-on one is fine)");
+    t.eq(of("badregex")[0].entries, [8], "so is a key written as a regular expression that isn't a valid one");
+    t.eq(of("empty")[0].entries, [9], "and an entry that's on but has no text");
+    t.eq(of("duplicate")[0].entries, [2, 10], "two entries with the same text are named together");
+    t.eq(of("shared").map((n) => n.entries), [[1, 5]], "a key two entries share is noted, in any case, with both entries");
+    t.eq(of("silent")[0].entries, [2, 8, 10], "entries whose keys appear nowhere in the card's text or another entry are listed: only the chat can bring them in");
+    t.ok(of("silent")[0].entries.indexOf(1) < 0 && of("silent")[0].entries.indexOf(6) < 0 && of("silent")[0].entries.indexOf(7) < 0,
+      "not one whose key is in the card's text, in another entry's text, or matched by its regex");
+    t.eq(of("off")[0].entries, [11], "entries turned off are counted, and take no part in the rest");
+    t.ok(res.tokens.budget === 20 && res.tokens.always === 3 && res.tokens.all > 20 && of("budget").length === 1 && of("budget")[0].level === "info",
+      "the budget note says when everything at once wouldn't fit", res.tokens);
+    t.ok(res.notes.every((n) => n.level === "warn" || n.level === "info") && res.notes.filter((n) => n.level === "warn").length === 4, "four of the notes are things to fix; the rest are things to know");
+    const self = V.lorebookChecks({ entries: [e(["moon"], "The moon is bright tonight.")] }, "A card about the sea.");
+    t.eq(self.notes.filter((n) => n.kind === "silent")[0].entries, [1], "an entry's own text doesn't count: it can't bring itself in");
+    const clean = V.lorebookChecks({ entries: [e(["sea"], "The sea is cold."), e([], "Always.", { constant: true })] }, "A card about the sea.");
+    t.eq([clean.notes.length, clean.tokens.budget], [0, 0], "a tidy book has nothing to note");
+    t.eq(V.lorebookChecks(null, "x").notes.length, 0, "and no book at all is no trouble");
+    const big = { entries: Array.from({ length: 2000 }, (_, i) => e(["key" + i], "Entry number " + i + " mentions key" + ((i + 1) % 2000) + ".")) };
+    const t0 = Date.now();
+    V.lorebookChecks(big, "nothing relevant");
+    t.ok(Date.now() - t0 < 4000, "a 2,000-entry book is checked quickly", (Date.now() - t0) + " ms");
+    t.ok(V.loreKeyTest("/Gulls?/")("two Gulls", "two gulls") && !V.loreKeyTest("/Gulls?/")("two gulls", "two gulls") && V.loreKeyTest("GULL")("x", "a gull") && V.loreKeyTest("") === null,
+      "a plain key matches in any case; a regex key matches as written");
+  }
+
+  console.log("\na greeting as a front end shows it");
+  {
+    const names = { char: "Ada", user: "Jeb" };
+    t.eq(V.fillPlaceholders("{{char}} looks at {{user}}. <BOT> nods to <USER>, and {{ Char }} smiles.", names), "Ada looks at Jeb. Ada nods to Jeb, and Ada smiles.",
+      "{{char}} and {{user}} become the names, in any case, and so do the older <BOT> and <USER>");
+    t.eq(V.fillPlaceholders("One.{{// a note to self}} Two.{{noop}}{{newline}}Three.", names), "One. Two.\nThree.", "comments and placeholders that stand for nothing are taken out; {{newline}} is a line break");
+    t.eq(V.fillPlaceholders("  Hello.  {{trim}}  ", names), "Hello.", "{{trim}} trims");
+    t.eq(V.fillPlaceholders("A {{random:red,green,blue}} door and a {{pick::oak::elm}} table.", names), "A red door and a oak table.", "a {{random}} or {{pick}} shows its first choice");
+    t.eq(V.fillPlaceholders("It is {{time}}, {{char}}.", names), "It is {{time}}, Ada.", "anything else in braces is left as written, for the front end");
+    t.eq(V.placeholdersLeft("It is {{time}} on {{date}}; {{time}} again."), ["{{time}}", "{{date}}"], "and those are listed once each");
+    t.eq(V.fillPlaceholders("{{user}}", { char: "$& and $1", user: "$`x" }), "$`x", "a name with a dollar sign in it is only a name");
+    t.eq([V.fillPlaceholders(null, names), V.fillPlaceholders("{{char}}", null)], ["", "Character"], "no text is no text, and no names are stand-ins");
+  }
+
+  console.log("\na card's history: what changed, its backups, and going back to one");
+  {
+    const card = (over) => V.newCardPayload(Object.assign({ name: "Ada", description: "A clockmaker.", personality: "Dry.", first_mes: "You're late.", tags: ["victorian"] }, over || {}));
+    const pngOf = (c) => V.writeCardIntoPng(PNG_1PX, c, V.buildV2Payload(c));
+    const bodyOf = async (bytes) => (await V.parseCardBytes(bytes, "ada.png")).data;
+
+    const v1 = await bodyOf(pngOf(card()));
+    const v2c = card({ description: "A clockmaker who lost her hand.", tags: ["victorian", "inventor"] });
+    v2c.data.alternate_greetings = ["Mind the gears."];
+    const v2 = await bodyOf(pngOf(v2c));
+    const ch = V.cardChanges(v1, v2);
+    t.eq(ch.map((c) => c.label), ["Description", "Tags", "Alternate greetings"], "two versions of a card are compared part by part, and only the parts that differ are listed");
+    t.eq([ch[0].before, ch[0].after, ch[1].after], ["A clockmaker.", "A clockmaker who lost her hand.", "victorian, inventor"], "each with its text before and after");
+    t.eq(V.cardChanges(v1, await bodyOf(pngOf(card()))).length, 0, "the same card twice differs in nothing");
+    t.ok(V.cardCompareParts(v1).some((p) => p.key === "lorebook") && V.prevBodyKey("r:a.png") !== "r:a.png", "the lorebook is one of the parts, and the earlier text has a key of its own");
+
+    const names = ["ada 20261101-090000.png", "ada 20261103-101500.png", "ada 20261103-101500 (2).png", "adam 20261102-000000.png", "ada.png", "ada 20261102-120000.json", "ADA 20261104-080000.PNG"];
+    t.eq(V.cardBackupsOf(names, "ada.png").map((b) => b.name), ["ADA 20261104-080000.PNG", "ada 20261103-101500 (2).png", "ada 20261103-101500.png", "ada 20261101-090000.png"],
+      "a card's backups are picked out by name, newest first: not another card's, and not another format's");
+    t.eq(new Date(V.backupStampTime("20261107-090503")).getHours() + ":" + new Date(V.backupStampTime("20261107-090503")).getMinutes(), "9:5", "a backup's stamp is its date and time");
+    t.eq(V.backupStampTime("nonsense"), 0, "and nothing, when it isn't one");
+
+    // A card saved twice, then taken back to how it first was.
+    const fsys = memFs("Library");
+    fsys.put("people/ada.png", pngOf(card()));
+    const root = { id: "r", name: "Library", role: "library", handle: fsys.handle };
+    const rec = { id: "r:people/ada.png", rootId: "r", rel: "people/ada.png", dir: "people", file: "ada.png", ext: "png", name: "Ada" };
+    t.eq(await V.listCardBackups(rec, root), [], "a card never saved has no backups");
+    const original = fsys.get("people/ada.png");
+    await V.saveCardToFile(rec, v1, { fields: { description: "First edit." } }, [root], { keep: 5 });
+    const list1 = await V.listCardBackups(rec, root);
+    t.ok(list1.length === 1 && list1[0].size === original.length && list1[0].at > 0, "Save to card leaves a backup, which is listed with its size and time", list1);
+    const got = await V.readCardBackup(rec, root, list1[0].name);
+    t.ok(got.parsed.ok && got.parsed.data.description === "A clockmaker." && V.sameBytes(got.bytes, original), "the backup holds the card as it was");
+    t.eq(V.cardChanges(got.parsed.data, await bodyOf(fsys.get("people/ada.png"))).map((c) => c.label), ["Description"], "and comparing it with the card now shows what the save changed");
+
+    const edited = fsys.get("people/ada.png");
+    const res = await V.restoreCardBackup(rec, root, list1[0].name, { backup: true });
+    t.ok(!res.same && V.sameBytes(fsys.get("people/ada.png"), original) && res.data.description === "A clockmaker.", "restoring puts the backup's bytes back as the card's file");
+    const list2 = await V.listCardBackups(rec, root);
+    t.ok(list2.length === 2 && /^Library\/_vault backups\/people\/ada \d{8}-\d{6}( \(2\))?\.png$/.test(res.backupPath), "and first keeps the file as it was, so going back can be undone", res.backupPath);
+    t.ok((await Promise.all(list2.map((b) => V.readCardBackup(rec, root, b.name)))).some((b) => V.sameBytes(b.bytes, edited)), "that copy is the edited card");
+    t.ok(res.sig === await V.byteSignature(new File([original], "ada.png")), "the restore gives back the file's signature");
+    t.ok((await V.restoreCardBackup(rec, root, list1[0].name, {})).same, "restoring what the file already is changes nothing");
+
+    const refused = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message; } };
+    t.ok(/isn't a backup of this card/.test(await refused(() => V.restoreCardBackup(rec, root, "../ada.png", {}))) &&
+      /isn't a backup of this card/.test(await refused(() => V.readCardBackup(rec, root, "bram 20261101-090000.png"))), "only this card's own backups can be read or put back");
+    fsys.put("_vault backups/people/ada 20200101-000000.png", new Uint8Array([1, 2, 3]));
+    t.ok(/can't be read as a card/.test(await refused(() => V.restoreCardBackup(rec, root, "ada 20200101-000000.png", {}))) && V.sameBytes(fsys.get("people/ada.png"), original),
+      "a backup that isn't a card any more is refused, and the card is left alone");
+    V.setFolderRolesNow({ "r::people": "reference" });
+    try {
+      t.ok(/Reference folder/.test(await refused(() => V.restoreCardBackup(rec, root, list1[0].name, {}))), "and nothing is put back into a Reference folder");
+    } finally { V.setFolderRolesNow({}); }
   }
 
   console.log("\nReference folders are never written to");
@@ -396,7 +700,7 @@ async function main() {
     const fsys = memFs("Scratch");
     fsys.put("cora.charx", charxBytes);
     const parsed = await V.parseCardBytes(charxBytes, "cora.charx");
-    const rec = { id: "r:cora.charx", rootId: "r", rel: "cora.charx", dir: "", file: "cora.charx", ext: "charx", sig: "s" };
+    const rec = { id: "r:cora.charx", rootId: "r", rel: "cora.charx", dir: "", file: "cora.charx", ext: "charx" };
     await V.saveCardToFile(rec, parsed.data, { fields: { description: "After." } }, [{ id: "r", name: "Scratch", handle: fsys.handle }], { backup: false });
     const saved = fsys.get("cora.charx");
     const back = await V.parseCardBytes(saved, "cora.charx");
@@ -497,7 +801,7 @@ async function main() {
     // Two different cards with the same file name in different folders.
     fsys.put("A/Bram.png", card("Bram the Smith"));
     fsys.put("B/Bram.png", card("Bram the Sailor"));
-    const rec = (dir) => ({ id: "r:" + dir + "/Bram.png", rootId: "r", rel: dir + "/Bram.png", dir, file: "Bram.png", ext: "png", sig: "s" });
+    const rec = (dir) => ({ id: "r:" + dir + "/Bram.png", rootId: "r", rel: dir + "/Bram.png", dir, file: "Bram.png", ext: "png" });
     const save = async (dir, text) => {
       const parsed = await V.parseCardBytes(fsys.get(dir + "/Bram.png"), "Bram.png");
       return V.saveCardToFile(rec(dir), parsed.data, { fields: { description: text } }, [root], { keep: 1 });
@@ -1017,7 +1321,7 @@ async function main() {
     fsys.put("Ada.png", bytes);
     for (const s of ["20991101-015000", "20991101-015500", "20991101-015800"]) fsys.put("_vault backups/Ada " + s + ".png", new Uint8Array([1]));
     const parsed = await V.parseCardBytes(bytes, "Ada.png");
-    const rec = { id: "r:Ada.png", rootId: "r", rel: "Ada.png", dir: "", file: "Ada.png", ext: "png", sig: "s" };
+    const rec = { id: "r:Ada.png", rootId: "r", rel: "Ada.png", dir: "", file: "Ada.png", ext: "png" };
     const res = await V.saveCardToFile(rec, parsed.data, { fields: { description: "Edited." } }, [root], { keep: 3 });
     const made = res.backupPath.split("/").pop();
     const kept = fsys.list("_vault backups");
