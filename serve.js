@@ -19,6 +19,9 @@
  *     Start RP Card Vault.bat     console window, shows what the server prints
  *     RP Card Vault.vbs           no console window - what the shortcuts use
  *     node serve.js 8790          from a terminal in this folder
+ *
+ * On a Mac or Linux:  ./start.sh  (on a Mac, double-clicking
+ * "Start RP Card Vault.command" does the same).
  * ---------------------------------------------------------------------------
  *
  * Chrome refuses the File System Access API and IndexedDB to pages opened as
@@ -50,7 +53,7 @@ function nodeTooOld(version) {
 if (require.main === module && nodeTooOld(process.version)) {
   console.error("");
   console.error("  RP Card Vault needs Node.js " + NODE_MIN + " or newer; this is Node " + process.version + ".");
-  console.error("  Get the current LTS from https://nodejs.org (or put a portable node.exe in a");
+  console.error("  Get the current LTS from https://nodejs.org (or put a portable Node in a");
   console.error("  folder named node next to serve.js).");
   console.error("");
   process.exit(1);
@@ -60,7 +63,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 
 /**
  * Bump RELAY_BUILD whenever this file changes in a way the page can notice.
@@ -72,7 +75,7 @@ const { execFileSync } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.6.17";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.8.1";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -341,6 +344,22 @@ const DEST_IMPL = {
   http: { connect: httpConnect, send: httpSend },
 };
 
+/**
+ * Never let a destination's token, password or session echo back through an
+ * error string. scrubSecret only knows the AI key, and a front end that
+ * refuses a token often quotes it ("bad token abc123"), which the page shows
+ * and puts in the problem log. Longest first, so one inside another goes too.
+ */
+function hideDestSecrets(e, d, body) {
+  if (!e || typeof e.message !== "string") return e;
+  const list = [d.token, d.csrf, body && body.password, body && body.token];
+  for (const c of d.cookies || []) list.push(c.slice(c.indexOf("=") + 1));
+  if (typeof d.token === "string" && d.token.startsWith("cookie:")) list.push(d.token.slice(d.token.indexOf("=") + 1));
+  const secrets = list.map((s) => String(s == null ? "" : s)).filter((s) => s.length >= 4).sort((a, b) => b.length - a.length);
+  for (const s of secrets) e.message = e.message.split(s).join("[hidden]");
+  return e;
+}
+
 function destPublic(id, d) {
   return { id, type: d.type, baseUrl: d.baseUrl, user: d.user || "", connected: true, at: d.at };
 }
@@ -353,7 +372,8 @@ async function destConnect(body) {
   const baseUrl = normalizeBase(body.baseUrl);
   if (!/^https?:\/\/[^/]+/i.test(baseUrl)) throw userError("The address must start with http:// or https://");
   const d = { type, baseUrl, user: "", at: Date.now() };
-  await DEST_IMPL[type].connect(d, body);
+  try { await DEST_IMPL[type].connect(d, body); }
+  catch (e) { throw hideDestSecrets(e, d, body); }
   destinations.set(id, d);
   return destPublic(id, d);
 }
@@ -361,7 +381,8 @@ async function destConnect(body) {
 async function destSend(id, name, buf) {
   const d = destinations.get(id);
   if (!d) throw userError("Not connected to that destination. Connect it in Settings → Destinations first.", 401);
-  return Object.assign({ ok: true }, await DEST_IMPL[d.type].send(d, name, buf));
+  try { return Object.assign({ ok: true }, await DEST_IMPL[d.type].send(d, name, buf)); }
+  catch (e) { throw hideDestSecrets(e, d); }
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -602,9 +623,43 @@ function readChoice(d) {
   return out;
 }
 
+/**
+ * Add one piece of a tool call to the calls so far. Pieces of a call share an
+ * index, but some servers give every call index 0, or none at all, so a piece
+ * that can't belong to the call at its index starts a new one: a different id
+ * or tool, or the same tool again once the arguments so far are whole.
+ */
+function addToolPiece(calls, p) {
+  let c = null;
+  for (let i = calls.length - 1; i >= 0 && !c; i--) if (calls[i].index === p.index) c = calls[i];
+  const whole = (args) => { try { return !!JSON.parse(args); } catch (e) { return false; } };
+  const fresh = c && ((p.id && c.id && p.id !== c.id) || (p.name && c.name && p.name !== c.name) ||
+    (!p.id && p.name && p.args && whole(c.args)));
+  if (!c || fresh) { c = { index: p.index, id: "", name: "", args: "" }; calls.push(c); }
+  if (p.id && !c.id) c.id = p.id;
+  if (p.name && !c.name) c.name = p.name;
+  if (p.args) c.args += p.args;
+}
+
+/** An id for each call, each one different: a server's own where it can, or call_N. */
+function toolCallIds(calls) {
+  const used = new Set();
+  const given = new Set(calls.map((c) => c.id).filter(Boolean));
+  return calls.map((c, i) => {
+    let id = c.id && !used.has(c.id) ? c.id : "";
+    for (let n = i + 1; !id; n++) if (!used.has("call_" + n) && !given.has("call_" + n)) id = "call_" + n;
+    used.add(id);
+    return id;
+  });
+}
+
 /** Incremental server-sent-events reader. Calls onChunk with readChoice() output. */
 function sseParser(onChunk) {
-  let buf = "";
+  // The text since the last newline, in pieces. Only each new piece is
+  // searched for a newline: searching the whole of a long line again on every
+  // chunk took seconds per few megabytes, and held up everything else the
+  // server was doing meanwhile.
+  let parts = [];
   const line = (raw) => {
     const l = raw.replace(/\r$/, "");
     if (l.indexOf("data:") !== 0) return;
@@ -616,11 +671,17 @@ function sseParser(onChunk) {
   };
   return {
     feed(s) {
-      buf += s;
-      let i;
-      while ((i = buf.indexOf("\n")) >= 0) { line(buf.slice(0, i)); buf = buf.slice(i + 1); }
+      let start = 0, i;
+      while ((i = s.indexOf("\n", start)) >= 0) {
+        parts.push(s.slice(start, i));
+        const l = parts.join("");
+        parts = [];
+        start = i + 1;
+        line(l);
+      }
+      if (start < s.length) parts.push(s.slice(start));
     },
-    end() { if (buf) line(buf); buf = ""; },
+    end() { const rest = parts.join(""); parts = []; if (rest) line(rest); },
   };
 }
 
@@ -877,13 +938,7 @@ async function aiChat(req, res, body) {
     if (d.error) throw userError(d.error);
     if (d.text) { st.textChars += d.text.length; emit({ t: "text", v: d.text }); }
     if (d.think) { st.thinkChars += d.think.length; emit({ t: "think", v: d.think }); }
-    for (const p of d.tools || []) {
-      let c = calls.find((x) => x.index === p.index);
-      if (!c) { c = { index: p.index, id: "", name: "", args: "" }; calls.push(c); }
-      if (p.id && !c.id) c.id = p.id;
-      if (p.name && !c.name) c.name = p.name;
-      if (p.args) c.args += p.args;
-    }
+    for (const p of d.tools || []) addToolPiece(calls, p);
     if (d.finish) st.finish = d.finish;
     if (d.usage) st.usage = d.usage;
     if (d.model) st.model = d.model;
@@ -916,7 +971,8 @@ async function aiChat(req, res, body) {
     }
     clearTimeout(idle);
     const whole = calls.filter((c) => c.name).sort((a, b) => a.index - b.index);
-    whole.forEach((c, i) => emit({ t: "tool", id: c.id || "call_" + (i + 1), name: c.name, args: c.args }));
+    const ids = toolCallIds(whole);
+    whole.forEach((c, i) => emit({ t: "tool", id: ids[i], name: c.name, args: c.args }));
     emit({ t: "done", finish: st.finish, usage: st.usage, model: st.model, textChars: st.textChars, thinkChars: st.thinkChars, tools: whole.length });
   } catch (e) {
     clearTimeout(idle);
@@ -1080,8 +1136,19 @@ function wsResolve(p, allowRoot) {
  */
 const WS_TEXT_EXT = ["md", "markdown", "txt", "text", "json", "jsonl", "csv", "tsv", "yaml", "yml", "toml", "ini", "log"];
 
+/**
+ * A file name's extension as Windows sees it: what follows the last dot, even
+ * when the name starts with that dot. ".bat" is a batch file there, though
+ * Node's own path.extname says a name like that has no extension at all.
+ */
+function wsExt(rel) {
+  const name = String(rel).split("/").pop();
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
+}
+
 function wsWritable(f) {
-  const ext = path.extname(f.rel).slice(1).toLowerCase();
+  const ext = wsExt(f.rel);
   if (ext && WS_TEXT_EXT.indexOf(ext) < 0) {
     throw userError("The workspace holds text files only (" + WS_TEXT_EXT.map((x) => "." + x).join(", ") + "), so " + f.rel + " can't be written.");
   }
@@ -1111,6 +1178,13 @@ function wsNeedVer(st, ver, rel) {
   if (ver !== st.ver) throw userError(rel + " changed since it was read (someone edited it). Read it again first.", 409);
 }
 
+/** A file in an older encoding reads with its accented letters as "�": writing that back would lose them for good. */
+function wsSafeToRewrite(st, rel) {
+  if (st && st.buf && !Buffer.from(st.buf.toString("utf8"), "utf8").equals(st.buf)) {
+    throw userError(rel + " isn't saved as UTF-8, so changing it here would garble its accented letters. Save it as UTF-8 in your editor first.");
+  }
+}
+
 function wsText(buf, rel) {
   if (buf.subarray(0, 8192).indexOf(0) >= 0) throw userError(rel + " isn't a text file.");
   return buf.toString("utf8");
@@ -1120,8 +1194,13 @@ function wsText(buf, rel) {
 function wsWriteFile(full, text) {
   fs.mkdirSync(path.dirname(full), { recursive: true });
   const tmp = full + ".tmp-" + crypto.randomBytes(4).toString("hex");
-  fs.writeFileSync(tmp, text, "utf8");
-  fs.renameSync(tmp, full);
+  try {
+    fs.writeFileSync(tmp, text, "utf8");
+    fs.renameSync(tmp, full);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (e2) { /* it never got made */ }
+    throw e;
+  }
 }
 
 function wsList(dirFull) {
@@ -1142,7 +1221,28 @@ function wsList(dirFull) {
   return out;
 }
 
+/**
+ * What a file-system error means, in words. Node's own message has the whole
+ * path in it, your user name included, and these errors go on to the model.
+ */
+function wsPlainError(e) {
+  const code = e && e.code;
+  if (code === "EEXIST" || code === "ENOTDIR") return "Part of that path is a file, so nothing can go below it.";
+  if (code === "ENOENT" || code === "ENAMETOOLONG" || code === "EINVAL") return "That name or path is too long, or can't be used on this computer.";
+  if (code === "EPERM" || code === "EACCES" || code === "EBUSY") return "That file or folder is read-only or in use, so it wasn't changed.";
+  return "The workspace couldn't do that (" + code + ").";
+}
+
 async function handleWs(req, res, route) {
+  try {
+    return await wsRoute(req, res, route);
+  } catch (e) {
+    if (e && e.syscall) throw userError(wsPlainError(e));
+    throw e;
+  }
+}
+
+async function wsRoute(req, res, route) {
   if (req.method !== "POST") return sendJson(res, 404, { error: "Unknown workspace route." });
   const body = await readJson(req, 4 * 1024 * 1024);
   wsEnsure();
@@ -1168,6 +1268,7 @@ async function handleWs(req, res, route) {
     if (Buffer.byteLength(body.text, "utf8") > WS_MAX_BYTES) throw userError("That's over " + (WS_MAX_BYTES >> 20) + " MB, too big for a workspace file.", 413);
     const st = wsStat(f.full);
     wsNeedVer(st, body.ver, f.rel);
+    wsSafeToRewrite(st, f.rel);
     wsWriteFile(f.full, body.text);
     const now = wsStat(f.full);
     return sendJson(res, 200, { path: f.rel, ver: now.ver, size: now.size, mtime: now.mtime, created: !st });
@@ -1193,6 +1294,7 @@ async function handleWs(req, res, route) {
     if (!st) throw userError("There's no " + a.rel + " in the workspace.", 404);
     if (!st.dir) wsNeedVer(st, body.ver, a.rel);
     if (fs.existsSync(b.full)) throw userError(b.rel + " already exists.", 409);
+    if (st.dir && insidePath(b.full, a.full)) throw userError("A folder can't be moved into itself.");
     fs.mkdirSync(path.dirname(b.full), { recursive: true });
     fs.renameSync(a.full, b.full);
     return sendJson(res, 200, { from: a.rel, to: b.rel });
@@ -1275,7 +1377,8 @@ async function handleDest(req, res, route, url) {
     const full = (url.searchParams.get("name") || "card.png").replace(/[\\/]/g, "_");
     // A long name is shortened before its extension, which says what kind of card it is.
     const ext = (full.match(/\.[a-z0-9]{1,10}$/i) || [""])[0];
-    const name = full.length > 200 ? full.slice(0, 200 - ext.length) + ext : full;
+    // Cut on whole characters: half an emoji would reach the front end as "�".
+    const name = full.length > 200 ? full.slice(0, 200 - ext.length).replace(/[\uD800-\uDBFF]$/, "") + ext : full;
     const buf = await readBody(req, 64 * 1024 * 1024);
     if (!buf.length) throw userError("The card file was empty.");
     const d = destinations.get(id);
@@ -1445,19 +1548,87 @@ const APP_URL = "http://" + HOST + ":" + PORT + "/" + MAIN;
  * helper hangs — better to carry on serving than to block on it.
  */
 function openInBrowser(url) {
-  const p = process.platform;
   const opts = { timeout: 5000, stdio: "ignore", windowsHide: true };
-  try {
-    // "start" is a cmd builtin, so it needs cmd. The empty "" is the window
-    // title argument: without it, a quoted URL is taken as the title and
-    // nothing opens.
-    if (p === "win32") execFileSync("cmd", ["/c", "start", "", url], opts);
-    else if (p === "darwin") execFileSync("open", [url], opts);
-    else execFileSync("xdg-open", [url], opts);
-    return true;
-  } catch (e) {
-    return false;   // the printed URL is the fallback
+  const ask = (cmd, args) => {
+    try { return execFileSync(cmd, args, { timeout: 3000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }); }
+    catch (e) { return ""; }
+  };
+  for (const c of browserCommands(process.platform, url, ask, onPath)) {
+    try {
+      if (c.stays) {
+        // A browser started by name runs until it's closed, so it isn't waited
+        // for: it's left to carry on by itself, even once this process ends.
+        spawn(c.cmd, c.args, { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
+      } else {
+        execFileSync(c.cmd, c.args, opts);
+      }
+      return true;
+    } catch (e) { /* not there, or it refused: the next one */ }
   }
+  return false;   // the printed URL is the fallback
+}
+
+/*
+ * Which browser the vault opens in.
+ *
+ * The vault needs a Chromium browser (Chrome, Edge, Brave, Vivaldi or
+ * Chromium: the ones with the File System Access API), and on a Mac or Linux
+ * the default browser often isn't one (Safari, Firefox). So there it opens in
+ * the default browser when that is one of them, else in the first of them
+ * that's installed, else in the default all the same, where the page says
+ * what it needs. Your tags and notes are kept by the browser, so the choice
+ * has to come out the same every time: the lists are tried in a fixed order.
+ *
+ * On Windows the default browser is opened as it is. The shortcuts there
+ * (RP Card Vault.vbs) make this same choice themselves.
+ */
+const MAC_BROWSERS = [   // the name `open -a` takes, and the app's id
+  ["Google Chrome", "com.google.chrome"], ["Microsoft Edge", "com.microsoft.edgemac"],
+  ["Brave Browser", "com.brave.browser"], ["Vivaldi", "com.vivaldi.vivaldi"], ["Chromium", "org.chromium.chromium"],
+];
+const LINUX_BROWSERS = ["google-chrome", "google-chrome-stable", "microsoft-edge", "microsoft-edge-stable",
+  "chromium", "chromium-browser", "brave-browser", "vivaldi", "vivaldi-stable"];
+
+/** The default browser's id on a Mac, from its list of handlers (`defaults read … LSHandlers`); "" when it doesn't say. */
+function macDefaultBrowser(lsHandlers) {
+  const m = /LSHandlerRoleAll = "?([A-Za-z0-9._-]+)"?;\s*LSHandlerURLScheme = "?https?"?;/.exec(String(lsHandlers || ""));
+  return m ? m[1].toLowerCase() : "";
+}
+
+/** Whether a Linux desktop entry (xdg-settings' answer, like "google-chrome.desktop") is a browser that can run the vault. */
+function isChromiumDesktopEntry(name) {
+  return /chrome|chromium|microsoft-edge|\.edge\b|brave|vivaldi/i.test(String(name || "").trim());
+}
+
+/** Whether a program is on the PATH. */
+function onPath(program) {
+  return String(process.env.PATH || "").split(path.delimiter).some((d) => {
+    if (!d) return false;
+    try { fs.accessSync(path.join(d, program), fs.constants.X_OK); return true; } catch (e) { return false; }
+  });
+}
+
+/**
+ * The commands that open `url`, to try in order until one works: each
+ * { cmd, args }, with `stays` for a browser started by name (it runs until
+ * closed). `ask(cmd, args)` runs a query and gives its output ("" if it
+ * failed); `has(program)` says whether a program is installed.
+ */
+function browserCommands(platform, url, ask, has) {
+  // "start" is a cmd builtin, so it needs cmd. The empty "" is the window
+  // title argument: without it, a quoted URL is taken as the title and
+  // nothing opens.
+  if (platform === "win32") return [{ cmd: "cmd", args: ["/c", "start", "", url] }];
+  if (platform === "darwin") {
+    const usual = { cmd: "open", args: [url] };
+    const def = macDefaultBrowser(ask("defaults", ["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"]));
+    if (MAC_BROWSERS.some((b) => b[1] === def)) return [usual];
+    // `open -a` fails for an app that isn't installed, and the next is tried.
+    return MAC_BROWSERS.map((b) => ({ cmd: "open", args: ["-a", b[0], url] })).concat([usual]);
+  }
+  const usual = { cmd: "xdg-open", args: [url] };
+  if (isChromiumDesktopEntry(ask("xdg-settings", ["get", "default-web-browser"]))) return [usual];
+  return LINUX_BROWSERS.filter(has).map((b) => ({ cmd: b, args: [url], stays: true })).concat([usual]);
 }
 
 /** Is the thing already on our port our own vault server? */
@@ -1507,11 +1678,20 @@ if (require.main !== module) {
   module.exports = {
     normalizeAiBase, originOf, addressHint, API_BASE_HINTS,
     looksLikeHtml, describeHtmlBody, upstreamMessage, scrubSecret,
-    readChoice, sseParser, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
+    readChoice, sseParser, addToolPiece, toolCallIds, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
     cleanMessages, cleanTools, saysToolsUnsupported, saysImagesUnsupported, WS_STARTER, cookiesOf, mergeCookies,
     RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES, errorText,
+    browserCommands, macDefaultBrowser, isChromiumDesktopEntry, wsExt,
   };
   return;
+}
+
+// listen() throws on a port like 99999 or 8791.5 (a typo in vault.local), and
+// the launcher window would show only a Node stack trace.
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error("\n  Port " + process.argv[2] + " can't be used: a port is a whole number from 1 to 65535.");
+  console.error("  Check the port= line in vault.local next to serve.js.\n");
+  process.exit(1);
 }
 
 const WANT_RESTART = process.argv.indexOf("--restart") >= 0;
@@ -1547,7 +1727,8 @@ server.on("error", (e) => {
         return;
       }
       console.log("  It didn't answer a shutdown request — it predates that route.");
-      console.log("  Run \"Stop RP Card Vault.bat\", then start again.");
+      console.log(process.platform === "win32" ? "  Run \"Stop RP Card Vault.bat\", then start again."
+        : "  Stop it yourself (close its terminal window, or end its node process), then start again.");
       console.log("");
     }
     if (ours) {
@@ -1562,7 +1743,7 @@ server.on("error", (e) => {
       console.log(opened ? "  Opened:  " + APP_URL : "  Open it yourself:  " + APP_URL);
       console.log("");
       console.log("  If you have just edited serve.js, the running copy is still the");
-      console.log("  old one. \"Start RP Card Vault.bat\" restarts it for you.");
+      console.log("  old one. " + (process.platform === "win32" ? "\"Start RP Card Vault.bat\"" : "./start.sh") + " restarts it for you.");
       console.log("");
       process.exit(0);
     }

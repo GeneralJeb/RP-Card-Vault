@@ -7,6 +7,11 @@
 *.ps1 text eol=crlf
 HOW[[:space:]]TO[[:space:]]RUN.txt text eol=crlf
 
+# The Mac and Linux launchers must stay LF: a CR after "#!/bin/sh" stops them
+# from starting at all (test/launchers.test.js checks).
+*.sh text eol=lf
+*.command text eol=lf
+
 # Binary. lib/ holds third-party files whose SRI hashes the page pins, so git
 # must never touch their bytes.
 lib/** -text -diff linguist-vendored

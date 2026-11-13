@@ -73,6 +73,21 @@ console.log("\nSSE parsing");
   p2.feed(": keep-alive\r\n\r\ndata: not json\r\n\r\n" + ev({ choices: [{ delta: { content: "ok" } }] }).replace(/\n/g, "\r\n"));
   p2.end();
   t.eq(got2.map((g) => g.text), ["ok"], "comments and junk lines are skipped; CRLF works");
+  // A long line arriving in many chunks used to be searched again from its
+  // start on every chunk: 64 MB took over ten seconds, with the whole server
+  // waiting on it. Now it's linear, a fraction of a second.
+  const got3 = [];
+  const p3 = S.sseParser((d) => got3.push(d));
+  const piece = "a".repeat(64 * 1024);
+  const t0 = Date.now();
+  p3.feed('data: {"choices":[{"delta":{"content":"');
+  for (let i = 0; i < 1024; i++) p3.feed(piece);
+  p3.feed('"}}]}\n\ndata: {"choices":[{"delta":{"content":"next"}}]}\n');
+  p3.end();
+  const ms = Date.now() - t0;
+  t.ok(got3.length === 2 && got3[0].text.length === 64 * 1024 * 1024 && got3[1].text === "next",
+    "a 64 MB line in 64 KB chunks still parses, with what follows it");
+  t.ok(ms < 4000, "and doesn't take seconds (" + ms + " ms)");
 }
 
 console.log("\nwho may use /__vault/");
@@ -141,6 +156,41 @@ console.log("\nwhat the page is told about an error");
       "one without a message gives a plain sentence, never the error turned into text (which can carry its stack)");
     t.ok(/unexpected error/.test(S.errorText(undefined)) && /unexpected error/.test(S.errorText("a string")), "and so does a thrown non-error");
   } finally { console.error = quiet; }
+}
+
+console.log("\nwhich browser the vault opens in");
+{
+  const url = "http://127.0.0.1:8790/RP_Card_Vault.html";
+  const cmds = (platform, ask, has) => S.browserCommands(platform, url, ask || (() => ""), has || (() => false))
+    .map((c) => [c.cmd].concat(c.args).join(" ") + (c.stays ? " (stays)" : ""));
+  t.eq(cmds("win32"), ["cmd /c start  " + url], "on Windows: the default browser, as before");
+
+  // What `defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers` prints.
+  const handlers = (id) => ["(", "        {", "        LSHandlerPreferredVersions =         {", "            LSHandlerRoleAll = \"-\";", "        };",
+    "        LSHandlerRoleAll = \"com.apple.mail\";", "        LSHandlerURLScheme = mailto;", "    },", "        {",
+    "        LSHandlerPreferredVersions =         {", "            LSHandlerRoleAll = \"-\";", "        };",
+    "        LSHandlerRoleAll = \"" + id + "\";", "        LSHandlerURLScheme = http;", "    }", ")"].join("\n");
+  t.eq(S.macDefaultBrowser(handlers("com.google.Chrome")), "com.google.chrome", "a Mac's default browser is read from its list of handlers, not the mail program's");
+  t.eq(S.macDefaultBrowser(""), "", "and is unknown when the list doesn't say (Safari, never changed)");
+  t.eq(cmds("darwin", () => handlers("com.brave.Browser")), ["open " + url], "on a Mac whose default browser can run the vault: that one");
+  const mac = cmds("darwin", () => handlers("org.mozilla.firefox"));
+  t.eq(mac[0], "open -a Google Chrome " + url, "on a Mac whose default can't (Firefox, Safari): Chrome first");
+  t.eq(mac.slice(1, -1).map((c) => c.replace(" " + url, "").replace("open -a ", "")), ["Microsoft Edge", "Brave Browser", "Vivaldi", "Chromium"], "then Edge, Brave, Vivaldi and Chromium, whichever is installed");
+  t.eq(mac[mac.length - 1], "open " + url, "and the default browser when none of them is, where the page says what it needs");
+  t.eq(cmds("darwin"), mac, "the same when the default can't be told");
+
+  for (const n of ["google-chrome.desktop", "chromium_chromium.desktop", "microsoft-edge.desktop", "com.microsoft.Edge.desktop", "brave-browser.desktop", "vivaldi-stable.desktop"]) {
+    t.ok(S.isChromiumDesktopEntry(n + "\n"), n + " can run the vault");
+  }
+  for (const n of ["firefox.desktop", "firefox_firefox.desktop", "org.gnome.Epiphany.desktop", "knowledge.desktop", ""]) {
+    t.ok(!S.isChromiumDesktopEntry(n), (n || "(no answer)") + " can't");
+  }
+  t.eq(cmds("linux", () => "google-chrome.desktop\n", () => true), ["xdg-open " + url], "on Linux with a default browser that can run the vault: that one");
+  t.eq(cmds("linux", () => "firefox.desktop\n", (p) => p === "chromium" || p === "brave-browser"),
+    ["chromium " + url + " (stays)", "brave-browser " + url + " (stays)", "xdg-open " + url],
+    "on Linux with Firefox as the default: an installed Chromium browser, started so that it outlives this window, then the default");
+  t.eq(cmds("linux", () => "firefox.desktop\n"), ["xdg-open " + url], "and only the default when no such browser is installed");
+  t.ok(cmds("linux", () => "firefox.desktop\n", () => true).every((c) => c.indexOf(url) > 0 && !/[;&|]/.test(c.replace(url, ""))), "the address is always handed over as one argument, never through a shell");
 }
 
 t.done();

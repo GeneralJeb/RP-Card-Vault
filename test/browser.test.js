@@ -4,7 +4,7 @@
  *   node test/browser.test.js
  *
  * The other suites test the parts; this one drives the page itself, the way
- * you would, in a headless Microsoft Edge driven by Playwright:
+ * you would, in a headless browser driven by Playwright:
  *
  *   start → add a folder → scan → search → edit and Save to card → tag →
  *   move to trash → send to a folder destination → Settings and AI panels →
@@ -15,10 +15,26 @@
  * real card files built by the page's own code. Everything runs against a
  * scratch server on a free port with a scratch workspace.
  *
- * Edge rather than Playwright's own Chromium: Edge comes with Windows (and
- * with GitHub's Windows machines) and it's a browser people really use.
- * Without Edge the suite is skipped on your computer, but fails on GitHub
- * (CI is set).
+ * Which browser: the vault runs in any Chromium browser, and so does this.
+ *
+ *   node test/browser.test.js           the first installed of Edge, Chrome,
+ *                                       Brave, then Playwright's own Chromium
+ *   node test/browser.test.js brave     that one (edge, chrome, brave, chromium,
+ *                                       or the path to a browser's program);
+ *                                       it's a failure if it isn't installed
+ *   node test/browser.test.js all       each of the four that is installed,
+ *                                       one after the other
+ *
+ * VAULT_TEST_BROWSER does the same as the word after the file name. Real,
+ * installed browsers come before Playwright's own because they are what
+ * people use; Playwright's needs "npx playwright install chromium" once.
+ * With no browser at all the suite is skipped on your computer, but fails on
+ * GitHub (CI is set).
+ *
+ * Firefox and Safari aren't run: they have no File System Access API, so the
+ * vault can't file cards in them. What the page says to someone who opens it
+ * in one of those, or in a Brave with that API still switched off, is checked
+ * here all the same, in a tab made to look like one.
  */
 
 const fs = require("fs");
@@ -30,6 +46,10 @@ const { loadPureRegion } = require("./pure-region");
 const t = require("./harness");
 
 const ROOT = path.join(__dirname, "..");
+// The key held to add a card to the selection, and to reach the browser's own
+// shortcuts: Cmd on a Mac, Ctrl everywhere else. A Control-click on a Mac is a
+// right-click, so it opens the card's menu instead of selecting it.
+const SELECT_KEY = "ControlOrMeta";
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { mod: V } = loadPureRegion(["solidPng", "writeCardIntoPng", "buildV2Payload", "newCardPayload", "parseCardBytes", "readZipDirectory", "readZipEntry", "makeChunk", "cardPictures"]);
@@ -38,6 +58,73 @@ const cardPng = (o, rgb, more) => {
   Object.assign(v3.data, more || {});
   return Buffer.from(V.writeCardIntoPng(V.solidPng(40, 60, rgb), v3, V.buildV2Payload(v3)));
 };
+
+/* ── which browser ── */
+
+const BROWSERS = {
+  edge: { name: "Microsoft Edge", channel: "msedge" },
+  chrome: { name: "Google Chrome", channel: "chrome" },
+  brave: { name: "Brave", paths: () => {
+    const env = process.env;
+    if (process.platform === "win32") {
+      return [env.ProgramFiles, env["ProgramFiles(x86)"], env.LOCALAPPDATA].filter(Boolean)
+        .map((d) => path.join(d, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"));
+    }
+    if (process.platform === "darwin") return ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"];
+    return ["/usr/bin/brave-browser", "/usr/bin/brave", "/opt/brave.com/brave/brave-browser", "/snap/bin/brave"];
+  } },
+  chromium: { name: "Chromium (Playwright's own)" },
+};
+const BROWSER_ORDER = ["edge", "chrome", "brave", "chromium"];
+
+/** The browser asked for: the word after the file name, or VAULT_TEST_BROWSER. "" for the first installed. */
+function askedBrowser() {
+  const arg = process.argv.slice(2).filter((a) => !/^--/.test(a))[0];
+  return String(arg || process.env.VAULT_TEST_BROWSER || "").trim();
+}
+
+/** Launch one browser: { browser, name }, or { missing: why } when it isn't installed. Other failures are thrown. */
+async function launchOne(chromium, key) {
+  const known = BROWSERS[key.toLowerCase()];
+  const opts = {};
+  let name = known ? known.name : path.basename(key);
+  if (!known) {
+    if (!fs.existsSync(key)) return { missing: "there's no browser called " + JSON.stringify(key) + " (edge, chrome, brave, chromium, or a path), and no program at that path" };
+    opts.executablePath = key;
+  } else if (known.channel) {
+    opts.channel = known.channel;
+  } else if (known.paths) {
+    const found = known.paths().filter((p) => fs.existsSync(p))[0];
+    if (!found) return { missing: name + " isn't installed" };
+    opts.executablePath = found;
+  }
+  try { return { browser: await chromium.launch(opts), name }; }
+  catch (e) {
+    if (/is not found|Executable doesn't exist|playwright install/i.test(e.message)) {
+      return { missing: name + " isn't installed" + (key === "chromium" ? " (npx playwright install chromium)" : "") };
+    }
+    throw e;
+  }
+}
+
+/** Run this file once for each browser that's installed. */
+function runInEach() {
+  const { spawnSync } = require("child_process");
+  const results = [];
+  for (const key of BROWSER_ORDER) {
+    console.log("\n" + "#".repeat(64) + "\n#  " + BROWSERS[key].name + "\n" + "#".repeat(64));
+    const r = spawnSync(process.execPath, [__filename, key, "--if-installed"], { stdio: "inherit", env: Object.assign({}, process.env, { VAULT_TEST_BROWSER: "" }) });
+    results.push({ key, code: r.status === null ? 1 : r.status });
+  }
+  console.log("\n" + "#".repeat(64));
+  // 3 is "not installed", from a run started with --if-installed.
+  for (const r of results) console.log((r.code === 0 ? "  PASS  " : r.code === 3 ? "  none  " : "  FAIL  ") + BROWSERS[r.key].name + (r.code === 3 ? " (not installed)" : ""));
+  const ran = results.filter((r) => r.code !== 3);
+  if (!ran.length) return skipAll("no browser is installed (Edge, Chrome, Brave, or npx playwright install chromium)");
+  console.log("");
+  for (const r of ran) t.ok(r.code === 0, "the whole test passes in " + BROWSERS[r.key].name);
+  t.done();
+}
 
 function freePort() {
   return new Promise((resolve) => {
@@ -96,16 +183,31 @@ async function readFile(page, dir, rel) {
 }
 
 async function main() {
+  if (askedBrowser().toLowerCase() === "all") return runInEach();
   let chromium;
   try { ({ chromium } = require("playwright")); }
   catch (e) { return skipAll("the playwright package isn't installed (npm install)"); }
-  let browser;
-  try { browser = await chromium.launch({ channel: "msedge" }); }
-  catch (e) {
-    if (/is not found|Executable doesn't exist|playwright install/i.test(e.message)) return skipAll("Microsoft Edge isn't installed");
-    throw e;
+  const asked = askedBrowser();
+  let browser = null, browserName = "";
+  if (asked) {
+    // A browser that was asked for by name has to be there: testing nothing must never pass.
+    const got = await launchOne(chromium, asked);
+    if (got.missing) {
+      if (process.argv.indexOf("--if-installed") >= 0) { console.log("  – " + got.missing); t.done(3); return; }
+      t.ok(false, "the browser test can't run: " + got.missing);
+      return t.done();
+    }
+    browser = got.browser; browserName = got.name;
+  } else {
+    const missing = [];
+    for (const key of BROWSER_ORDER) {
+      const got = await launchOne(chromium, key);
+      if (got.browser) { browser = got.browser; browserName = got.name; break; }
+      missing.push(got.missing);
+    }
+    if (!browser) return skipAll("no browser to run it in: " + missing.join("; "));
   }
-  console.log("Microsoft Edge " + browser.version());
+  console.log(browserName + " " + browser.version());
   // Chromium 153 (and Edge 153) close the whole browser when a page that has
   // saved a folder handle opens its saved data again: a regression, fixed in
   // 154. On 153 the vault shows a notice before opening anything. On a real
@@ -181,7 +283,7 @@ async function main() {
       if (reloadCrashes) {
         // A real 153 shows the browser-bug notice first. This profile is new and
         // has no saved folders yet, so going ahead is safe.
-        await page.getByText(/^Update (Edge|Chrome) before opening the vault$/).waitFor();
+        await page.getByText(/^Update (Edge|Chrome|Brave|Opera|this browser) before opening the vault$/).waitFor();
         t.ok(true, "on a 153 browser the notice comes first");
         await page.getByRole("button", { name: "Open the vault anyway" }).click();
       }
@@ -229,6 +331,75 @@ async function main() {
       t.ok(true, "clearing it brings the rest back");
     });
 
+    await step("a deep search shows only what the words typed now find", async () => {
+      const box = page.getByPlaceholder(/^Search/);
+      await page.getByText("Deep text").first().click();
+      // "storm" is only in one of Bram's greetings: a deep hit, not a name or tag.
+      await box.fill("storm");
+      await page.getByText(/^1 deep hits$/).waitFor();
+      t.ok(await tile("Bram Lighthouse").isVisible(), "the deep search finds Bram by his greeting");
+      // Typed on to other words, the old hit doesn't count while the next search waits.
+      await box.fill("cora");
+      t.eq(await tile("Bram Lighthouse").count(), 0, "Bram is gone the moment the words change");
+      t.eq(await page.getByText(/deep hits$/).count(), 0, "and the old hit count with him");
+      await page.waitForFunction(() => /\b1 shown\b/.test(document.body.innerText));
+      await page.getByText(/^0 deep hits$/).waitFor();   // the deep search for "cora" has run
+      t.ok(await tile("Cora Gardener").isVisible() && !(await tile("Bram Lighthouse").count()), "and after the deep search for the new words, only Cora");
+      // The same words in other case or spacing are the same search.
+      await box.fill("storm");
+      await page.getByText(/^1 deep hits$/).waitFor();
+      await box.fill("  STORM ");
+      t.ok(await tile("Bram Lighthouse").isVisible(), "case and spaces don't drop the hit");
+      await box.fill("");
+      await page.getByText("Deep text").first().click();
+      await page.waitForFunction(() => /\b3 shown\b/.test(document.body.innerText));
+    });
+
+    await step("a right-click menu and a dialog keep the keys to themselves", async () => {
+      const menu = page.getByText("Open in inspector");
+      const inspectorOpen = () => page.getByText(/^Tags & Notes/).isVisible();
+      await tile("Ada Clockmaker").click();
+      await page.getByText(/^Tags & Notes/).waitFor();
+      await tile("Cora Gardener").click({ button: "right" });
+      await menu.waitFor();
+      const selectedNames = () => page.evaluate(() => Array.from(document.querySelectorAll(".cardTile"))
+        .filter((el) => /accent-warm\)/.test(el.style.border)).map((el) => el.innerText.split("\n")[0]));
+      t.eq(await selectedNames(), ["Cora Gardener"], "the right-clicked card is selected");
+      await page.keyboard.press("ArrowRight");
+      await page.waitForTimeout(300);
+      t.eq(await selectedNames(), ["Cora Gardener"], "an arrow key with the menu up doesn't move to another card");
+      await page.keyboard.press("Escape");
+      await menu.waitFor({ state: "detached" });
+      t.ok(await inspectorOpen(), "Escape closes the menu, not the inspector behind it");
+      // A press on the menu's own header (or scrollbar) is in the menu.
+      await tile("Cora Gardener").click({ button: "right" });
+      await menu.waitFor();
+      const header = await page.evaluate(() => {
+        const r = Array.from(document.querySelectorAll("div")).find((d) => d.style.zIndex === "300").firstElementChild.getBoundingClientRect();
+        return [r.x + 10, r.y + r.height / 2];
+      });
+      await page.mouse.click(header[0], header[1]);
+      t.ok(await menu.isVisible(), "clicking the menu's header doesn't close it");
+      await page.mouse.click(700, 15);   // the header bar, outside the menu
+      await menu.waitFor({ state: "detached" });
+      t.ok(true, "a click outside it does");
+      // "/" in a dialog stays in the dialog.
+      await page.keyboard.press("Escape");
+      await page.getByTitle("Settings", { exact: true }).click();
+      const settings = page.getByText(/ cards indexed$/);   // the dialog's subtitle
+      await settings.waitFor();
+      await settings.click();   // focus on the dialog, not a box (nor a toggle)
+      t.eq(await page.evaluate(() => document.activeElement.tagName), "BODY", "nothing in the dialog has focus");
+      await page.keyboard.press("/");
+      t.ok(!(await page.evaluate(() => document.activeElement && /^Search/.test(document.activeElement.placeholder || ""))),
+        "/ in Settings doesn't jump to the search box behind it");
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await settings.waitFor({ state: "detached" });
+      await page.keyboard.press("/");
+      t.ok(await page.evaluate(() => /^Search/.test(document.activeElement.placeholder || "")), "with nothing up, / goes to the search box");
+      await page.keyboard.press("Escape");
+    });
+
     await step("Ctrl+F and Ctrl+S are the browser's, not the card's f and s", async () => {
       const favourites = () => page.evaluate(() => new Promise((res) => {
         const r = indexedDB.open("rpCardVault");
@@ -239,8 +410,8 @@ async function main() {
       }));
       const before = await favourites();
       await tile("Bram Lighthouse").click();
-      await page.keyboard.press("Control+f");
-      await page.keyboard.press("Control+s");
+      await page.keyboard.press(SELECT_KEY + "+f");
+      await page.keyboard.press(SELECT_KEY + "+s");
       await page.waitForTimeout(500);
       t.eq(await favourites(), before, "Ctrl+F doesn't favourite the card you're looking at");
       t.eq(await page.getByText("Normalize tag case and separators").count(), 0, "and Ctrl+S doesn't start a send (which opens Settings with no destination)");
@@ -277,6 +448,68 @@ async function main() {
       await page.locator("text=clockwork").nth(1).waitFor();
       t.ok(true, "it appears in the sidebar's tag list");
       await page.getByPlaceholder("filter tags…").fill("");
+    });
+
+    await step("a tag you add is marked, and one taken off again leaves nothing to save", async () => {
+      // The card-tag box's chips, as "tag=colour". Ada has "victorian" from her file and "clockwork" added here.
+      const chips = () => page.evaluate(() => {
+        const wrap = document.querySelector("input[placeholder='add tag, Enter to commit']").parentElement.previousElementSibling;
+        return Array.from(wrap.children).filter((c) => c.firstChild && c.firstChild.nodeType === 3)
+          .map((c) => c.firstChild.nodeValue + "=" + getComputedStyle(c).color);
+      });
+      const colour = (list, tag) => (list.filter((c) => c.startsWith(tag + "="))[0] || "").split("=")[1];
+      const ada = await chips();
+      t.ok(colour(ada, "victorian") && colour(ada, "clockwork") && colour(ada, "victorian") !== colour(ada, "clockwork"),
+        "the added tag is marked apart from the file's own", ada);
+      await tile("Cora Gardener").click();
+      await page.getByText(/^Tags & Notes/).click();
+      const box = page.getByPlaceholder("add tag, Enter to commit").first();
+      await box.fill("zz");
+      await box.press("Enter");
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).waitFor();
+      await page.evaluate(() => {
+        const wrap = document.querySelector("input[placeholder='add tag, Enter to commit']").parentElement.previousElementSibling;
+        Array.from(wrap.children).filter((c) => c.firstChild && c.firstChild.nodeValue === "zz")[0].lastElementChild.click();
+      });
+      await page.getByRole("button", { name: /Saved/ }).first().waitFor();
+      t.ok(true, "taking it off again leaves nothing to save");
+      t.eq(await page.getByText("revert to the card's own tags").count(), 0, "and no tag edit to revert");
+    });
+
+    await step("keys don't reach the card behind the flag dialog", async () => {
+      const favourites = () => page.evaluate(() => new Promise((res) => {
+        const r = indexedDB.open("rpCardVault");
+        r.onsuccess = () => {
+          const q = r.result.transaction("edits", "readonly").objectStore("edits").getAll();
+          q.onsuccess = () => res(q.result.filter((e) => e.favorite).length);
+        };
+      }));
+      const favouritesBecome = async (n, what) => {
+        for (let i = 0; i < 50 && (await favourites()) !== n; i++) await wait(100);
+        t.eq(await favourites(), n, what);
+      };
+      const before = await favourites();
+      const dialog = page.getByText("Vault-only. Flags and their reasons are never written").first();
+      const openDialog = async () => {
+        await page.getByText(/^\+ .*Needs a rewrite$/).first().click();
+        await dialog.waitFor();
+        await dialog.click();   // out of the reason box, as a click anywhere on the dialog does
+      };
+      // Cora is open in the inspector.
+      await openDialog();
+      await page.keyboard.press("f");
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+      // f once the dialog is closed favourites Cora: once, not twice (which would undo it).
+      await page.keyboard.press("f");
+      await favouritesBecome(before + 1, "f behind the dialog did nothing; f after it favourited the card");
+      await openDialog();
+      await page.keyboard.press("Escape");
+      t.ok(await dialog.isVisible(), "Escape doesn't close the dialog");
+      t.ok(await page.getByText(/^Tags & Notes/).isVisible(), "nor the inspector behind it");
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.keyboard.press("f");
+      await favouritesBecome(before, "f takes the favourite off again");
     });
 
     await step("looking through a card's lorebook and greetings changes nothing", async () => {
@@ -344,12 +577,173 @@ async function main() {
       const asked = [];
       const seen = (d) => asked.push(d.message());
       page.on("dialog", seen);
+      await page.evaluate(() => { navigator.clipboard.writeText = () => Promise.resolve(); });   // a headless browser may refuse the real one
       await page.getByRole("button", { name: "Copy V3 JSON" }).click();
       await toast(/V3 JSON copied \(without the file's extra fields\)/);
       page.off("dialog", seen);
       t.ok(asked.length === 1 && /Copy it anyway\?/.test(asked[0]), "Copy asks first, and still copies when you say yes", asked);
       await page.getByRole("button", { name: "Rescan", exact: true }).click();
       await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Dora Vanishing/.test(e.textContent)));
+    });
+
+    await step("the inspector shows what a save wrote, and keeps what you do meanwhile", async () => {
+      await writeFiles(page, "Cards", [["Nell Editor.png", cardPng({ name: "Nell Editor", description: "Edits.", tags: ["ink"] }, [120, 90, 40], {
+        personality: "Quiet.", alternate_greetings: ["One.", "Two."],
+        character_book: { name: "Press", entries: [{ keys: ["type"], content: "Lead type.", insertion_order: 10, position: "before_char" }] },
+      })]]);
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await tile("Nell Editor").waitFor();
+      await tile("Nell Editor").click();
+      const file = async () => (await V.parseCardBytes(await readFile(page, "Cards", "Nell Editor.png"), "Nell Editor.png"));
+      const box = (label) => page.locator("xpath=//label[starts-with(normalize-space(), '" + label + "')]/following::textarea[1]");
+      // The toolbar's Rescan button is back when the save's rescan is over.
+      const idle = () => page.getByRole("button", { name: "Rescan", exact: true }).waitFor();
+      const save = async () => {
+        await page.getByRole("button", { name: /Save to card \(\d+\)/ }).click();
+        await page.getByRole("button", { name: /Saved/ }).first().waitFor();
+        await idle();
+      };
+      // For what the page should come to show: a miss is a failed check, not the end of the run.
+      const eventually = async (fn) => {
+        for (const end = Date.now() + 5000; Date.now() < end; await page.waitForTimeout(50)) {
+          if (await fn().catch(() => false)) return true;
+        }
+        return false;
+      };
+      const boxShows = (b, want) => eventually(async () => (await b.inputValue()) === want);
+      // These fields aren't part of the fingerprint, which stays the same.
+      await page.getByRole("tab", { name: /^Fields/ }).click();
+      await box("Personality").fill("Loud.");
+      await save();
+      t.eq((await file()).data.personality, "Loud.", "the personality went into the file");
+      t.ok(await boxShows(box("Personality"), "Loud."), "and the Fields tab shows it, not the text from before the save");
+      // Building on what's shown must not undo the last save.
+      await page.getByRole("tab", { name: /^Greetings/ }).click();
+      const greeting = (n) => page.locator("xpath=//label[starts-with(normalize-space(), 'Alternate greetings')]/following::textarea[" + n + "]");
+      await greeting(1).fill("One, changed.");
+      await save();
+      t.ok(await boxShows(greeting(1), "One, changed."), "a saved greeting shows");
+      await greeting(2).fill("Two, changed.");
+      await save();
+      t.eq((await file()).data.alternate_greetings, ["One, changed.", "Two, changed."], "and the next save keeps it");
+
+      // Gates hold a write or a folder listing until the test lets go.
+      await page.evaluate(() => {
+        const W = FileSystemWritableFileStream.prototype, D = FileSystemDirectoryHandle.prototype, H = FileSystemFileHandle.prototype;
+        window.__real = { close: W.close, values: D.values, getFile: H.getFile };
+        W.close = async function () { if (window.__writeGate) { window.__atGate = true; await window.__writeGate; } return window.__real.close.call(this); };
+        D.values = function () { const self = this, gate = this.name === "Cards" ? window.__listGate : null;
+          return (async function* () { if (gate) { window.__atList = true; await gate; } yield* window.__real.values.call(self); })(); };
+        H.getFile = async function () { if (window.__readGate) await window.__readGate; return window.__real.getFile.call(this); };
+        window.__gate = (name) => new Promise((go) => { window["__open" + name] = () => { window["__" + name + "Gate"] = null; go(); }; });
+        window.__hold = (name) => { window["__" + name + "Gate"] = window.__gate(name); };
+      });
+      // Changed while the save is being written.
+      const favourite = page.getByRole("button", { name: /Favourite/ }).first();
+      await page.getByRole("tab", { name: /^Fields/ }).click();
+      await box("Personality").fill("Louder.");
+      await page.evaluate(() => { window.__atGate = false; window.__hold("write"); });
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).click();
+      await page.waitForFunction(() => window.__atGate);
+      await favourite.click();
+      await box("Scenario").fill("Typed during the save.");
+      await page.evaluate(() => window.__openwrite());
+      await toast(/Saved into Nell Editor/);
+      await idle();
+      t.ok(/★/.test(await favourite.innerText()), "a favourite set during a save is kept");
+      t.eq(await box("Scenario").inputValue(), "Typed during the save.", "and so is a field typed during it");
+      t.eq((await file()).data.personality, "Louder.", "while what was saved went into the file");
+      await box("Scenario").fill("");
+      t.ok(await eventually(() => page.getByRole("button", { name: /Saved/ }).first().isVisible()), "and clearing that field again leaves nothing to save");
+      // A save that changes the fingerprint, with its rescan still to come (a big folder takes a while).
+      await box("Description").fill("Edits again.");
+      await page.evaluate(() => { window.__atList = false; window.__hold("list"); });
+      await page.getByRole("button", { name: /Save to card \(1\)/ }).click();
+      await page.waitForFunction(() => window.__atList);
+      // Long enough for a page that loses the edit to have lost it.
+      t.ok(await eventually(() => page.getByRole("button", { name: /Saved/ }).first().isVisible()), "the save is done, with the rescan still to come");
+      t.ok(await boxShows(box("Description"), "Edits again."), "before the rescan, the saved text is what shows");
+      t.ok(/★/.test(await favourite.innerText()), "the favourite is still there");
+      await page.getByRole("tab", { name: /^Tags/ }).click();
+      await box("Private notes").fill("Written before the rescan.");
+      await page.evaluate(() => window.__openlist());
+      await idle();
+      t.eq(await box("Private notes").inputValue(), "Written before the rescan.", "a note written before the rescan is still there after it");
+
+      // The lorebook: order and position.
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      const order = page.locator(".lore-order").first();
+      await order.click({ clickCount: 3 });
+      await page.keyboard.type("-5");
+      t.eq(await order.inputValue(), "-5", "a negative order can be typed");
+      await order.click({ clickCount: 3 });
+      await page.keyboard.press("Backspace");
+      await page.keyboard.type("25");
+      t.eq(await order.inputValue(), "25", "and an order typed into an emptied box has no zero in front");
+      await page.getByPlaceholder("e.g. before_char").fill("");
+      await save();
+      const entry = (await file()).raw.data.character_book.entries[0];
+      t.eq([entry.insertion_order, "position" in entry], [25, false], "the order is saved, and an emptied position is gone from the file", entry);
+      t.ok(await boxShows(page.getByPlaceholder("e.g. before_char"), ""), "and stays empty in the box");
+      await page.getByText("+ add entry").click();
+      t.ok(/^Lorebook\s*2$/.test((await page.getByRole("tab", { name: /^Lorebook/ }).innerText()).trim()), "the tab counts an entry just added");
+      await page.getByRole("button", { name: "Revert lorebook" }).click();
+
+      // A card with no lorebook: one started and emptied again leaves nothing to save.
+      await tile("Cora Gardener").click();
+      await page.getByRole("tab", { name: /^Lorebook/ }).click();
+      await page.getByText("+ Start a lorebook").click();
+      await page.locator(".lore-entry").first().getByText("remove").click();
+      t.ok(await page.getByText("No embedded lorebook").isVisible(), "a lorebook started and emptied again is no lorebook");
+      t.ok(await page.getByRole("button", { name: /Saved/ }).first().isVisible(), "and leaves nothing to save");
+
+      // The picture viewer keeps keys from the card behind it, with one picture too.
+      await page.locator(".inspector-picture").click();
+      await page.locator(".picture-viewer").waitFor();
+      const coraFav = await favourite.innerText();
+      await page.keyboard.press("f");
+      await page.waitForTimeout(200);
+      t.eq(await favourite.innerText(), coraFav, "f in the viewer doesn't favourite the card behind it");
+      await page.keyboard.press("ArrowLeft");
+      await page.waitForTimeout(200);
+      t.ok(await page.locator(".picture-viewer").isVisible(), "an arrow key with one picture leaves the viewer up, on this card");
+      await page.keyboard.press("Escape");
+      await page.locator(".picture-viewer").waitFor({ state: "detached" });
+      t.ok(await page.getByText(/^Tags & Notes/).isVisible(), "Escape closes the viewer, not the inspector");
+
+      // A picture still being read doesn't open over the next card.
+      await page.evaluate(() => window.__hold("read"));
+      await page.locator(".inspector-picture").click();
+      await tile("Ada Clockmaker").click();
+      await page.evaluate(() => window.__openread());
+      await page.waitForTimeout(500);
+      t.eq(await page.locator(".picture-viewer").count(), 0, "moving to another card drops the picture being read");
+
+      // Only says copied when it was.
+      await page.evaluate(() => {
+        window.__realExec = document.execCommand;
+        navigator.clipboard.writeText = () => Promise.reject(new Error("refused"));
+        document.execCommand = () => false;
+      });
+      await page.getByRole("button", { name: "Copy path" }).click();
+      t.ok(await eventually(() => page.getByText(/Couldn't copy the path/).first().isVisible()), "a refused copy says so");
+      t.eq(await page.getByText("Path copied").count(), 0, "and doesn't say it was copied");
+      await page.evaluate(() => {
+        navigator.clipboard.writeText = () => Promise.resolve();
+        document.execCommand = window.__realExec;
+        const W = FileSystemWritableFileStream.prototype, D = FileSystemDirectoryHandle.prototype, H = FileSystemFileHandle.prototype;
+        W.close = window.__real.close; D.values = window.__real.values; H.getFile = window.__real.getFile;
+      });
+      await page.getByRole("button", { name: "Copy path" }).click();
+      await toast(/Path copied/);
+
+      // Tidy up for the steps after this one.
+      await page.evaluate(async () => {
+        const c = await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards");
+        await c.removeEntry("Nell Editor.png");
+      });
+      await page.getByRole("button", { name: "Rescan", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Nell Editor/.test(e.textContent)));
     });
 
     await step("a card in a Reference folder can't be saved to its file", async () => {
@@ -581,7 +975,7 @@ async function main() {
       await page.getByText("sea → victorian").waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
       await tile("Ada Clockmaker").click();
-      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await tile("Bram Lighthouse").click({ modifiers: [SELECT_KEY] });
       await page.getByText("2 selected").waitFor();
       await page.getByRole("button", { name: "Tag…", exact: true }).click();
       const remove = page.getByPlaceholder("add tag, Enter to commit").nth(1);
@@ -612,18 +1006,58 @@ async function main() {
       await page.getByText("Show trash", { exact: true }).click();
     });
 
+    await step("trashing cards from a Reference folder and a Library one moves the Library card, and writes nothing into the Reference folder", async () => {
+      await writeFiles(page, "Refshelf", [["Gil Reader.png", cardPng({ name: "Gil Reader", description: "Reads the old books." }, [120, 120, 40])]]);
+      await writeFiles(page, "Loose", [["Hal Tinker.png", cardPng({ name: "Hal Tinker", description: "Mends kettles." }, [40, 120, 120])]]);
+      await page.getByRole("button", { name: "Folders", exact: true }).click();
+      for (const name of ["Refshelf", "Loose"]) {
+        await page.evaluate((n) => { window.__pickFolder = n; }, name);
+        await page.getByRole("button", { name: "+ Add folder" }).click();
+        // Its notice may already have made way for "Scan complete": its row in the list is what stays.
+        await page.getByText(name, { exact: true }).first().waitFor();
+      }
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await tile("Gil Reader").waitFor();
+      await tile("Hal Tinker").waitFor();
+      await page.locator(".folder-tree, body").first().getByText("Refshelf", { exact: true }).first().click({ button: "right" });
+      await page.getByText(/^Role: /).hover();
+      await page.getByText("Reference", { exact: true }).last().click();
+      // Gil (Reference, so it stays) is picked first: the trash isn't looked for in its folder.
+      await tile("Gil Reader").click();
+      await tile("Hal Tinker").click({ modifiers: [SELECT_KEY] });
+      await page.getByTitle("Relocate to your trash folder").click();
+      await toast(/^1 sent to Loose\/_vault trash\. 1 card\(s\) live in a read-only folder/);
+      t.ok(true, "the notice says the one went to the trash, and the other can't be moved");
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Hal Tinker/.test(e.textContent)));
+      const ref = Object.keys(await listFiles(page, "Refshelf"));
+      t.eq(ref, ["Gil Reader.png"], "the Reference folder is as it was: no trash folder made in it", ref);
+      const elsewhere = Object.keys(await listFiles(page, "Cards")).concat(Object.keys(await listFiles(page, "Loose")));
+      t.ok(elsewhere.some((f) => /^_vault trash\/Hal Tinker\.png$/.test(f)) && elsewhere.indexOf("Hal Tinker.png") < 0,
+        "the Library card went to a trash folder outside it", elsewhere);
+      t.ok(await tile("Gil Reader").isVisible(), "the Reference card stays where it is");
+      // The steps below count the cards: these two folders leave the vault again.
+      await page.getByRole("button", { name: "Folders", exact: true }).click();
+      for (const name of ["Refshelf", "Loose"]) {
+        const forget = page.getByRole("button", { name: "forget" });
+        // Its own row: the innermost box holding both its name and a forget button.
+        await page.locator("div").filter({ has: page.getByText(name, { exact: true }) }).filter({ has: forget }).last().getByRole("button", { name: "forget" }).click();
+      }
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.waitForFunction(() => !Array.from(document.querySelectorAll(".cardTile")).some((e) => /Gil Reader/.test(e.textContent)));
+    });
+
     await step("a card is sent to a folder destination", async () => {
       await page.evaluate(() => { window.__pickFolder = "Frontend"; });
       await page.getByRole("button", { name: "Folders", exact: true }).click();
       await page.getByRole("button", { name: "+ Add folder" }).click();
-      await page.getByText(/Added Frontend/).first().waitFor();
+      await page.getByText("Frontend", { exact: true }).first().waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
       await page.getByText("Frontend", { exact: true }).first().click({ button: "right" });
       await page.getByText("Send cards here (add as a destination)").click();
       // With one destination the card menu has a single item; with several, a Send to… submenu.
       await tile("Bram Lighthouse").click({ button: "right" });
       await page.getByText("Send to front end", { exact: true }).click();
-      await toast(/sent to/i);
+      await toast(/sent to Frontend/i);
       const sent = Object.keys(await listFiles(page, "Frontend"));
       t.ok(sent.some((f) => /Bram Lighthouse/.test(f)), "Bram Lighthouse arrived in the front end's folder", sent);
     });
@@ -689,7 +1123,7 @@ async function main() {
 
       // A card that leaves the vault (renamed on disk, then rescanned) leaves the selection too.
       await tile("Ada Clockmaker").click();
-      await tile("Bram Lighthouse").click({ modifiers: ["Control"] });
+      await tile("Bram Lighthouse").click({ modifiers: [SELECT_KEY] });
       await page.getByText("2 selected").waitFor();
       await writeFiles(page, "Cards", [["Bram Renamed.png", Buffer.from(await readFile(page, "Cards", "Bram Lighthouse.png"))]]);
       await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Cards")).removeEntry("Bram Lighthouse.png"));
@@ -728,6 +1162,38 @@ async function main() {
       await page.getByText(/API key|Endpoint|Base URL/i).first().waitFor();
       t.ok(true, "the AI panel opens with no key set");
       t.eq(problems.length, 0, "no errors so far", problems);
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+    });
+
+    await step("Settings' switches work from the keyboard, and its controls have names", async () => {
+      // A switch was a clickable box that Tab never reached, so a keyboard
+      // couldn't change any of them; sliders and some lists had no name to read out.
+      t.eq(await page.getByRole("slider", { name: "Tile size" }).count(), 1, "the toolbar's tile size slider is named");
+      t.eq(await page.getByRole("combobox", { name: "Sort", exact: true }).count(), 1, "so is the sidebar's sort list");
+      await page.getByRole("button", { name: "⚙" }).first().click();
+      await page.getByText("Destinations — where", { exact: false }).first().waitFor();
+      for (const n of ["Default filing", "Trash folder"]) t.eq(await page.getByRole("combobox", { name: n, exact: true }).count(), 1, n + " is named");
+      t.eq(await page.getByRole("slider", { name: "Tile size" }).count(), 2, "and Settings' own tile size slider");
+      const sw = page.getByRole("switch", { name: "Normalize tag case and separators" });
+      t.eq(await sw.count(), 1, "Normalize tag case is a switch");
+      const before = await sw.getAttribute("aria-checked");
+      t.ok(before === "true" || before === "false", "that says whether it's on", before);
+      // Reached with Tab, like any control: from the theme list, the next stops lead to it.
+      await page.getByRole("combobox", { name: "Theme" }).focus();
+      let reached = false;
+      for (let i = 0; i < 12 && !reached; i++) {
+        await page.keyboard.press("Tab");
+        reached = await sw.evaluate((el) => el === document.activeElement);
+      }
+      t.ok(reached, "Tab reaches it");
+      await page.keyboard.press("Space");
+      const state = (v) => page.locator("[role=switch][aria-checked='" + v + "']").filter({ hasText: "Normalize tag case and separators" });
+      await state(before === "true" ? "false" : "true").waitFor();
+      t.eq(await sw.getAttribute("aria-checked"), before === "true" ? "false" : "true", "Space turns it over");
+      await page.keyboard.press("Enter");
+      await state(before).waitFor();
+      t.eq(await sw.getAttribute("aria-checked"), before, "and Enter turns it back");
+      t.ok(await sw.evaluate((el) => el === document.activeElement), "keeping the focus where it was");
       await page.getByRole("button", { name: "Close", exact: true }).click();
     });
 
@@ -859,8 +1325,12 @@ async function main() {
       await page.getByRole("button", { name: "+ Add folder" }).click();
       await page.getByText(/Added Parent/).first().waitFor();
       await page.getByRole("button", { name: "Close", exact: true }).click();
-      // Let both scans run to their end.
+      // Let both scans run to their end: six seconds on a quick computer, and on a
+      // slow one for as long as the outer folder's cards take to reach the index
+      // (a scan writes its records when it finishes), then a moment more.
       await page.waitForTimeout(6000);
+      for (let i = 0; i < 120 && (await cardRecords()).filter((c) => /^Extra \d+\.png$/.test(c.file)).length < 300; i++) await page.waitForTimeout(500);
+      await page.waitForTimeout(1000);
       t.eq(await orphanCount(), 0, "no records are left without a folder (no \"?\" duplicates)");
       const added = (await rootKeys()).filter((k) => !before.has(k));
       t.eq(added.length, 1, "one folder was added in the end, Parent: the inner one's scan didn't write it back", added);
@@ -894,6 +1364,49 @@ async function main() {
       await remove("Extra 0.png");
       await rescan("Full re-parse");
       t.eq(await gone([]), [], "and Full re-parse drops a card whose file is gone, so it doesn't come back after a reload");
+    });
+
+    if (!reloadCrashes) await step("ingest doesn't hold on to a folder that's no longer linked", async () => {
+      await writeFiles(page, "Ingest/Inbox", [["Fay Ferrier.png", cardPng({ name: "Fay Ferrier", description: "Rows the ferry." }, [150, 90, 30])]]);
+      await page.evaluate(async () => (await (await navigator.storage.getDirectory()).getDirectoryHandle("Ingest")).getDirectoryHandle("Shelf", { create: true }));
+      const before = new Set(await rootKeys());
+      await page.evaluate(() => { window.__pickFolder = "Ingest"; });
+      await page.getByRole("button", { name: "Folders", exact: true }).click();
+      await page.getByRole("button", { name: "+ Add folder" }).click();
+      await page.getByText(/Added Ingest/).first().waitFor();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      const id = (await rootKeys()).find((k) => !before.has(k));
+      // Its scan has stored the card and the folder list once Fay is indexed
+      // and Ingest (off while a scan runs) can be pressed again. An earlier
+      // "Scan complete" notice may still be up, so it can't be waited for.
+      const ingestBtn = page.getByRole("button", { name: "Ingest", exact: true });
+      for (let i = 0; i < 150; i++) {
+        if ((await cardRecords()).some((c) => c.rootId === id && c.file === "Fay Ferrier.png") && await ingestBtn.isEnabled()) break;
+        await page.waitForTimeout(200);
+      }
+      // Last ingest went into a folder since removed (or added again, under a
+      // new id); Ingest/Shelf is labelled Library (as is Parent/Big, from above).
+      await page.evaluate(async (id) => {
+        const db = await new Promise((res) => { const r = indexedDB.open("rpCardVault"); r.onsuccess = () => res(r.result); });
+        const get = (k) => new Promise((res) => { const q = db.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); });
+        const settings = await get("settings"), roles = (await get("folderRoles")) || {};
+        await new Promise((res) => {
+          const tx = db.transaction("kv", "readwrite");
+          tx.objectStore("kv").put(Object.assign({}, settings, { ingestSourceKeys: [id + "::Inbox"], ingestDestKeys: ["gone::Shelf"] }), "settings");
+          tx.objectStore("kv").put(Object.assign({}, roles, { [id + "::Shelf"]: "library" }), "folderRoles");
+          tx.oncomplete = res;
+        });
+      }, id);
+      await page.reload();
+      await page.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
+      await page.getByText(/\d+ shown/).first().waitFor();
+      await ingestBtn.click();
+      await page.getByText("1 card in scope").waitFor();
+      await page.getByRole("button", { name: "Build plan" }).click();
+      await page.getByRole("button", { name: "Copy 1 card" }).click();
+      await toast(/Ingest finished — [1-9]\d* copied/);
+      t.ok("Shelf/Fay Ferrier.png" in (await listFiles(page, "Ingest")), "the card is copied into the labelled Library folder, not lost to the folder that's gone");
+      await page.getByRole("button", { name: "Close", exact: true }).click();
     });
 
     if (!reloadCrashes) await step("leftover records from before are cleaned up when the vault opens", async () => {
@@ -941,6 +1454,143 @@ async function main() {
       t.ok(!(await rootKeys()).includes("oldbig"), "the inner registration is gone");
     });
 
+    // This one reloads its own page, which a real Edge 153 answers with its notice.
+    if (!reloadCrashes) await step("AI answers follow a card through a save", async () => {
+      // A fake model behind the real relay. A request can be held open.
+      const calls = [];
+      let hold = null;
+      let release = () => {};
+      const model = http.createServer(async (req, res) => {
+        let raw = "";
+        for await (const c of req) raw += c;
+        if (req.url === "/v1/models") { res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ data: [{ id: "mock" }] })); }
+        const user = JSON.parse(raw).messages[1].content;
+        const name = (/Name: (\w+)/.exec(user) || [])[1];
+        calls.push(name);
+        if (hold) await hold;
+        const text = /JSON only/.test(user) ? '{"tags":["' + name + 'tag"]}' : "The answer about " + name + ".";
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write("data: " + JSON.stringify({ model: "mock", choices: [{ delta: { content: text }, finish_reason: null }] }) + "\n\n");
+        res.write("data: " + JSON.stringify({ model: "mock", choices: [{ delta: {}, finish_reason: "stop" }] }) + "\n\n");
+        res.end("data: [DONE]\n\n");
+      });
+      await new Promise((r) => model.listen(0, "127.0.0.1", r));
+      const base = "http://127.0.0.1:" + model.address().port + "/v1";
+      const ctx2 = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+      const p = await ctx2.newPage();
+      p.setDefaultTimeout(15000);
+      p.on("dialog", (d) => d.accept());
+      p.on("pageerror", (e) => problems.push("page error: " + e.message));
+      await p.addInitScript(() => { window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle("Cards", { create: true }); });
+      const relayConfig = (o) => p.evaluate((o) => fetch("/__vault/ai/config", { method: "POST", headers: { "Content-Type": "application/json", "X-Vault": "1" }, body: JSON.stringify(o) }).then((r) => r.status), o);
+      try {
+        await p.goto(url);
+        await p.locator("#root[data-mounted='1']").waitFor({ timeout: 60000 });
+        await relayConfig({ baseUrl: base, model: "mock" });
+        await p.evaluate((set) => new Promise((res, rej) => {
+          const r = indexedDB.open("rpCardVault");
+          r.onerror = () => rej(r.error);
+          r.onsuccess = () => {
+            const tx = r.result.transaction("kv", "readwrite");
+            tx.objectStore("kv").put(set, "aiSettings");
+            tx.oncomplete = () => { r.result.close(); res(); };
+          };
+        }), { enabled: true, baseUrl: base, model: "mock", writeMode: "propose", contextTokens: 2048, maxTokens: 1000,
+          customPrompts: [{ id: "one", label: "Just personality", template: "Say hi.", allFields: false, fields: ["personality"] }] });
+        await p.reload();
+        await p.locator("#root[data-mounted='1']").waitFor({ timeout: 60000 });
+        await writeFiles(p, "Cards", ["Ada", "Bram", "Cora", "Dell"].map((n, i) => [n + ".png", cardPng({ name: n, description: n + " old." }, [40 + i * 30, 60, 120])]));
+        await p.getByText("Add a folder").first().click();
+        await p.getByText(/Scan complete/).first().waitFor();
+        const tile2 = (n) => p.locator(".cardTile").filter({ hasText: n }).first();
+        const aiTab = () => p.getByRole("tab", { name: /AI/ }).click();
+        const fieldsTab = () => p.getByRole("tab", { name: /^Fields/ }).click();
+        const describe = (text) => p.locator("xpath=//label[starts-with(normalize-space(), 'Description')]/following::textarea[1]").fill(text);
+        const action = (re) => p.locator("button").filter({ hasText: re }).first().click();
+        const saved = async (name) => {
+          await p.getByRole("button", { name: /Save to card \(\d+\)/ }).click();
+          await p.getByText(new RegExp("Saved into " + name)).first().waitFor();
+        };
+        const eventually = async (fn) => {
+          for (const end = Date.now() + 8000; Date.now() < end; await p.waitForTimeout(50)) {
+            if (await fn().catch(() => false)) return true;
+          }
+          return false;
+        };
+        const all = (store) => p.evaluate((store) => new Promise((res) => {
+          const r = indexedDB.open("rpCardVault");
+          r.onsuccess = () => { const g = r.result.transaction(store).objectStore(store).getAll(); g.onsuccess = () => { r.result.close(); res(g.result); }; };
+        }), store);
+
+        // What the tab says goes to the model.
+        await tile2("Dell").click();
+        await aiTab();
+        await action(/Just personality/);
+        await p.getByText(/^Sent:/).waitFor();
+        const sent = await p.getByText(/^Sent:/).innerText();
+        t.ok(/personality/.test(sent) && !/description/.test(sent), "your own prompt's line names the field it reads", sent.slice(0, 90));
+        await action(/Summarise/);
+        await fieldsTab();
+        await describe("Long sentence here. ".repeat(600));
+        await aiTab();
+        await p.getByText(/Trimmed to fit/).waitFor();
+        const trimmed = await p.getByText(/Trimmed to fit/).innerText();
+        t.ok(!/24,000/.test(trimmed) && /Model context/.test(trimmed), "the trim notice gives the limit the model's context really sets", trimmed.slice(0, 120));
+
+        // A saved card's answer is still there, without leaving the tab.
+        await tile2("Ada").click();
+        await aiTab();
+        await p.locator("button").filter({ hasText: /^Summarise$/ }).last().click();
+        await p.getByText("The answer about Ada.").first().waitFor();
+        await fieldsTab();
+        await describe("Ada new.");
+        await aiTab();
+        await p.getByText("The answer about Ada.").first().waitFor();
+        await saved("Ada");
+        t.ok(await eventually(async () => (await p.getByText("The answer about Ada.").count()) > 0 && (await p.getByText(/\d+ cached/).count()) > 0),
+          "the cached answer still shows after a save that changes the card's fingerprint");
+
+        // Bulk: one card saved while the model answers for it, one saved before its turn.
+        await p.getByRole("button", { name: "Rescan", exact: true }).waitFor();
+        await tile2("Ada").click();
+        await tile2("Cora").click({ modifiers: [SELECT_KEY] });
+        await tile2("Bram").click({ modifiers: [SELECT_KEY] });
+        hold = new Promise((r) => { release = r; });
+        const sentBefore = calls.length;
+        await p.getByRole("button", { name: "✦ Suggest tags", exact: true }).click();
+        t.ok(await eventually(async () => calls.length > sentBefore), "the bulk run's first request is out");
+        const first = calls[calls.length - 1];
+        const later = first === "Bram" ? "Ada" : "Bram";
+        for (const n of [first, later]) {
+          await tile2(n).click();
+          await fieldsTab();
+          await describe(n + " saved during the run.");
+          await saved(n);
+        }
+        hold = null;
+        release();
+        const proposedOnCards = async () => {
+          const cards = await all("cards");
+          const eds = await all("edits");
+          return ["Ada", "Bram", "Cora"].filter((n) => {
+            const c = cards.find((x) => x.name === n);
+            const e = c && eds.find((x) => x.fingerprint === c.fp);
+            return e && e.aiProposal && e.aiProposal.vaultTags.indexOf(n + "tag") >= 0;
+          });
+        };
+        await eventually(async () => (await proposedOnCards()).length === 3);
+        t.eq(await proposedOnCards(), ["Ada", "Bram", "Cora"], "every card in the run has its suggestions, saved or not");
+        const cardsNow = await all("cards");
+        const lost = (await all("aiNotes")).concat(await all("edits")).filter((x) => !cardsNow.some((c) => c.fp === x.fingerprint));
+        t.eq(lost.length, 0, "nothing is left under a fingerprint no card has any more");
+      } finally {
+        release();
+        await relayConfig({ baseUrl: "", model: "" }).catch(() => {});
+        await ctx2.close();
+        model.close();
+      }
+    });
+
     await step("a theme is applied, and is there from the first moment after a reload", async () => {
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByLabel("Theme").selectOption("parchment");
@@ -971,17 +1621,17 @@ async function main() {
     // real 153, opening it is what closes the browser.
     const checkNotice = async (p) => {
       await p.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
-      await p.getByText(/^Update (Edge|Chrome) before opening the vault$/).waitFor();
+      await p.getByText(/^Update (Edge|Chrome|Brave|Opera|this browser) before opening the vault$/).waitFor();
       t.ok(true, "a notice explains the browser bug instead of opening the vault");
-      t.ok(await p.getByText(/^(edge|chrome):\/\/settings\/help$/).isVisible(), "and says how to update the browser");
+      t.ok(await p.getByText(/^(edge|chrome|opera):\/\/(settings\/help|update)$/).isVisible(), "and says how to update the browser");
       t.eq(await p.locator(".cardTile").count(), 0, "the vault itself isn't opened");
     };
 
-    if (reloadCrashes) await step("after a reload on a real Edge 153, the notice comes up instead of a crash", async () => {
+    if (reloadCrashes) await step("after a reload on a real 153 browser, the notice comes up instead of a crash", async () => {
       await page.reload();
       await checkNotice(page);
       await page.waitForTimeout(3000);
-      t.ok(browser.isConnected(), "and Edge is still running a few seconds later");
+      t.ok(browser.isConnected(), "and " + browserName + " is still running a few seconds later");
     });
     else await step("after a reload everything is still there", async () => {
       await page.reload();
@@ -1014,6 +1664,53 @@ async function main() {
       await p.locator(".cardTile").filter({ hasText: "Ada Clockmaker" }).first().waitFor();
       t.ok(await p.evaluate(() => window.__idbOpens) > 0, "Open the vault anyway opens it, with everything there");
       await p.close();
+    });
+
+    // A tab of its own, in a profile of its own (no folders saved there), made to
+    // look like the browser in question: no folder picker, and its own marks.
+    const firstRunAs = async (label, setUp, arg) => {
+      const fresh = await browser.newContext();
+      const p = await fresh.newPage();
+      p.on("pageerror", (e) => problems.push("page error (" + label + " tab): " + e.message));
+      p.on("console", (m) => { if (m.type() === "error" && !/code generator has deoptimised/.test(m.text())) problems.push("console (" + label + " tab): " + m.text()); });
+      await p.addInitScript(setUp, arg);
+      await p.goto(url);
+      await p.locator("#root[data-mounted='1']").waitFor({ timeout: 30000 });
+      // A real 153 shows its notice first; this profile has no saved folders, so going on is safe.
+      const on = p.getByRole("button", { name: "Open the vault anyway" });
+      if (await on.count()) await on.click();
+      return { p, close: () => fresh.close() };
+    };
+
+    await step("Brave with folder access still switched off is told how to switch it on", async () => {
+      const { p, close } = await firstRunAs("Brave", () => {
+        // What Brave does: it takes the File System Access API out, and says it is Brave.
+        Object.defineProperty(window, "showDirectoryPicker", { value: undefined, configurable: true });
+        if (!navigator.brave) Object.defineProperty(Navigator.prototype, "brave", { get: () => ({ isBrave: () => Promise.resolve(true) }), configurable: true });
+      });
+      await p.getByText("Brave blocks folder access by default").waitFor();
+      t.ok(true, "it says Brave blocks folder access, rather than showing an empty vault");
+      t.ok(await p.getByText("brave://flags", { exact: true }).isVisible() && /File System Access/.test(await p.locator("body").innerText()), "and where to turn it on: brave://flags, the File System Access entry");
+      t.ok(await p.getByRole("button", { name: "Import a folder (read-only)" }).isVisible(), "and offers to read a folder without it meanwhile");
+      t.eq(await p.getByText("Add a folder").count(), 0, "it doesn't offer a folder picker that isn't there");
+      await close();
+    });
+
+    await step("a browser with no folder access at all (Firefox, Safari) is told what it can and can't do", async () => {
+      const { p, close } = await firstRunAs("Firefox", (ua) => {
+        Object.defineProperty(window, "showDirectoryPicker", { value: undefined, configurable: true });
+        Object.defineProperty(Navigator.prototype, "userAgent", { get: () => ua });
+        try { delete window.chrome; } catch (e) { /* not there */ }
+        // When this test runs in Brave itself, the tab still carries Brave's own
+        // mark, and the page would rightly say "Brave". A Firefox has none. Set on
+        // the navigator object, which wins whether or not Brave's can be removed.
+        Object.defineProperty(navigator, "brave", { get: () => undefined, configurable: true });
+      }, "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0");
+      await p.getByText("Firefox can't file cards automatically").waitFor();
+      t.ok(true, "it names the browser and says it can't file cards");
+      t.ok(/Chrome or Edge/.test(await p.locator("body").innerText()) && await p.getByRole("button", { name: "Import a folder (read-only)" }).isVisible(),
+        "points to a browser that can, and offers to read a folder meanwhile");
+      await close();
     });
 
     console.log("\nthroughout");

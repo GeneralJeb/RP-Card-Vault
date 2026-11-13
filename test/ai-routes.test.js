@@ -39,6 +39,19 @@ let fail503 = 0;
 
 const CHALLENGE = '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Enable JavaScript and cookies to continue</body></html>';
 
+const fn = (name, args) => ({ name, arguments: args });
+const READ_A = "{\"path\":\"a.md\"}", READ_B = "{\"path\":\"b.md\"}";
+const FLAT = {
+  noIndex: [[{ id: "a", function: fn("fs_read", READ_A) }], [{ id: "b", function: fn("fs_list", "{}") }]],
+  zeroInOneChunk: [[{ index: 0, id: "a", function: fn("fs_read", READ_A) }, { index: 0, id: "b", function: fn("fs_list", "{}") }]],
+  zeroInTwoChunks: [[{ index: 0, id: "a", function: fn("fs_read", READ_A) }], [{ index: 0, id: "b", function: fn("fs_list", "{}") }]],
+  noIds: [[{ index: 0, function: fn("fs_read", READ_A) }], [{ index: 0, function: fn("fs_list", "{}") }]],
+  sameToolNoIds: [[{ function: fn("fs_read", READ_A) }], [{ function: fn("fs_read", READ_B) }]],
+  repeatsItself: [[{ index: 0, id: "a", function: fn("fs_read", "{\"path\":") }], [{ index: 0, id: "a", function: fn("fs_read", "\"a.md\"}") }]],
+  sameId: [[{ index: 0, id: "dup", function: fn("fs_read", READ_A) }, { index: 1, id: "dup", function: fn("fs_list", "{}") }]],
+  stolenFallback: [[{ index: 0, function: fn("fs_read", READ_A) }, { index: 1, id: "call_1", function: fn("fs_list", "{}") }]],
+};
+
 function upstream() {
   return http.createServer(async (req, res) => {
     let raw = "";
@@ -73,6 +86,13 @@ function upstream() {
     if (mode === "norole" && body.messages.some((m) => m.role === "tool")) return json(400, { error: { message: "Role 'function' is not supported. Please use a valid role: SYSTEM, SYSTEM_1, USER, ASSISTANT, DEVELOPER, CONTEXT, USER_CONTEXT, MODEL, USER." } });
     const hasImage = (body.messages || []).some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"));
     if (mode === "noimages" && hasImage) return json(400, { error: { message: "This model does not support image input." } });
+    if (mode.indexOf("flat:") === 0) {
+      // Servers that don't number their calls properly: each list is one chunk's calls.
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      for (const calls of FLAT[mode.slice(5)]) res.write("data: " + JSON.stringify({ choices: [{ delta: { tool_calls: calls } }] }) + "\n\n");
+      res.write("data: [DONE]\n\n");
+      return res.end();
+    }
     if (mode === "toolsjson") {
       return json(200, { model: body.model, choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [
         { id: "c9", type: "function", function: { name: "fs_list", arguments: { path: "" } } },
@@ -336,6 +356,17 @@ async function main() {
     t.eq([done.t, done.tools, done.finish], ["done", 2, "tool_calls"], "done counts them");
     t.ok(ev.findIndex((e) => e.t === "tool") > ev.findIndex((e) => e.t === "text"), "any text before the calls is still streamed");
 
+    const flat = async (key) => { mode = "flat:" + key; return events(await chat({ tools: TOOLS })).filter((e) => e.t === "tool").map((c) => [c.id, c.name, c.args]); };
+    const both = [["a", "fs_read", READ_A], ["b", "fs_list", "{}"]];
+    t.eq(await flat("noIndex"), both, "calls with no index, a chunk each, stay two calls");
+    t.eq(await flat("zeroInOneChunk"), both, "every call marked index 0 in one chunk stays two calls");
+    t.eq(await flat("zeroInTwoChunks"), both, "every call marked index 0 across chunks stays two calls");
+    t.eq(await flat("noIds"), [["call_1", "fs_read", READ_A], ["call_2", "fs_list", "{}"]], "with no ids either, a different tool is a new call");
+    t.eq(await flat("sameToolNoIds"), [["call_1", "fs_read", READ_A], ["call_2", "fs_read", READ_B]], "and the same tool again, once the first call's arguments are whole");
+    t.eq(await flat("repeatsItself"), [["a", "fs_read", READ_A]], "a server repeating the id and name on every piece is still one call");
+    t.eq(await flat("sameId"), [["dup", "fs_read", READ_A], ["call_2", "fs_list", "{}"]], "two calls with one id get ids of their own");
+    t.eq((await flat("stolenFallback")).map((c) => c[0]).filter((x, i, l) => l.indexOf(x) === i).length, 2, "a made-up id never lands on one the server used");
+
     mode = "toolsjson";
     ev = events(await chat({ tools: TOOLS }));
     t.eq(ev.filter((e) => e.t === "tool").map((c) => [c.id, c.name, c.args]), [["c9", "fs_list", "{\"path\":\"\"}"]],
@@ -453,6 +484,39 @@ async function main() {
       r = await ws("read", { path: "old/secret.txt" });
       t.ok(r.status === 400 && !/outside/.test(r.text), "nor one into a folder beside it whose name starts the same (" + path.basename(sibling) + ")");
     }
+    // What the file system says has the user's full path in it, and goes to the model.
+    await ws("mkdir", { path: "plain" });
+    for (const [label, route, body] of [
+      ["writing below a file", "write", { path: "agent.md/x.md", text: "x", ver: null }],
+      ["a folder below a file", "mkdir", { path: "agent.md/sub" }],
+      ["a name that's too long", "write", { path: "a".repeat(300) + ".md", text: "x", ver: null }],
+      ["a folder moved into itself", "move", { from: "plain", to: "plain/in" }],
+      ["a folder moved below a file", "move", { from: "plain", to: "agent.md/in" }],
+    ]) {
+      r = await ws(route, body);
+      t.ok(r.status === 400 && !/agent-workspace|E[A-Z]{3,}:/.test(r.text), label + " is refused in plain words, with no path of this computer's", r.text.slice(0, 160));
+    }
+    fs.writeFileSync(path.join(WS, "locked.md"), "x");
+    fs.chmodSync(path.join(WS, "locked.md"), 0o444);
+    const lockedVer = json(await ws("read", { path: "locked.md" })).ver;
+    r = await ws("write", { path: "locked.md", text: "y", ver: lockedVer });
+    if (process.platform === "win32") {
+      t.ok(r.status === 400 && !/agent-workspace|EPERM/.test(r.text), "a read-only file is refused in plain words", r.text.slice(0, 160));
+    }
+    t.eq(fs.readdirSync(WS).filter((n) => /\.tmp-/.test(n)), [], "and no temporary file is left behind");
+    fs.chmodSync(path.join(WS, "locked.md"), 0o666);
+    fs.unlinkSync(path.join(WS, "locked.md"));
+
+    // A file saved in Windows' older encoding: "Café" with one byte for the é.
+    const ansi = Buffer.from([0x43, 0x61, 0x66, 0xe9, 0x0d, 0x0a]);
+    fs.writeFileSync(path.join(WS, "ansi.md"), ansi);
+    const ansiRead = json(await ws("read", { path: "ansi.md" }));
+    t.ok(/^Caf/.test(ansiRead.text), "a file in an older encoding can still be read");
+    r = await ws("write", { path: "ansi.md", text: ansiRead.text + "more", ver: ansiRead.ver });
+    t.ok(r.status === 400 && /UTF-8/.test(r.text), "changing it is refused, saying why", r.text.slice(0, 120));
+    t.ok(fs.readFileSync(path.join(WS, "ansi.md")).equals(ansi), "and its bytes aren't touched");
+    fs.unlinkSync(path.join(WS, "ansi.md"));
+
     r = await ws("read", { path: "agent.md:hidden" });
     t.ok(r.status === 400 && /isn't allowed/.test(r.text), "a hidden data stream (agent.md:hidden) is refused");
 

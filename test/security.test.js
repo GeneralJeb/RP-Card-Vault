@@ -195,6 +195,8 @@ async function main() {
       "run.bat", "run.cmd", "x.vbs", "x.ps1", "x.exe", "page.html", "page.htm", "x.svg", "x.js", "x.hta", "x.lnk", "x.url",
       "notes/evil.HTML", "agent.md:hidden", "CON", "nul.txt", "COM1.md", "notes/LPT1", "trailing.", "x.bat.", "dir /x.md",
       "../escape.md", "/abs.md", "C:/x.md", "\\\\?\\C:\\x.md", "a/../../x.md",
+      // A name that is all extension is that kind of file on Windows: ".bat" runs when it's double-clicked.
+      ".bat", ".cmd", ".vbs", ".ps1", ".html", ".lnk", ".url", ".hta", ".js", "notes/.bat", "tools/custom/.VBS",
     ];
     for (const p of bad) {
       const r = await write(p);
@@ -202,6 +204,19 @@ async function main() {
     }
     const leaked = fs.readdirSync(ws).filter((n) => /\.(bat|cmd|vbs|ps1|exe|html?|svg|js|hta|lnk|url)$/i.test(n));
     t.eq(leaked.filter((n) => n !== "evil.html"), [], "none of them landed in the workspace");
+    {
+      // Nor by renaming a note into one, in a folder or not.
+      const made = await write("plain-note.md", "@echo off");
+      const ver = JSON.parse(made.body).ver;
+      for (const to of [".bat", "notes/.cmd"]) {
+        const r = await post("/__vault/ws/move", { from: "plain-note.md", to, ver });
+        t.ok(r.status >= 400, "a note can't be renamed to " + JSON.stringify(to), r.status + " " + r.body.slice(0, 80));
+      }
+      const ok = await write(".notes.md", "a note whose name starts with a dot");
+      t.ok(ok.status === 200, "a text file whose name starts with a dot is still fine (.notes.md)", ok.status + " " + ok.body.slice(0, 80));
+      const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [e.name]));
+      t.eq(walk(ws).filter((n) => /^\.(bat|cmd|vbs|ps1|html|lnk|url|hta|js)$/i.test(n)), [], "and no file named only by such an extension is anywhere in the workspace");
+    }
     for (const p of ["notes/ideas.md", "list.txt", "data.json", "table.csv", "README"]) {
       const r = await write(p, "fine");
       t.eq(r.status, 200, "text files are still fine: " + p);

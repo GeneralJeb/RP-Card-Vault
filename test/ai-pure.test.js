@@ -24,7 +24,7 @@ const { mod: V } = loadPureRegion([
   "proposalAcceptPatch", "proposalFieldIsStale", "AI_PROPOSAL_KINDS", "AI_TIGHTEN_FIELDS",
   "aiBulkSummary", "effectiveField", "effectiveTags", "vaultTagsOf", "flagsOf", "flagDef", "addFlagEntries", "flagGroups", "isLoopbackAddress", "aiAddressWarning", "aiRoomChars", "aiFitWarning", "normalizeAiBase", "originOfUrl",
   "AI_PROMPT_RULES_DEFAULT", "aiAllActions", "aiTagExclusions", "aiTagVocabulary", "aiKnownTagsText", "buildTagIndex", "filterTagList",
-  "resolveTags", "suggestTagMerges",
+  "resolveTags", "suggestTagMerges", "aiCleanTag", "aiSentSummary", "aiActionDef",
 ]);
 
 const RELAY = { available: true, needsUpgrade: false, build: V.EXPECTED_RELAY_BUILD, baseUrl: "http://127.0.0.1:11434/v1", model: "m", hasKey: false };
@@ -544,6 +544,62 @@ console.log("\na diff side by side");
   t.eq(V.diffSides(V.diffText("", "All new.").parts).map((r) => [text(r.left), text(r.right)]), [["", "All new."]], "a new text has an empty left side");
   const long = Array.from({ length: 3000 }, (_, i) => "word" + i).join(" ");
   t.ok(V.diffSides(V.diffText(long + "\n\nend", long + "\n\nfinish").parts).length >= 1, "a field too long for a word diff still comes out side by side");
+}
+
+console.log("\nwhat a model answers isn't taken at its word");
+{
+  t.eq(V.parseTagSuggestions('{"tags":["1950s","18+","3D","90s","2B"]}', [], 8), ["1950s", "18+", "3D", "90s", "2B"], "a tag that starts with a number keeps it");
+  t.eq(V.parseTagSuggestions("1. fantasy\n2. 3D art\n3) elf\n- 90s\n* noir", [], 8), ["fantasy", "3D art", "elf", "90s", "noir"], "a plain list loses its numbers and bullets, nothing more");
+  t.eq(V.parseTagSuggestions("**fantasy**, *elf*", [], 8), ["fantasy", "elf"], "markdown around a tag goes");
+  t.eq(V.aiCleanTag("1.5 gen"), "1.5 gen", "a decimal isn't a list number");
+  t.eq(V.parseTagSuggestions('{"tags":[{"name":"x"},"ok",["a","b"],null,true]}', [], 8), ["ok"], "only text is a tag: no [object Object]");
+  t.eq(V.parseTagSuggestions('{"tags":[{"name":"x"}]}', [], 8), null, "a list with no text in it is off-format, not 'no new tags'");
+  const cut = V.interpretAiResult(done("fantasy, adventure, dra", { finish: "length" }), { kind: "tags", maxTokens: 100 });
+  t.eq(cut.ok, false, "a plain list cut off by the token limit is refused, not proposed with half a tag");
+  t.eq(V.interpretAiResult(done('{"tags":["fantasy"]}', { finish: "length" }), { kind: "tags", maxTokens: 100 }).proposal.value, ["fantasy"], "whole JSON that ends at the limit is still good");
+  t.eq(V.parseCritique('{"findings":[{"flag":"broken","note":{"a":1}},{"flag":"broken","note":"Real."}]}').findings, [{ flag: "broken", note: "Real." }], "a finding whose note isn't text is skipped");
+}
+
+console.log("\na rewrite gives back the card's own text");
+{
+  const orig = "Keep <card> in here. {{char}} likes </card> too.";
+  const echoed = V.parseRewrite("<rewrite>" + V.aiFenceText(orig) + "</rewrite>", orig);
+  t.ok(echoed.unchanged, "the fence's &lt;card isn't taken for a change");
+  t.eq(V.parseRewrite("<rewrite>Keep &lt;card> only. {{char}} &lt;/card></rewrite>", orig).rewrite, "Keep <card> only. {{char}} </card>", "and never reaches the card");
+  t.eq(V.parseRewrite("<rewrite>Plain &lt;card> text.</rewrite>", "Plain &lt;card> text, longer.").rewrite, "Plain &lt;card> text.", "a card that really says &lt;card keeps it");
+  const inner = V.parseRewrite("<rewrite>Short.\n<notes>Cut the rest.</notes></rewrite>", "Short and long.");
+  t.eq([inner.rewrite, inner.notes], ["Short.", "Cut the rest."], "notes written inside the block stay out of the field");
+  t.eq(V.parseRewrite("here İ <rewrite> x İİİ\n<rewrite>real</rewrite>", "orig text").rewrite, "real", "a preamble's unusual letters don't shift where the block starts");
+  t.ok(V.parseRewrite("<rewrite>a\nb</rewrite>", "a\r\nb").unchanged, "line endings alone aren't a change");
+}
+
+console.log("\nthe AI tab says what is really sent");
+{
+  const cfg = V.sanitizeAiSettings({ customPrompts: [
+    { id: "one", label: "One", template: "go", allFields: false, fields: ["personality"] },
+    { id: "all", label: "All", template: "go", allFields: true },
+  ] });
+  const body = { name: "A", description: "DESC", personality: "PERS", system_prompt: "SYSP" };
+  const one = V.aiBuildRequest("c:one", cfg, REC, body, null, [], {});
+  const oneLine = V.aiSentSummary(V.aiActionDef("c:one", cfg), cfg, one.budget);
+  t.ok(/personality/.test(oneLine) && !/description/.test(oneLine) && !one.user.includes("DESC"), "a prompt that reads one field says that field", oneLine);
+  const all = V.aiBuildRequest("c:all", cfg, REC, body, null, [], {});
+  const allLine = V.aiSentSummary(V.aiActionDef("c:all", cfg), cfg, all.budget);
+  t.ok(/system prompt/.test(allLine) && all.user.includes("SYSP"), "a prompt that reads all fields says the system prompt goes too", allLine);
+  t.ok(!/system prompt/.test(V.aiSentSummary(V.aiActionDef("summarise", cfg), cfg)), "the built-in actions don't");
+  const small = V.sanitizeAiSettings({ contextTokens: 2048, maxTokens: 1000 });
+  const req = V.aiBuildRequest("summarise", small, REC, { name: "A", description: "Long sentence here. ".repeat(600) }, null, [], {});
+  t.ok(req.budget < small.contextChars && req.trimmed.length === 1, "the budget a request reports is the one it was cut to, the model's context included", req.budget);
+}
+
+console.log("\na hostile card can't freeze a diff");
+{
+  const paras = (c, n) => Array.from({ length: n }, (_, i) => c + i).join("\n\n");
+  const started = Date.now();
+  const d = V.diffText(paras("a", 70000), paras("b", 70000));
+  t.ok(Date.now() - started < 3000, "70,000 changed paragraphs come back at once", Date.now() - started);
+  t.eq(d.parts.map((x) => x.t), ["del", "add"], "shown as replaced whole");
+  t.eq(V.diffText(paras("a", 3000), paras("a", 2999) + "\n\nz").parts.filter((x) => x.t !== "same").map((x) => x.t), ["del", "add"], "a long field with a small change still diffs");
 }
 
 t.done();

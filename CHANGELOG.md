@@ -8,6 +8,152 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.1
+
+- **The vault asks your browser to keep its data.** Left to itself, a browser may clear a site's saved data when the disk runs low, without asking, and your tags, notes and edits would go with it. The vault now asks the browser to keep them, once, each time it opens; this shows nothing and needs nothing from you. **Settings → Automatic backups** says what the browser answered. A browser that won't promise usually does once the vault is installed as an app or has been used for a while, and your backups cover you either way.
+- **A vault whose saved data can't be read no longer opens looking empty.** If the browser's database opened but a read from it failed (a damaged file on disk, say), the vault took that for "nothing saved": it opened empty, with default settings, and the first setting you changed was saved over your real ones. It now checks that its data can be read before loading anything. If it can't, it stops with a notice that says what to try, having changed nothing. **Reload** tries again, and **Start afresh** clears only this browser's copy, after which adding your folder again brings the offer of your newest backup.
+- **The agent can ask the vault what it already knows, instead of reading cards one by one.** This is quicker, costs fewer tokens, and suits small local models, which lose their way in long runs of reading:
+  - **`list_cards` finds cards that need attention.** A new `issue` filter lists the cards the vault's own checks found something on (no tags, an empty description, no first message, a lorebook entry with no keys and so on), or files that aren't readable as cards, and says what was found on each.
+  - **`list_cards` knows about changes and sends.** Its `flag` filter takes `changedOutside`, `sent`, `notSent` and `changedSinceSent`.
+  - **`inspect_card` says more.** It adds what the checks found, whether the card's file was changed outside the vault, and where it stands with your front end. Asked to, it also runs the lorebook checks and names the entries.
+  - **`list_duplicates` can list cards that read alike** (`kind: similar`), with how alike they are. It works this out when asked, and it isn't part of the ordinary duplicate list.
+  - Cards in a folder you keep private from the AI stay out of all of it.
+- **On a Mac, hints name the ⌘ key.** The folder list's hint said "Ctrl-click to add", but on a Mac a Ctrl-click is a right-click and opens the folder's menu. ⌘-click always worked there; the hint now says so, and so does the hint for copying the problem log by hand.
+- **Removing a folder from the vault is quicker.** Its cards were taken out of the index one at a time, several steps each, which took seconds for a few hundred cards. They now go together.
+
+## 1.8.0
+
+- **New: where a card stands with your front end.** The card panel's Overview has a **Front end** block with a line for each destination, and the sidebar has three new filters for the destination that Send uses: **In front end**, **Not sent** and **Changed since sent**. The vault works this out from what it knows itself, and never asks a front end what it holds:
+  - **A folder destination** is a folder you've linked, so the vault can see into it. A card is *in the front end* when its very file is there, and *a different version is there* when a card with the same name and creator, or the same name, description and first message, is.
+  - **An upload** (SillyTavern, Lumiverse, another importer) leaves a mark on the card: when it was sent, and which file it was. The card reads as *sent* while its file is still one that was sent, and *changed since it was sent* once you've saved changes into it.
+  - **A copy you've reworked doesn't pass for the card you sent.** It may share the original's notes and tags, but it's a different file, so it reads as changed, or as not sent if you gave it a new name, description or first message.
+  - The mark says what the vault sent, not what happened in the front end afterwards: a card you deleted or edited there still reads as sent. It's kept with your notes, so it's in your vault-data backups too.
+- **New: a card changed outside the vault is marked, and shows what changed.** When a scan finds that a card's file has changed and the vault didn't write it (you edited the card in your front end, say), the card gets a ✎ badge, the new **Changed outside** filter finds it, and the card panel's new **History** tab shows the change side by side: the description, greetings, tags, lorebook and the rest, as they were and as they are. **Dismiss** takes the mark off. This is where a **Save to card** that was held back (see 1.7.1) sends you to look before you save.
+- **New: a card's backups, to compare and to go back to.** Every **Save to card** already left a copy of the file as it was in `_vault backups`. The **History** tab now lists a card's backups with their dates. **Compare** shows what differs between a backup and the card now. **Restore** puts a backup back as the card's file: the file as it is now is backed up first, so going back can itself be undone, and what's written is read back and checked. Changes waiting for Save to card stay waiting.
+- **New: lorebook checks.** The Lorebook tab has a **Checks** bar above the entries, with the book's token counts (always-on entries, everything at once, and its budget). Open it for what's worth a look, with the entries' numbers:
+  - **To fix:** an entry with no keys that isn't always on (nothing can bring it in), a key written as a `/regular expression/` that isn't a valid one, an entry that's on but empty, and entries with the same text.
+  - **To know:** a key that several entries share (they come in together), entries none of whose keys appears in the card's own text or in another entry (only the chat can bring them in), entries turned off, and a budget that everything at once wouldn't fit.
+- **New: preview a greeting as a front end shows it.** The Greetings tab has a **Preview** button: the first message and the alternate greetings are shown with `{{char}}` and `{{user}}` filled in (and the older `<BOT>` and `<USER>`), and their `*markdown*` drawn. You choose the name `{{user}}` stands for. Placeholders only a front end can fill, like `{{time}}`, are left as written and listed. Card text is shown as text, so any HTML in a card appears as written and is never run.
+- **New: saved views.** Set the sidebar up the way you like it (the search, the sort, tags, flags, folders, token limits), then **+ save this view** under **Views** and give it a name. Click a view to come back to it; the one on screen is marked. Saving under a name you've used replaces that view. Views are kept with your settings, so your vault-data backups carry them.
+- **New: rename card files from a pattern.** Select cards and press **Rename…** in the selection bar. `{creator} - {name}` names each file after its card; `{version}`, `{tag}` (the first tag), `{spec}` and `{date}` work too, and a card without a creator doesn't come out as `- Ada`. You see every old and new name before anything happens.
+  - Only the file's name changes: its type, its folder, the card inside and your notes stay as they are, and the card keeps its short id.
+  - Each file is copied under its new name and compared byte for byte before the old one is removed, as a move is. A name another file already has is never written over: the renamed file gets a number.
+  - Files that aren't readable as cards, or are in an imported or Reference folder, are left alone, and the list says why.
+  - A renamed card's earlier backups stay under its old name in `_vault backups`, so its History tab starts again from there.
+- **New: find cards that read alike.** **Dupes → Similar text → Find similar cards** compares the wording of every card's description, personality, scenario and first message, and groups the ones that share most of it without being the same card: a rework, a touched-up repost, the same character under another name. Each group says how alike its cards are, and **compare** shows them side by side. These aren't copies, so nothing there is trashed or deleted for you. It runs when you ask, on your computer, in a few seconds for a few thousand cards; nothing is sent anywhere.
+
+## 1.7.1
+
+- **Notes, favourites, ratings, flags and vault-only tags stay on a card that was edited somewhere else.** They're kept under a fingerprint of the card's name, description and first message, so that copies of one card share them. But when a card's description was changed in your front end, the next scan saw a new fingerprint, and everything you'd put on the card dropped out of sight (it was still stored, under the old one). A scan now carries a card's record over when its file has changed. A copy that wasn't edited keeps the record too, and if the card now matches one that already has notes, the two are joined. Changes waiting for **Save to card** follow the card as well.
+- **Save to card can't undo a change made somewhere else.** A save wrote every field from the vault's own copy of the card, taken at the last scan. If the file had changed since (edited in your front end, say), the save quietly put the old text back, and still said it had worked. Now:
+  - A file that has changed since the vault last read it is **not written**. The vault says so, reads the card again, and your changes wait on it to be saved after a look.
+  - A save takes every field it doesn't change **from the file itself**, as it is at that moment.
+  - A card whose text never reached the vault's cache can no longer be saved with its other fields blank. A bulk **Save to card** could do that; the button in the card panel was already off for such a card.
+- **A cleared browser no longer costs you your vault-data backups.** The automatic backups in `_vault data` are there for exactly this, but after the browser's data was cleared the vault started again empty, wrote a backup of nothing on the first scan, and removed the oldest real one to make room. A week on, every real backup was gone, and nothing had offered to bring one back. Now:
+  - When a backup in the folder holds far more than the vault does, the vault **offers to bring it back**, in a bar above your cards. **Not now** puts the bar away for that backup.
+  - An empty vault writes no backup while such a one is there.
+  - A backup that holds far more than the vault does now is **never removed** to make room, however many newer ones there are.
+- **The agent's workspace refuses files named only by an extension.** It takes text files only, by extension, so that a card can't talk the agent into leaving a program for you to open. A name like `.bat`, `.vbs` or `.html` slipped through, because such a name counts as having no extension, though Windows runs a file called `.bat` as a batch file all the same. They're refused now, for new files and for renames. A text file whose name starts with a dot (`.notes.md`) is still fine.
+- **A move checks every byte of the copy.** Before the original is removed, the copy was compared by a signature that only samples the start and end of a big file, so a copy damaged in the middle would have passed. The whole copy is compared now.
+- **A writable folder inside a Reference folder can be saved to.** With backups on, **Save to card** failed there, saying its backup folder was a Reference folder. A folder's backups can now be written wherever its cards can.
+- **The safety notes say what the vault does.** `SECURITY.md` and `CONTRIBUTING.md` said the vault never deletes a card file. It does when you ask it to (**Delete permanently**, or deleting duplicates), after asking, as the README says.
+
+## 1.7.0
+
+- **The vault runs on a Mac and on Linux.** It was Windows only, because its launchers were. There are now launchers for the other two, in every download:
+  - **Mac:** double-click **`Start RP Card Vault.command`**. The first time, macOS may refuse a file that came from the internet: right-click it, choose **Open**, and confirm.
+  - **Linux:** run **`./start.sh`** in a terminal in the vault's folder (it works on a Mac too, and is what the `.command` runs).
+  - **`./stop.sh`** turns the server off. It asks the server to stop through the vault's own address, so it can never stop another program.
+  - They do what the Windows launcher does: a server already on this copy's port is replaced by a fresh one, `vault.local` gives a second copy its own port (read exactly as on Windows, even a `vault.local` saved there), a portable Node in `node/bin/node` is used before an installed one, and without Node the page alone is served through Python.
+  - Checked on Linux (Ubuntu 24.04) and on GitHub's Mac test machines, where the tests run the launchers for real. **Nobody has used it day to day on a Mac yet:** if it misbehaves for you, please open an issue.
+- **On a Mac or Linux the vault opens in a browser that can run it.** It needs Chrome, Edge, Brave, Vivaldi or Chromium, and the default browser there is often Safari or Firefox. It now opens in your default browser when that is one of those five, and otherwise in the first of them that's installed (Chrome first). Only when none is installed does it open in the default, where the page says what it needs. On Windows nothing changes: `Start RP Card Vault.bat` opens your default browser and the shortcuts pick as they did. Your tags and notes are kept by the browser, so keep using the same one.
+- **The vault names the right file to start.** Its messages said to run `Start RP Card Vault.bat` whatever the computer. On a Mac they now name `Start RP Card Vault.command`, and on Linux `start.sh`.
+- **A file that can't be opened no longer blames Windows on other systems.** A card file that was in a folder's list but couldn't be opened was always put down to Windows' 260-character path limit. On a Mac or Linux, which have no such limit, it now says the file was most likely moved or removed, and to rescan.
+- **Smaller wording changes for the same reason.** The theme choice is **Match your system**, a card dragged out of the window lands in Finder or your file manager, and the problem log speaks of your user name on this computer.
+
+## 1.6.28
+
+- **Start RP Card Vault.bat works from a folder with brackets in its name.** Downloading the vault a second time gives a folder like `RP-Card-Vault (1)`, and from there Start closed at once with "\ was unexpected at this time", so the vault never started. Brackets, `&` and the rest are now just part of the folder's name, including for a portable Node kept in that folder.
+- **Stop RP Card Vault.bat stops the right copy from a folder with `!` in its name.** It lost the `!` from its own folder, so it couldn't read that copy's `vault.local` and went looking on port 8790, where it could stop a different copy of the vault.
+- **Create Shortcut works from a folder with square brackets in its name.** In a folder like `vault [2]` it said it couldn't find `RP Card Vault.vbs` sitting right next to it.
+- **A port the vault can't use says so.** A `port=` in `vault.local` above 65535, below 1 or with a decimal point (`99999`, `8791.5`) made the server stop with a page of Node error text. It now says the port can't be used and to check `vault.local`.
+
+## 1.6.27
+
+- **Switches work from the keyboard.** The on/off switches (in Settings, the AI and agent panels, Ingest and the sidebar's Deep text) could only be clicked: Tab skipped them, so without a mouse there was no way to turn on backups before saving, tag tidying, the AI features and the rest. Tab now stops on each one, Space or Enter turns it over, and a screen reader hears it as a switch that is on or off.
+- **Unnamed controls have names.** The tile size sliders and the Sort, Default filing and Trash folder lists were read out by a screen reader with no name. They now say what they are.
+
+## 1.6.26
+
+- **One card with "sign" in its name no longer stops an upload.** Sending several cards to SillyTavern, Lumiverse or another importer stops early when the front end signs you out or stops running. It decided that by looking for words like "sign" in the error, and a refusal can name the card, so one refused card called "Assignment" or "Designer" (or a refusal that said "design") left every card after it unsent. The run now stops only when the local server says the sign-in is gone or the front end can't be reached.
+- **Very long card names keep their emoji when uploaded.** A name over 200 characters is shortened before it's sent, and the cut could fall in the middle of an emoji, which then reached the front end as `�`. It's now cut on whole characters.
+
+## 1.6.25
+
+- **A front end can't show you its own token or password back.** When a destination refused a card or a sign-in and quoted what it was sent ("refused key abc123", "wrong password …"), that token, password or session went straight to the screen and into the problem log, where copying the log for a bug report would pass it on. The local server now hides them as `[hidden]`, as it already did for the AI key.
+- **A runaway AI reply can't stall the local server.** An endpoint that streamed one very long line made the server search the whole line again on every new piece, taking seconds per few megabytes, with every other request (pages, sends, the workspace) waiting behind it. Each piece is now looked at once.
+
+## 1.6.24
+
+- **Models that number their tool calls badly lose none of them.** Some servers mark every tool call as number 0, or don't number them at all. Two calls in one reply were then glued into one, with arguments like `{"path":"a.md"}{}`, so the first failed and the second never ran. They stay separate calls now, and two calls with the same id get an id each.
+- **`bulk_tags` no longer tags every card by mistake.** Given a filter it doesn't have (`where: { name: "Ada" }`), it ignored the filter and changed every card it could see. It now changes nothing and says which filters there are. The `duplicates` filter works there and in `random_card`, where it used to find nothing.
+- **Private folders stay private by name too.** `list_folders` sent the names of folders you keep private from the AI to the model, and a card could be created, copied or moved into one. They're left out now, along with their subfolders.
+- **`fs_edit` can't write the word "undefined".** A call with no `replace` swapped the text for the literal word "undefined" (or "null") in your file. It's refused now; an empty `replace` still takes text out.
+- **A search can't freeze the page.** A regular expression like `(a+)+$` from the model would lock up the vault until the tab was closed. `grep_cards` now refuses patterns of that kind and asks for something simpler. A plain search for the same characters is fine.
+- **A field that doesn't exist is an error, not "no matches".** `grep_cards` with a made-up field name said no card matched, and `read_card` gave back an empty card. Both now name the fields there are.
+- **Workspace errors no longer show where you keep things.** Some failed file changes (a name that's too long, a folder below a file, a folder moved into itself, a read-only file) sent the full path on your computer, user name included, to the screen and to the model. They're plain sentences now, and a failed save no longer leaves a `.tmp-` file behind.
+- **Files in an older encoding keep their accents.** A workspace file saved in Windows' old encoding read with "é" as "�", and any change, by the agent or in the Files dialog, wrote that back for good. Changing such a file is now refused, with a note to save it as UTF-8 first. It can still be read.
+- **Send pressed twice sends once.** A second press while a new chat was still reading `agent.md` sent the message twice and ran two replies at once.
+- **A condense finishes in its own chat.** During a condense you could start a new chat, open another or delete the one condensing; when it finished you were pulled back to the old chat, and a deleted one came back. Those buttons now wait, as they do during a reply.
+- **Smaller fixes for the agent.** Two chats made moments apart with the same title no longer share a handoff file. `todo_write` given plain strings keeps them instead of emptying the list. A question's options never show as "[object Object]". `edit_lorebook` given a list as `set` no longer writes nonsense keys. `list_cards` and `list_duplicates` past the end say there's nothing there, instead of "showing 51–50".
+
+## 1.6.23
+
+- **Cached AI answers stay put through a save.** After **Save to card** changed a card's name, description or first message, the ✦ AI tab said nothing was cached until you left the tab and came back.
+- **A bulk AI run survives a save.** If you saved a card while a bulk run (✦ Suggest tags, or your own prompt) was going, that card's answer and suggestions went to its old copy, where you could never see them. They now land on the card.
+- **Tags that start with a number keep it.** Suggest tags turned "1950s" into "s", "18+" into "+" and "3D" into "D". Only real list numbers ("1. fantasy") are taken off now, and markdown stars around a tag go too.
+- **A reply cut off in a plain list is refused.** When the answer hit Max tokens out partway through a comma-separated list, the half-written last tag was offered as a tag (and added straight away in auto-tags mode). It now says the answer was cut off, as it does for JSON.
+- **No more "[object Object]".** A tag or a critique note that came back as something other than text showed as "[object Object]". Those are now skipped, and a tag list with no text in it shows the model's reply instead.
+- **Tighten gives back what the card says.** Card text containing `<card>` came back as `&lt;card>` and would have gone into the card that way. Notes written inside the rewrite block no longer end up in the field, a reply with unusual letters before the block no longer loses most of the rewrite, and a rewrite that differs only in its line endings counts as unchanged.
+- **The ✦ AI tab says what's really sent.** With your own prompts, the line at the bottom always listed the usual fields, even for a prompt reading only one field, or all of them including the system prompt. It now lists what that prompt sends. The trim notice now gives the real limit, too: with Model context set, it said 24,000 characters when the model's context had cut it to about 2,000, and pointed you at the wrong setting.
+- **A diff of a huge card can't freeze the page.** A card with tens of thousands of changed paragraphs hung the tab while the diff was worked out. Past a limit, the changed part now shows as replaced whole.
+
+## 1.6.22
+
+- **The card panel shows what a save wrote.** After **Save to card**, a change to anything but the name, description or first message (personality, scenario, greetings, lorebook and the rest) went into the file, but the card panel went on showing the old text until you picked another card. And it could cost you the save: change another greeting or lorebook entry while the old ones were showing, save again, and the old text went back into the file. The panel now shows the saved card as soon as the save is done, and later edits build on it.
+- **Nothing you do while a card is saving gets lost.** A favourite, note, rating or field changed while the save was being written was dropped when it finished. And after a save that changed the name, description or first message, the card panel showed the old text and lost your favourite and notes from view until the rescan was over (a while, on a big folder), and a note written in that time was lost. All of that now stays.
+- **An emptied lorebook position is saved.** Clearing an entry's **position** looked done, but the save kept the old one in the file. It's now gone from the file. A position the file holds as a number also stays a number when another part of the book is saved, rather than turning into text.
+- **A lorebook entry's order can be negative.** Typing "-5" into the **order** box gave "05", because the box put a 0 back as soon as it held only "-". Typing into a box you'd emptied doesn't leave a 0 in front any more either. Emptying the box and leaving it now keeps the number it had.
+- **A lorebook you started and emptied again is no lorebook.** **+ Start a lorebook** followed by removing its only entry left **Save to card (1)** waiting, and saving wrote an empty lorebook into the card. The card is now back as it was.
+- **The Lorebook and Greetings tabs count what they show.** The Lorebook tab's number was the file's, so it didn't change as you added or removed entries; the Greetings tab didn't count a first message you'd just written.
+- **Keys no longer reach the card behind a full-size picture.** With a picture open, **f** favourited the card behind it, **s** sent it to your front end, "/" went to the search box, and with only one picture the arrow keys moved to another card and closed the picture. They now do nothing until it's closed.
+- **A picture opens only for the card you're on.** Clicking a card's picture and moving to another card while its file was still being read opened the first card's picture over the second.
+- **Copy path and Copy V3 JSON say so when the copy didn't work.** When the browser refused, they tried nothing else and still said it was copied. They now try the older way too, and tell you if that didn't work either. **Copy file path** in the right-click menu does the same.
+- **A card's created date in seconds with a fraction shows correctly.** The Overview showed such a card as made in January 1970.
+- **The Fields tab no longer says the file is never changed.** It said so right below the **Save to card** button. It now says what that button does.
+
+## 1.6.21
+
+- **A deep search no longer shows cards for words you've already typed over.** With **Deep text** on, the cards found by the last words searched stayed in the grid for a moment after you typed other words, until the next search had run (a fraction of a second), along with their "deep hits" count. Only what the words in the box now find is shown.
+- **Escape on a right-click menu closes just the menu.** With the card panel open, Escape closed the menu and the card panel behind it. And while a menu was up, the arrow keys moved to another card and **f** and **s** acted on the card behind it. The keys now leave the cards alone until the menu is closed.
+- **A right-click menu stays open when you click inside it.** A click on its title, on a line between items, or on its scroll bar (which a long menu has in a small window) closed the menu, so the items further down couldn't be reached with the mouse.
+- **"/" in a dialog no longer jumps to the search box behind it.** In Settings or any other dialog, with no box in it being typed in, "/" moved the cursor into the vault's search box behind the dialog, so what you typed next filtered the cards out of sight. It now does that only when no dialog or menu is up.
+
+## 1.6.20
+
+- **Adding a tag and taking it off again no longer leaves an edit behind.** In the card panel's Tags & Notes, a card tag you added and then removed left the card marked **Locally edited**, with **Save to card (1)** waiting for nothing. The card is now back as it was, the way a field, greeting or lorebook entry typed back already is.
+- **Tags you add to a card are marked again.** The card tags you added in the vault were meant to show with a purple outline, apart from the card's own, but showed in the same colour as the rest. They're purple again.
+- **Keys no longer reach the card behind the flag dialog.** With the flag dialog open and the cursor out of its reason box, **f** favourited the card behind it, **s** sent it to your front end, the arrow keys moved to another card, and **Escape** closed the card panel instead of nothing. They now do nothing until the dialog is closed, as with every other dialog.
+
+## 1.6.19
+
+- **Move to trash never makes a trash folder inside a Reference folder.** With no trash folder chosen in Settings, the trash goes next to the cards being trashed. When the first card picked was in a Reference folder (one that's never written to), the vault made a "_vault trash" folder inside it anyway, and then refused to move anything there, so the other cards you'd picked stayed put too. The trash now goes in a folder that can be written to, the cards that can go are moved, and the ones in a Reference folder stay where they are.
+- **A move that's only partly possible says what did move.** When some of the cards picked for a move (or for the trash) were in a read-only folder, the notice said they couldn't be moved and nothing else, even though the rest had moved. One notice now says both.
+
+## 1.6.18
+
+- **Ingest no longer quietly does nothing after a folder is removed.** Ingest remembers the folders you took cards from and filed them into. If one of those folders had since been removed from the vault (or removed and added again), it stayed picked but out of sight: nothing showed as picked, and **Copy** could do nothing at all, without a word. Folders that are no longer linked are now left out, and Ingest starts from its usual choices (your Inbox and Library folders) instead.
+
 ## 1.6.17
 
 - **.charx cards can be saved.** Save to card on a .charx used to stop with "Don't know how to write this file type in place". It now writes your changes into the card inside the .charx and keeps every picture and other file in it as it was, with the same backup and read-back check as a PNG save. Duplicate and Download copy also make a .charx now; before, they made a .json and left the pictures behind.
