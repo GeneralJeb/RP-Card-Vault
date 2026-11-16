@@ -772,6 +772,7 @@ async function testCustomPrompts() {
   t.ok(!!document.querySelector(".ai-custom-editor"), "+ New prompt opens an editor for it");
   type(all("input").find((i) => i.placeholder === "Untitled prompt"), "Voice check");
   type(all("textarea").find((x) => x.placeholder === "What should the model do with this card?"), "How does {{name}} sound in the greeting?");
+  type(document.querySelector("input.ai-custom-hint"), "Hears how the greeting sounds");
   await tick();
   const checks = () => all(".ai-custom-check input");
   click(checks()[0]);          // Can run on many cards at once
@@ -790,7 +791,11 @@ async function testCustomPrompts() {
   await tick();
 
   await openAiTab();
+  const vcBtn = byText("button", /^\S+ Voice check( ✓)?$/);
+  t.eq(vcBtn && vcBtn.getAttribute("title"), "Hears how the greeting sounds · reads First Message · can run on a selection of cards",
+    "its button's hover text is the description you wrote");
   await chooseAction("Voice check");
+  t.ok(seen(/Hears how the greeting sounds · reads First Message/), "and it's the line under the buttons once picked");
   relay.nextChat = { events: ev.answer("She sounds clipped and impatient.") };
   click(exactBtn("Voice check"));
   await tick(250);

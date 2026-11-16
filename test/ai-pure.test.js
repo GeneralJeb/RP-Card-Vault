@@ -401,6 +401,19 @@ console.log("\nyour own prompts");
   const out = V.interpretAiResult({ text: "She sounds clipped.", think: "", done: true, finish: "stop" }, { kind: "c:ab" });
   t.ok(out.ok && out.proposal === null && out.text === "She sounds clipped.", "their answers are plain text, proposing nothing");
   t.eq(V.aiBulkSummary({ answered: 3, cached: 1 }), "3 cards answered · 1 skipped (already answered)", "a bulk run of one says how many cards it answered");
+
+  // A description of your own, in place of "Your own prompt".
+  t.eq(cp[0].hint, "", "a prompt saved before descriptions existed comes through with none");
+  const hintOf = (p) => V.aiActionDef("c:ab", { customPrompts: [Object.assign({}, cp[0], p)] }).hint;
+  t.eq(hintOf({}), "Your own prompt, reading First Message. It can run on a selection of cards.", "and is described as before");
+  t.eq(hintOf({ hint: "  Rates how the greeting sounds  " }), "Rates how the greeting sounds · reads First Message · can run on a selection of cards",
+    "yours replaces it, still saying what it reads and where it runs");
+  t.eq(hintOf({ hint: "Rates it", allFields: true, bulk: false }), "Rates it", "and is all there is when it reads everything, one card at a time");
+  const typed = V.sanitizeAiSettings({ customPrompts: [Object.assign({}, cp[0], { hint: "Two\nlines and " + "x".repeat(200) })] }).customPrompts[0].hint;
+  t.ok(typed.indexOf("\n") < 0 && typed.length === 160 && /^Two lines and /.test(typed), "it's kept on one line, at most 160 characters");
+  t.eq(V.sanitizeAiSettings({ customPrompts: [Object.assign({}, cp[0], { hint: "Rates " })] }).customPrompts[0].hint, "Rates ", "a space typed at the end survives");
+  const described = { enabled: true, customPrompts: [Object.assign({}, cp[0], { hint: "Rates how the greeting sounds" })] };
+  t.eq(V.aiBuildRequest("c:ab", described, REC, BODY, null, [], {}).hash, req.hash, "it isn't sent to the model, so answers stay current when you write one");
 }
 
 console.log("\nflags the agent says are dealt with");

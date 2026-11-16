@@ -5102,6 +5102,7 @@ const AI_TIGHTEN_FIELDS = ["description", "personality", "scenario", "first_mes"
    Custom actions beside the built-in ones. Each answers in plain text, is
    cached like any other answer, and appears in every card's ✦ AI tab. Keys
    are "c:" + id. Options:
+     hint          your description, shown on hover and under the buttons; never sent
      bulk          can run on a selection of many cards at once
      allFields     reads every card field; otherwise only `fields`
      agentVisible  the agent chat can read its answers (it never runs them) */
@@ -5121,6 +5122,8 @@ function sanitizeCustomPrompts(list) {
     out.push({
       id,
       label: String(x.label == null ? "" : x.label).replace(/[\r\n\t]+/g, " ").slice(0, 40),
+      // Saved as typed, like the name (trimmed where it's shown).
+      hint: String(x.hint == null ? "" : x.hint).replace(/[\r\n\t]+/g, " ").slice(0, 160),
       icon,
       color: AI_CUSTOM_COLORS.indexOf(x.color) >= 0 ? x.color : "cyan",
       template: String(x.template == null ? "" : x.template),
@@ -5139,11 +5142,16 @@ function aiCustomActions(cfg) {
   const list = cfg && Array.isArray(cfg.customPrompts) ? cfg.customPrompts : [];
   return list.map((c) => {
     const fieldNames = (c.fields || []).map((k) => (CARD_FIELDS.filter((f) => f.key === k)[0] || { label: k }).label);
+    const reads = c.allFields === false ? (fieldNames.join(", ") || "no fields yet") : "";
+    const desc = String(c.hint || "").trim();
     return {
       key: "c:" + c.id, id: c.id, custom: true, output: "text",
       label: String(c.label || "").trim() || "Untitled prompt", icon: c.icon || "✎", color: c.color || "cyan",
-      hint: "Your own prompt" + (c.allFields === false ? ", reading " + (fieldNames.join(", ") || "no fields yet") : "") +
-        (c.bulk ? ". It can run on a selection of cards." : "."),
+      // Your description if you wrote one, else a plain one; either way what it reads and where it runs.
+      hint: desc
+        ? desc + (reads ? " · reads " + reads : "") + (c.bulk ? " · can run on a selection of cards" : "")
+        : "Your own prompt" + (reads ? ", reading " + reads : "") + (c.bulk ? ". It can run on a selection of cards." : "."),
+      description: desc,
       template: String(c.template || ""), bulk: !!c.bulk, allFields: c.allFields !== false,
       fields: c.fields || [], agentVisible: !!c.agentVisible,
     };
@@ -8588,7 +8596,8 @@ const AGENT_TOOL_IMPL = {
       bulkRunCap: s.batchCap, persona: s.persona, rulesForEveryPrompt: s.promptRules, prompts: s.prompts,
       // Only the user's own prompts whose answers you're allowed to read.
       yourOwnPrompts: aiCustomActions(s).filter((c) => c.agentVisible)
-        .map((c) => ({ name: c.label, instructions: c.template, fields: c.allFields ? "all" : c.fields, manyCardsAtOnce: c.bulk })),
+        .map((c) => Object.assign({ name: c.label }, c.description ? { description: c.description } : {},
+          { instructions: c.template, fields: c.allFields ? "all" : c.fields, manyCardsAtOnce: c.bulk })),
     };
     return { ok: true, content: JSON.stringify(shown, null, 2) };
   },
@@ -15739,7 +15748,7 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
   const saveCustom = (patch) => onSave({ customPrompts: customs.map((c) => (c.id === cur.id ? Object.assign({}, c, patch) : c)) });
   const addCustom = () => {
     const id = "p" + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
-    onSave({ customPrompts: customs.concat([{ id, label: "New prompt", icon: "✎", color: "cyan", template: "",
+    onSave({ customPrompts: customs.concat([{ id, label: "New prompt", hint: "", icon: "✎", color: "cyan", template: "",
       bulk: false, allFields: true, fields: [], agentVisible: false }]) });
     setPromptKey("c:" + id);
   };
@@ -16107,6 +16116,14 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
               <label style={tinyLabel}>Icon</label>
               <input value={cur.icon} onChange={(e) => saveCustom({ icon: Array.from(e.target.value).pop() || "" })}
                 title="One character or emoji" style={Object.assign({}, inputBase, { textAlign: "center" })} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <label style={tinyLabel}>Description</label>
+            <input className="ai-custom-hint" value={cur.hint} maxLength={160} onChange={(e) => saveCustom({ hint: e.target.value })}
+              placeholder="What it does, e.g. Rates the prose and names its weakest line" style={inputBase} />
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+              Shown when you point at its button in a card's ✦ AI tab, and under the buttons when it's picked. Not sent to the model.
             </div>
           </div>
           <div style={{ display: "flex", gap: 5, marginBottom: 10, alignItems: "center" }}>
@@ -19857,7 +19874,7 @@ function App() {
                         title="Run one of your own prompts on every selected card"
                         style={Object.assign({}, selectStyle, { width: "auto", padding: "4px 26px 4px 8px", fontSize: 11 })}>
                         <option value="">✦ Run prompt…</option>
-                        {aiCustomActions(aiSettings).filter((a) => a.bulk).map((a) => <option key={a.key} value={a.key}>{a.icon} {a.label}</option>)}
+                        {aiCustomActions(aiSettings).filter((a) => a.bulk).map((a) => <option key={a.key} value={a.key} title={a.description || undefined}>{a.icon} {a.label}</option>)}
                       </select>
                     ) : null}
                     {moveTargets.length ? (
