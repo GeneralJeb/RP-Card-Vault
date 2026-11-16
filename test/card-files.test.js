@@ -23,6 +23,7 @@ const { mod: V } = loadPureRegion([
   "similarityText", "textShingles", "minHashSignature", "signatureSimilarity", "similarGroups", "SIMILAR_MIN",
   "sameCardVersions", "creatorKnown", "cardTextSignature", "versionSets", "VERSION_MIN",
   "cardChanges", "cardCompareParts", "cardBackupsOf", "backupStampTime", "listCardBackups", "readCardBackup", "restoreCardBackup", "prevBodyKey",
+  "cardReplacementBytes", "replaceCardFileBytes", "readCardFileNow",
 ]);
 
 /* A folder tree held in memory, with names matched regardless of case, as on Windows. */
@@ -56,6 +57,7 @@ function memFs(rootName) {
     },
     async removeEntry(name) { if (!n.kids.delete(k(name))) throw missing(); },
     async *entries() { for (const c of n.kids.values()) yield [c.name, c.kind === "file" ? fileHandle(c) : dirHandle(c)]; },
+    async *values() { for (const c of n.kids.values()) yield c.kind === "file" ? fileHandle(c) : dirHandle(c); },
   });
   const top = node(rootName, "directory");
   const walk = (path, create) => {
@@ -547,6 +549,50 @@ async function main() {
     V.setFolderRolesNow({ "r::people": "reference" });
     try {
       t.ok(/Reference folder/.test(await refused(() => V.restoreCardBackup(rec, root, list1[0].name, {}))), "and nothing is put back into a Reference folder");
+    } finally { V.setFolderRolesNow({}); }
+  }
+
+  console.log("\nanother file put in a card's place, keeping the card");
+  {
+    const pic = (rgb) => V.solidPng(8, 8, rgb);
+    const card = (over) => V.newCardPayload(Object.assign({ name: "Ada", description: "A clockmaker.", first_mes: "You're late." }, over || {}));
+    const pngOf = (c, rgb) => V.writeCardIntoPng(pic(rgb || [200, 0, 0]), c, V.buildV2Payload(c));
+    const jsonOf = (c) => new TextEncoder().encode(JSON.stringify(c));
+    const hex = (b) => Buffer.from(b).toString("hex");
+    const current = pngOf(card(), [200, 0, 0]);
+    const newer = pngOf(card({ description: "A clockmaker who lost her hand." }), [0, 0, 200]);
+
+    let r = await V.cardReplacementBytes(current, "ada.png", newer, "Ada (from SillyTavern).png");
+    t.ok(r.how === "as-is" && V.sameBytes(r.bytes, newer) && r.parsed.data.description === "A clockmaker who lost her hand.", "a PNG for a PNG goes in as it is, picture and all");
+    r = await V.cardReplacementBytes(current, "ada.png", jsonOf(card({ description: "From a JSON." })), "ada.json");
+    t.ok(r.how === "text" && r.parsed.data.description === "From a JSON." && hex(V.pngWithoutCard(r.bytes)) === hex(V.pngWithoutCard(current)),
+      "a JSON card brings its text into the PNG, which keeps its own picture");
+    r = await V.cardReplacementBytes(jsonOf(card()), "ada.json", newer, "ada.png");
+    t.ok(r.how === "converted" && r.left === 1 && JSON.parse(new TextDecoder().decode(r.bytes)).data.description === "A clockmaker who lost her hand.",
+      "a PNG for a JSON card is written as JSON, saying its picture couldn't come along");
+    const refused = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message; } };
+    t.ok(/notes\.txt can't be read as a card/.test(await refused(() => V.cardReplacementBytes(current, "ada.png", new TextEncoder().encode("hello"), "notes.txt"))),
+      "a file that isn't a card is refused, naming it");
+
+    const fsys = memFs("Library");
+    fsys.put("people/ada.png", current);
+    const root = { id: "r", name: "Library", role: "library", handle: fsys.handle };
+    const rec = { id: "r:people/ada.png", rootId: "r", rel: "people/ada.png", dir: "people", file: "ada.png", ext: "png", name: "Ada" };
+    t.ok(V.sameBytes(await V.readCardFileNow(rec, root), current), "the card's file is read as it is now");
+    const res = await V.replaceCardFileBytes(rec, root, newer, { backup: true, from: "Ada (from SillyTavern).png" });
+    t.ok(!res.same && V.sameBytes(fsys.get("people/ada.png"), newer), "the new file is written in the card's place, under the card's own name");
+    t.ok(!fsys.get("people/Ada (from SillyTavern).png"), "not beside it under its own name");
+    const backups = await V.listCardBackups(rec, root);
+    t.ok(backups.length === 1 && V.sameBytes((await V.readCardBackup(rec, root, backups[0].name)).bytes, current), "the file as it was is kept with the card's backups, so it can be put back");
+    t.eq(res.sig, await V.byteSignature(new File([newer], "ada.png")), "and the replace gives back the new file's signature");
+    t.ok((await V.replaceCardFileBytes(rec, root, newer, {})).same, "replacing a file with itself changes nothing");
+    const again = await V.scanRoot(root, new Map([[rec.id, Object.assign({}, rec, { sig: "old", size: 1, mtime: 1, scanVersion: 1 })]]), { stop: false }, () => {});
+    const after = again.records.find((x) => x.rel === "people/ada.png");
+    t.ok(after && after.id === rec.id && after.descPreview === "A clockmaker who lost her hand.", "a rescan reads it as the same card, with its new text");
+    V.setFolderRolesNow({ "r::people": "reference" });
+    try {
+      t.ok(/Reference folder/.test(await refused(() => V.replaceCardFileBytes(rec, root, current, {}))) && V.sameBytes(fsys.get("people/ada.png"), newer),
+        "nothing is written into a Reference folder");
     } finally { V.setFolderRolesNow({}); }
   }
 
