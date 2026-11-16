@@ -8,6 +8,12 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.3
+
+- **Version drift no longer lists every pair of cards that share a name.** The Dupes view's *Version drift* tab is for one card in two versions, an edit or an update, and it took that to be any two cards with the same name and the same creator. Most cards don't name their creator, though, so two unrelated characters who happen to share a name counted as having the same creator (none) and were listed together. Now, where a card names no creator (or a stand-in such as "Anonymous" or "unknown"), two cards of one name count as versions only when much of their wording is the same, compared on this computer the way **Similar text** compares it. Cards with the same named creator are listed as before, and two different named creators never are. A copy whose creator was stripped still joins the original by its wording, and four cards of one name that are really two characters make two groups, not one.
+- **The same rule now decides "a different version is there" and the inbox's versions.** A card's **Front end** status said a different version was in a folder destination whenever any card of the same name was there, and filing from the inbox called a new card a version of any filed card of that name. Both now go by the rule above.
+- **The first start after updating takes a moment longer, once.** The vault works out each card's wording from the text it already holds: about two seconds for 5,000 cards. No card file is read again, and later starts aren't slowed. A group you marked as not duplicates stays marked, unless it has now split into smaller groups of cards that really do read alike.
+
 ## 1.8.2
 
 - **The agent chat can use a model of its own.** The ✦ AI panel has a new **Model for the agent chat** field, under Model. Leave it blank and nothing changes. Name another model there and the chat uses it (condensing a chat too), while Summarise, Impression, Critique, the other prompts and chat titles keep the model above: a quick model for the card prompts and a stronger one for the chat, say. It is the same address with the same API key, so the two models have to come from the same service. Max tokens out, the timeout and the other settings are shared. After updating, start the vault with the launcher, so the new `serve.js` (build 11) is the one running: the page asks for it.

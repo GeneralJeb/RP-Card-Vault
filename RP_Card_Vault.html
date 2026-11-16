@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.2";
+const APP_VERSION = "1.8.3";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -957,7 +957,8 @@ function migrateDestinations(settings) {
    - A folder destination is a folder you've linked, so it is in the index
      like any other: a card is "there" when a file with the same bytes is in
      it, and a "different version" is there when one with the same name,
-     description and first message (or the same name and creator) is.
+     description and first message is, or another version of the card
+     (sameCardVersions: the same name, and the same creator or wording).
    - An upload leaves a mark on the card's record: when, and which file it
      was (its byte signature). The card is "sent" while its file is still one
      that was sent, and "changed since sent" once it isn't. So a copy of a sent
@@ -993,12 +994,16 @@ function sentMarkOf(edit, destId) {
 
 /** What a folder destination holds, from the index: its files' signatures and its cards' fingerprints. */
 function destinationFolderIndex(records, rootId, dir) {
-  const out = { rootId, dir: dir || "", bySig: new Set(), byFp: new Set(), byLfp: new Set() };
+  const out = { rootId, dir: dir || "", bySig: new Set(), byFp: new Set(), byName: new Map() };
   for (const r of records || []) {
     if (!recInDir(r, rootId, dir || "")) continue;
     if (r.sig) out.bySig.add(r.sig);
     if (r.ok && r.fp) out.byFp.add(r.fp);
-    if (r.ok && r.hasName && r.lfp) out.byLfp.add(r.lfp);
+    if (r.ok && r.hasName) {
+      const k = cardNameKey(r);
+      if (!out.byName.has(k)) out.byName.set(k, []);
+      out.byName.get(k).push(r);
+    }
   }
   return out;
 }
@@ -1016,7 +1021,8 @@ function destinationStatus(rec, edit, dest, folder) {
     if (!folder) return { state: mark ? "gone" : "none", at };
     if (recInDir(rec, folder.rootId, folder.dir)) return { state: "home", at };
     if (rec.sig && folder.bySig.has(rec.sig)) return { state: "there", at };
-    if (rec.ok && ((rec.fp && folder.byFp.has(rec.fp)) || (rec.hasName && rec.lfp && folder.byLfp.has(rec.lfp)))) return { state: "differs", at };
+    if (rec.ok && ((rec.fp && folder.byFp.has(rec.fp)) ||
+      (rec.hasName && (folder.byName.get(cardNameKey(rec)) || []).some((o) => sameCardVersions(rec, o))))) return { state: "differs", at };
     return { state: mark ? "gone" : "none", at };
   }
   if (!mark) return { state: "none", at: 0 };
@@ -2356,6 +2362,7 @@ async function processCardFile(root, info, file) {
     rec.creationDate = d.creation_date || null;
     rec.fp = await contentFingerprint(d);
     rec.lfp = await looseFingerprint(d);
+    rec.simSig = cardTextSignature(d);
     rec.warnings = cardWarnings(d);
     body = { __key: id, __val: d };
   } else {
@@ -2812,13 +2819,88 @@ function cardWarnings(d) {
  * Group the whole collection into duplicate clusters.
  * Tier 1 exact  — identical byte signature
  * Tier 2 content— identical name+description+first_mes (catches re-encodes)
- * Tier 3 version— same name+creator, different content
+ * Tier 3 version— same name, different content: one card's versions (sameCardVersions)
  *
  * `ignore` holds group keys the user has marked as false positives, per kind.
  * Dismissed groups are hidden AND their members stop counting as duplicates,
  * so the grid's duplicate badge and filter stay honest.
  */
 const EMPTY_IGNORE = { exact: [], content: [], versions: [] };
+
+/* ── versions of one card ─────────────────────────────────────────────
+   Two cards with the same name are versions of one card (an edit, an
+   update) when they have the same creator, or, where a card names no
+   creator, when much of their wording is the same. Most cards name no
+   creator, so "same name and creator" alone put every pair of unrelated
+   namesakes together: two different Lunas, both without a creator. */
+
+const VERSION_MIN = 0.3;   // the share of three-word runs two same-named cards without a creator must have in common
+const CREATOR_PLACEHOLDER = /^(anon|anonymous|unknown|n\/a|na|none|null|undefined|nobody|-+|\?+|_+)$/;
+
+/** A creator to go by: named, and not a stand-in such as "Anonymous" or "unknown". */
+function creatorKnown(c) {
+  const n = normForFp(c);
+  return !!n && !CREATOR_PLACEHOLDER.test(n);
+}
+
+/** What a card's name is matched on. */
+function cardNameKey(r) {
+  return normForFp(r && r.name);
+}
+
+/** A card's wording, boiled down for comparing (see similarGroups); null when it says too little. */
+function cardTextSignature(d) {
+  const runs = textShingles(similarityText(d));
+  return runs ? Array.from(minHashSignature(runs)) : null;
+}
+
+/**
+ * Whether two readable cards with the same name are versions of one card.
+ * Two named creators must be the same one; otherwise the wording decides,
+ * and a card whose wording the vault hasn't compared yet never counts.
+ */
+function sameCardVersions(a, b) {
+  if (!a || !b || !a.ok || !b.ok) return false;
+  if (a.fp && a.fp === b.fp) return true;
+  if (creatorKnown(a.creator) && creatorKnown(b.creator)) return normForFp(a.creator) === normForFp(b.creator);
+  return !!(a.simSig && b.simSig && signatureSimilarity(a.simSig, b.simSig) >= VERSION_MIN);
+}
+
+/* Past this many cards of one name, only creators and identical text join
+   them: comparing the wording of every pair would take too long. */
+const VERSION_TEXT_CAP = 600;
+
+/**
+ * Same-named cards (one name's records) split into the sets that are one
+ * card's versions: each linked to another by sameCardVersions.
+ */
+function versionSets(recs) {
+  const list = recs || [];
+  const parent = list.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const text = list.length <= VERSION_TEXT_CAP;
+  for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+    if (find(i) === find(j)) continue;
+    const a = list[i], b = list[j];
+    const linked = text ? sameCardVersions(a, b)
+      : (a.fp === b.fp || (creatorKnown(a.creator) && normForFp(a.creator) === normForFp(b.creator)));
+    if (linked) parent[find(i)] = find(j);
+  }
+  const sets = new Map();
+  list.forEach((r, i) => { const k = find(i); if (!sets.has(k)) sets.set(k, []); sets.get(k).push(r); });
+  return Array.from(sets.values());
+}
+
+/**
+ * A version group's key, for "not duplicates". A group that is every card of
+ * one name and creator keeps the key it always had (so groups marked before
+ * stay marked); any other is keyed by the texts in it.
+ */
+function versionGroupKey(group, sameName) {
+  const l = group[0].lfp;
+  if (group.every((r) => r.lfp === l) && sameName.filter((r) => r.lfp === l).length === group.length) return l;
+  return "v:" + aiHash(Array.from(new Set(group.map((r) => r.fp))).sort().join("|"));
+}
 
 /* ── folders that shouldn't take part in duplicate detection ─────────
    A card you've thrown away, or a backup the vault itself wrote, is not a
@@ -2900,7 +2982,7 @@ function detectDupes(records, ignore, isExcluded) {
     content: new Set((ignore && ignore.content) || []),
     versions: new Set((ignore && ignore.versions) || []),
   };
-  const bySig = new Map(), byFp = new Map(), byLfp = new Map();
+  const bySig = new Map(), byFp = new Map(), byName = new Map();
   let excludedCount = 0;
   for (const r of records) {
     if (!r.sig) continue;
@@ -2910,11 +2992,12 @@ function detectDupes(records, ignore, isExcluded) {
     if (r.ok) {
       if (!byFp.has(r.fp)) byFp.set(r.fp, []);
       byFp.get(r.fp).push(r);
-      // Only cluster by name+creator when the card actually carries an embedded
-      // name. Otherwise every untitled card collapses into one bogus group.
+      // Only cards that carry a name of their own: otherwise every untitled
+      // card would fall into one bogus group.
       if (r.hasName) {
-        if (!byLfp.has(r.lfp)) byLfp.set(r.lfp, []);
-        byLfp.get(r.lfp).push(r);
+        const k = cardNameKey(r);
+        if (!byName.has(k)) byName.set(k, []);
+        byName.get(k).push(r);
       }
     }
   }
@@ -2934,12 +3017,14 @@ function detectDupes(records, ignore, isExcluded) {
     const grp = { key: fp, kind: "content", items: g };
     if (ig.content.has(fp)) dismissed.push(grp); else content.push(grp);
   }
-  for (const [lfp, g] of byLfp) {
-    if (g.length < 2) continue;
-    const fps = new Set(g.map((r) => r.fp));
-    if (fps.size <= 1) continue;
-    const grp = { key: lfp, kind: "version", items: g };
-    if (ig.versions.has(lfp)) dismissed.push(grp); else versions.push(grp);
+  for (const same of byName.values()) {
+    if (same.length < 2 || new Set(same.map((r) => r.fp)).size < 2) continue;
+    for (const g of versionSets(same)) {
+      if (g.length < 2 || new Set(g.map((r) => r.fp)).size < 2) continue;
+      const key = versionGroupKey(g, same);
+      const grp = { key, kind: "version", items: g };
+      if (ig.versions.has(key)) dismissed.push(grp); else versions.push(grp);
+    }
   }
 
   const dupeIds = new Set();
@@ -3393,12 +3478,12 @@ function planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded) {
   // card look like it's already filed — otherwise you could never re-add
   // something you'd thrown away.
   if (isExcluded) destRecs = destRecs.filter((r) => !isExcluded(r));
-  const bySig = new Map(), byFp = new Map(), byLfp = new Map();
+  const bySig = new Map(), byFp = new Map(), byName = new Map();
   for (const r of destRecs) {
     if (r.sig) { if (!bySig.has(r.sig)) bySig.set(r.sig, []); bySig.get(r.sig).push(r); }
     if (r.ok) {
       if (!byFp.has(r.fp)) byFp.set(r.fp, []); byFp.get(r.fp).push(r);
-      if (!byLfp.has(r.lfp)) byLfp.set(r.lfp, []); byLfp.get(r.lfp).push(r);
+      if (r.hasName) { const k = cardNameKey(r); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); }
     }
   }
   const batchSig = new Map();
@@ -3414,10 +3499,10 @@ function planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded) {
     } else if (byFp.has(r.fp)) {
       status = "content"; matches = byFp.get(r.fp);
       note = "Same character content, different file encoding";
-    } else if (byLfp.has(r.lfp)) {
-      status = "version"; matches = byLfp.get(r.lfp);
+    } else if (r.hasName && (matches = (byName.get(cardNameKey(r)) || []).filter((o) => sameCardVersions(r, o))).length) {
+      status = "version";
       const theirs = matches.map((m) => m.version).filter(Boolean).join(", ");
-      note = "Same name/creator, different content" + (theirs ? " (filed: v" + theirs + ")" : "");
+      note = "Another version of a card already filed" + (theirs ? " (filed: v" + theirs + ")" : "");
     } else if (batchSig.has(r.sig)) {
       status = "batchDupe"; matches = [batchSig.get(r.sig)];
       note = "Duplicated within this batch";
@@ -6516,7 +6601,7 @@ const AGENT_TOOLS = [
       duplicates: { type: "string", enum: ["any", "exact", "content", "version"], description: "Only cards in a duplicate group of this kind (see list_duplicates)." },
       limit: { type: "integer", description: "Default 50." }, offset: { type: "integer" } } } },
   { name: "list_duplicates", group: "cards",
-    description: "The duplicate finder's groups, as the user sees them in Dupes: exact (identical files), content (the same card in different files), and version (version drift: same name and creator but different content; often one is a newer edit, but two unrelated cards can share a name, so check before calling them the same). Groups the user marked as not duplicates are left out. Each group lists its copies' ids and paths. kind similar is something else: cards that share most of their wording without being the same card (a rework, a repost under another name), with how alike they are; it is worked out when you ask, and is not part of any.",
+    description: "The duplicate finder's groups, as the user sees them in Dupes: exact (identical files), content (the same card in different files), and version (version drift: the same name and different content, with the same creator or, where a card names none, much of the same wording; usually one is a newer edit, but check before calling them the same). Groups the user marked as not duplicates are left out. Each group lists its copies' ids and paths. kind similar is something else: cards that share most of their wording without being the same card (a rework, a repost under another name), with how alike they are; it is worked out when you ask, and is not part of any.",
     parameters: { type: "object", properties: {
       kind: { type: "string", enum: ["any", "exact", "content", "version", "similar"], description: "Default any." },
       limit: { type: "integer", description: "Groups to show. Default 20." }, offset: { type: "integer" } } } },
@@ -7730,7 +7815,7 @@ const AGENT_PREVIEW_CHARS = 150;
 const AGENT_DUPE_KINDS = {
   exact: "identical files",
   content: "the same card in different files",
-  version: "version drift: same name and creator, different content",
+  version: "version drift: same name, different content, and the same creator or much the same wording",
 };
 
 /** id → the duplicate groups that card is in: [{ kind, key, items }]. */
@@ -15095,7 +15180,7 @@ function DupesModal({ similar, onFindSimilar, dupes, roots, onClose, onSelectIds
   const TAB_INFO = {
     exact:   { label: "Exact copies", n: dupes.exact.length, hint: "Byte-identical files. Safe to thin out — these are literally the same file in more than one place, which is exactly what an Archive folder is for." },
     content: { label: "Same content", n: dupes.content.length, hint: "Same name, description and greeting, but the files differ — usually a re-encoded PNG or a JSON/PNG pair of the same card." },
-    versions:{ label: "Version drift", n: dupes.versions.length, hint: "Same character and creator, different content. One of these is probably a newer edit of the other — but this is also where false positives live, since two unrelated cards can share a name. Mark those as not duplicates and they'll stay out of the way." },
+    versions:{ label: "Version drift", n: dupes.versions.length, hint: "The same name, different content, and either the same creator or, where a card names no creator, much of the same wording. One is probably a newer edit of the other. Two different characters of one name and one creator still land here: mark those as not duplicates and they'll stay out of the way." },
     similar: { label: "Similar text", n: similar ? similar.groups.length : "?", hint: "Cards whose description, personality, scenario and first message share most of their wording without being the same card: a rework, a touched-up repost, the same character under another name. Each group shows how alike its cards are. These aren't copies, so nothing here is trashed for you: compare them and decide. Worked out when you ask, on this computer; nothing is sent anywhere." },
     dismissed:{ label: "Not duplicates", n: dupes.dismissed.length, hint: "Groups you've marked as false positives. They no longer count as duplicates anywhere in the vault. Restore one if you change your mind." },
   };
@@ -16905,6 +16990,20 @@ function App() {
         sidNextRef.current = a.next;
         await dbPutMany(STORE_CARDS, cds.filter((c, i) => c !== sorted[i]));
         await dbPut(STORE_KV, a.next, SID_KEY);
+      }
+      // Wording signatures, which tell a card's versions from namesakes: cards
+      // indexed before the vault kept them get theirs once, from the text it
+      // already holds (no file is read). One whose text isn't held gets none.
+      if (cds.some((c) => c.ok && c.simSig === undefined)) {
+        const want = new Map(cds.filter((c) => c.ok && c.simSig === undefined).map((c) => [c.id, c]));
+        const done = new Map();
+        await scanAllBodies((id, body) => {
+          const c = want.get(id);
+          if (c) done.set(id, Object.assign({}, c, { simSig: cardTextSignature(body) }));
+        });
+        for (const [id, c] of want) if (!done.has(id)) done.set(id, Object.assign({}, c, { simSig: null }));
+        cds = cds.map((c) => done.get(c.id) || c);
+        await dbPutMany(STORE_CARDS, Array.from(done.values()));
       }
       setCards(cds);
       const m = new Map();

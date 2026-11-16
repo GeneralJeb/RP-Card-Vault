@@ -21,6 +21,7 @@ const { mod: V } = loadPureRegion([
   "lorebookChecks", "loreKeyTest", "fillPlaceholders", "placeholdersLeft",
   "renameBase", "planRename", "renameCardFile", "RENAME_PATTERNS",
   "similarityText", "textShingles", "minHashSignature", "signatureSimilarity", "similarGroups", "SIMILAR_MIN",
+  "sameCardVersions", "creatorKnown", "cardTextSignature", "versionSets", "VERSION_MIN",
   "cardChanges", "cardCompareParts", "cardBackupsOf", "backupStampTime", "listCardBackups", "readCardBackup", "restoreCardBackup", "prevBodyKey",
 ]);
 
@@ -911,6 +912,51 @@ async function main() {
     t.ok(!d.exact.length && d.excludedCount === 1, "so a trashed copy doesn't make the live card a duplicate");
     const plan = V.planIngest([Object.assign({}, live, { id: "i:Ada.png", rootId: "i" })], [trashed], { ingestSkipDupes: true }, {}, ex);
     t.ok(plan[0].status === "new" && plan[0].action === "copy", "and a card you trashed can be added again", plan[0].status);
+  }
+
+  console.log("\ncards that share a name are versions only when they're one card");
+  {
+    const A = "Luna is a quiet lighthouse keeper on a northern island. She talks to the gulls, keeps a logbook of every ship " +
+      "that passes, and distrusts anyone who arrives by sea after dark. Her brother vanished in a storm ten winters ago.";
+    const B = "Luna is a loud space pirate captain with a mechanical arm. She runs a smuggling crew out of an asteroid bar, " +
+      "owes money to three different cartels, and settles every argument with a card game she always wins.";
+    let n = 0;
+    const scan = async (creator, description, extra) => (await V.processCardFile({ id: "r" }, { rel: "c" + (++n) + ".json", dir: "", file: "c" + n + ".json", ext: "json" },
+      new File([new TextEncoder().encode(JSON.stringify({ spec: "chara_card_v2", spec_version: "2.0",
+        data: Object.assign({ name: "Luna", creator, description, first_mes: "*She looks up.* Oh. You again." }, extra || {}) }))], "c" + n + ".json", { lastModified: 1 }))).rec;
+    const a = await scan("", A);
+    const aEdit = await scan("", A + " She has started leaving a lamp lit in his old room, just in case.");
+    const b = await scan("", B);
+    t.ok(Array.isArray(a.simSig) && a.simSig.length === 63, "a scanned card keeps a short signature of its wording");
+    t.eq((await scan("", "Short.")).simSig, null, "one with too little text to compare has none");
+    t.ok(V.signatureSimilarity(a.simSig, aEdit.simSig) >= V.VERSION_MIN && V.signatureSimilarity(a.simSig, b.simSig) < 0.1,
+      "an edit shares most of its wording with the card; a namesake shares next to none");
+
+    const groups = (recs, ig) => V.detectDupes(recs, ig || null, null);
+    const names = (g) => g.items.map((r) => r.rel).sort().join(" + ");
+    t.eq(groups([a, b]).versions.length, 0, "two different Lunas, neither naming a creator, aren't versions of one card any more");
+    t.eq(groups([a, aEdit]).versions.map(names), [[a.rel, aEdit.rel].sort().join(" + ")], "a Luna and an edit of it are, creator or none");
+    t.eq(groups([await scan("Anonymous", A), b]).versions.length, 0, "a stand-in creator such as Anonymous counts as none");
+    t.ok(V.creatorKnown("Kazu") && !V.creatorKnown("  unknown ") && !V.creatorKnown("") && !V.creatorKnown("N/A"), "which ones are stand-ins");
+
+    const kaz1 = await scan("Kazu", A), kaz2 = await scan("kazu ", B);
+    const kaz = groups([kaz1, kaz2]).versions;
+    t.eq(kaz.map(names), [[kaz1.rel, kaz2.rel].sort().join(" + ")], "the same creator's two Lunas are still versions, whatever their text");
+    t.eq(kaz[0].key, kaz1.lfp, "keyed as before, by name and creator");
+    t.eq(groups([kaz1, kaz2], { versions: [kaz1.lfp] }).dismissed.length, 1, "so a group you marked as not duplicates stays marked");
+    t.eq(groups([await scan("Kazu", A), await scan("Mira", A + " A little more.")]).versions.length, 0, "two named creators who differ are never one card");
+    t.eq(groups([kaz1, aEdit]).versions.length, 1, "a copy with its creator stripped joins the original by its wording");
+
+    const bEdit = await scan("", B + " Her ship is called the Lucky Ace.");
+    const split = groups([a, aEdit, b, bEdit]).versions;
+    t.eq(split.map(names).sort(), [[a.rel, aEdit.rel].sort().join(" + "), [b.rel, bEdit.rel].sort().join(" + ")].sort(), "four Lunas, two characters: two groups, not one");
+    t.ok(split[0].key !== split[1].key && split.every((g) => /^v:/.test(g.key)), "each with a key of its own");
+
+    const filed = [a];
+    const inbox = (r) => V.planIngest([Object.assign({}, r, { id: "i:" + r.rel, rootId: "i" })], filed, {}, {}, null)[0];
+    t.eq(inbox(b).status, "new", "filing from the inbox: a namesake is a new card");
+    const v = inbox(aEdit);
+    t.ok(v.status === "version" && v.matches[0] === a && /Another version/.test(v.note), "and an edit of a filed card is a version of it");
   }
 
   console.log("\na .charx can't unpack past the limit, whatever its header says");
