@@ -24,7 +24,7 @@ const children = [];
 process.on("exit", () => { for (const c of children) try { c.kill(); } catch (e) {} });
 
 const { mod: V } = loadPureRegion(["migrateDestinations", "sanitizeDestination", "defaultDestinationOf", "DEST_KINDS", "DEFAULT_SETTINGS", "destSendStopsRun",
-  "SENT_STATES", "sentPatch", "sentMarkOf", "destinationFolderIndex", "destinationStatus", "editAfterSave", "mergeEditRecords"]);
+  "SENT_STATES", "sentPatch", "cardTextSignature", "sentMarkOf", "destinationFolderIndex", "destinationStatus", "editAfterSave", "mergeEditRecords"]);
 
 function freePort() {
   return new Promise((resolve) => {
@@ -155,7 +155,10 @@ async function main() {
 
   console.log("\nwhere a card stands with a front end, from what the vault knows itself");
   {
-    const rec = (id, dir, sig, fp, lfp) => ({ id: "r:" + id, rootId: "r", dir, rel: (dir ? dir + "/" : "") + id, sig, fp, lfp, ok: true, hasName: true });
+    // lfp names the character: "lfp-ada" is Ada by one creator. Ada's two texts share their wording, Bram's are his.
+    const who = { "lfp-ada": ["Ada", "Ann"], "lfp-bram": ["Bram", "Ann"], "lfp-c": ["Cora", "Ann"], "lfp-d": ["Dain", "Ann"] };
+    const rec = (id, dir, sig, fp, lfp) => ({ id: "r:" + id, rootId: "r", dir, rel: (dir ? dir + "/" : "") + id, sig, fp, lfp, ok: true, hasName: true,
+      name: (who[lfp] || ["?"])[0], creator: (who[lfp] || ["", ""])[1] });
     const upload = { id: "d1", type: "lumiverse", name: "Lumiverse" };
     const ada = rec("ada.png", "", "sig-1", "fp-ada", "lfp-ada");
 
@@ -192,6 +195,16 @@ async function main() {
     t.eq(V.destinationStatus(rework, null, folder, idx).state, "differs", "the reworked copy: a different version is there");
     t.eq(V.destinationStatus(rec("bram.png", "", "sig-b1", "fp-bram-new", "lfp-bram"), null, folder, idx).state, "differs", "a card with the same name and creator but new text: a different version is there");
     t.eq(V.destinationStatus(rec("x.png", "", "sig-c", "fp-c", "lfp-c"), null, folder, idx).state, "none", "a card that's only in some other folder: not sent");
+    // Most cards name no creator: then a card of the same name is another version only if it reads like one.
+    const words = (s) => V.cardTextSignature({ description: s });
+    const tower = "Bram keeps the clock tower running and knows every gear by the sound it makes when it is about to fail him.";
+    const anon = (id, dir, sig, fp, text) => ({ id: "r:" + id, rootId: "r", dir, rel: (dir ? dir + "/" : "") + id, sig, fp, ok: true, hasName: true, name: "Bram", creator: "", simSig: words(text) });
+    const there = [anon("bram.png", "Frontend", "sig-t", "fp-tower", tower)];
+    const idx2 = V.destinationFolderIndex(there, "r", "Frontend");
+    t.eq(V.destinationStatus(anon("bram2.png", "", "sig-t2", "fp-tower2", tower + " He has started to hum along."), null, folder, idx2).state, "differs",
+      "with no creator: an edit of the card in the folder is a different version there");
+    t.eq(V.destinationStatus(anon("bram3.png", "", "sig-k", "fp-knight", "Bram is a disgraced knight who sells his sword to anyone with a reason he can believe in and coin enough for wine."), null, folder, idx2).state, "none",
+      "and a different Bram, sharing only the name, isn't");
     t.eq(V.destinationStatus(inFrontend[0], null, folder, idx).state, "home", "the file in the folder itself: the front end's own copy");
     t.eq(V.destinationStatus(rec("cora.png", "", "sig-d", "fp-d", "lfp-d"), V.sentPatch(null, "d3", "sig-d", 7), folder, idx), { state: "gone", at: 7 }, "one that was sent there and isn't any more (removed in the front end): sent before, not there now");
     t.eq(V.destinationStatus(ada, sent, folder, null).state, "none", "with the destination's folder no longer linked, only its own mark counts");
