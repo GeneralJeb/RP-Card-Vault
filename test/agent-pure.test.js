@@ -203,7 +203,7 @@ async function dupeTests() {
     "list_duplicates exists, and small-model mode has it (it only looks)");
   let r = await run(k, "list_duplicates", {});
   t.ok(r.ok && /^2 groups \(1 exact, 0 content, 1 version\)/.test(r.content), "it lists every group, with how many of each kind", r.content.split("\n")[0]);
-  t.ok(/version drift: same name and creator, different content/.test(r.content) && /c10 · Maya/.test(r.content) && /Cards\/old\/Maya\.png/.test(r.content),
+  t.ok(/version drift: same name, different content, and the same creator or much the same wording/.test(r.content) && /c10 · Maya/.test(r.content) && /Cards\/old\/Maya\.png/.test(r.content),
     "version-drift groups are there too, with each copy's id and path");
   t.ok(/a private card/.test(r.content) && !/Secret/.test(r.content), "a private copy is counted, never named");
   r = await run(k, "list_duplicates", { kind: "version drift" });
@@ -215,7 +215,7 @@ async function dupeTests() {
   t.ok(/^4 cards match/.test(r.content) && !/c15/.test(r.content), "or to any duplicate (the private one stays hidden)");
 
   r = await run(k, "inspect_card", { id: "c10" });
-  t.ok(/Duplicates: version drift: same name and creator, different content with c11 \(Cards\/old\/Maya\.png\), a private card/.test(r.content),
+  t.ok(/Duplicates: version drift: same name, different content, and the same creator or much the same wording with c11 \(Cards\/old\/Maya\.png\), a private card/.test(r.content),
     "inspect_card says which copies a card has, and how they're related", r.content.split("\n").pop());
   r = await run(k, "inspect_card", { id: "c15" });
   t.ok(/Duplicates: none/.test(r.content), "and says so when it has none");

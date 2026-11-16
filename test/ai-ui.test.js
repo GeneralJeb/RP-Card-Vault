@@ -1821,6 +1821,9 @@ async function main() {
   t.ok(document.getElementById("root").getAttribute("data-mounted") === "1", "React mounted and the fail-loud guard was satisfied");
   const hard = errors.filter((e) => !/not wrapped in act|Warning:/i.test(e));
   t.ok(hard.length === 0, "no console errors during boot", hard.slice(0, 2).join(" | "));
+  const seeded = await readStore("cards", SEED_REC.id);
+  t.ok(!("simSig" in SEED_REC) && Array.isArray(seeded.simSig) && seeded.simSig.length === 63,
+    "a card indexed before the vault kept wording signatures gets one at start, from the text it holds");
 
   const steps = [testPanel, testSaveAndTest, testPrompts, testOpenCard, testSummarise, testThinkingOnly,
     testCancel, testCritique, testMarkdown, testTagsAndConcurrentEdit, testTighten, testReadOnly, testDialogs, testBulkTags, testCustomPrompts, testAgent, testAgentChanges, testTagTarget, testBatch5, testShortIds, testLorebook, testFlags, testBulk, testCardFiles, testTransport, testAgentRaces, testAgentModel];
