@@ -145,6 +145,15 @@ console.log("\ntool calls");
   t.eq(S.RELAY_BUILD >= 8, true, "photos need build 8");
 }
 
+console.log("\na chat request may name its model");
+{
+  t.ok(S.RELAY_BUILD >= 11, "build 11 or later takes one");
+  t.eq(S.cleanModelName("  moonshotai/kimi-k2-thinking "), "moonshotai/kimi-k2-thinking", "a name is trimmed");
+  t.eq([S.cleanModelName(""), S.cleanModelName(undefined), S.cleanModelName(42), S.cleanModelName({ a: 1 })], ["", "", "", ""],
+    "anything that isn't a name means the saved model");
+  t.eq([S.cleanModelName("kimi\nX-Other: 1"), S.cleanModelName("x".repeat(201))], ["", ""], "so does a name with a line break in it, or one far too long");
+}
+
 console.log("\nwhat the page is told about an error");
 {
   t.eq(S.errorText(new Error("That request is too big.")), "That request is too big.", "an error's message, as it is");

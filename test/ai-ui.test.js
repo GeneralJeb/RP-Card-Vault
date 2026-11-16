@@ -572,6 +572,40 @@ async function testCritique() {
   t.eq((await edits()).aiProposal.flags.length, 0, "Reject drops it");
 }
 
+async function testMarkdown() {
+  console.log("\nanswers, findings and flag notes show their markdown");
+  await chooseAction("Impression");
+  relay.nextChat = { events: ev.answer("*Ada* is **never** late.\n\n- she counts\n- she corrects") };
+  click(runBtn());
+  await tick(250);
+  const ans = document.querySelector(".ai-answer");
+  t.ok(!!ans && Array.from(ans.querySelectorAll("em")).some((x) => x.textContent === "Ada") && Array.from(ans.querySelectorAll("strong")).some((x) => x.textContent === "never"),
+    "*emphasis* and **bold** in an answer are drawn");
+  t.ok(!!ans && ans.querySelectorAll("li").length === 2 && !/\*Ada\*/.test(ans.textContent), "a list is a list, and no stars are left showing");
+
+  await chooseAction("Critique");
+  relay.nextChat = { events: [ev.text(JSON.stringify({ findings: [
+    { flag: "needsEdit", note: "The scenario ends on a stray double period after *she meets {{user}}*." },
+  ], verdict: "Fine **apart from** that." })), ev.done()] };
+  click(runBtn());
+  await tick(250);
+  const sent = lastChat().messages[1].content;
+  t.ok(/Never count tags as wasted tokens/.test(sent) && /- broken: .*Never for typos/.test(sent), "Critique is told tags cost nothing, and what broken isn't for");
+  const ems = () => all("em").map((x) => x.textContent);
+  t.ok(ems().indexOf("she meets {{user}}") >= 0 && all("strong").some((x) => x.textContent === "apart from"), "the finding and the verdict show their emphasis");
+  click(byText("button", /Accept ✎ Needs editing/));
+  await tick(150);
+  t.ok(((await edits()).flags || []).some((f) => f.key === "needsEdit" && /\*she meets/.test(f.note)), "the flag keeps the note as written");
+  click(byText("div", /^Tags & Notes( \d+)?$/));
+  await tick(150);
+  const chip = all(".flag-groups span").find((x) => /stray double period/.test(x.getAttribute("title") || ""));
+  t.ok(!!chip && /^The scenario ends on a stray double period after she meets \{\{user\}\}\.$/.test(chip.getAttribute("title")) &&
+    Array.from(chip.querySelectorAll("em")).some((x) => x.textContent === "she meets {{user}}"), "its chip draws the emphasis, and its tooltip drops the stars");
+  click(Array.from(chip.querySelectorAll("span")).find((x) => x.textContent === "×"));
+  await tick(150);
+  await openAiTab();
+}
+
 async function testTagsAndConcurrentEdit() {
   console.log("\ntags, and an answer landing while you accept something else");
   await chooseAction("Suggest tags");
@@ -738,6 +772,7 @@ async function testCustomPrompts() {
   t.ok(!!document.querySelector(".ai-custom-editor"), "+ New prompt opens an editor for it");
   type(all("input").find((i) => i.placeholder === "Untitled prompt"), "Voice check");
   type(all("textarea").find((x) => x.placeholder === "What should the model do with this card?"), "How does {{name}} sound in the greeting?");
+  type(document.querySelector("input.ai-custom-hint"), "Hears how the greeting sounds");
   await tick();
   const checks = () => all(".ai-custom-check input");
   click(checks()[0]);          // Can run on many cards at once
@@ -756,7 +791,11 @@ async function testCustomPrompts() {
   await tick();
 
   await openAiTab();
+  const vcBtn = byText("button", /^\S+ Voice check( ✓)?$/);
+  t.eq(vcBtn && vcBtn.getAttribute("title"), "Hears how the greeting sounds · reads First Message · can run on a selection of cards",
+    "its button's hover text is the description you wrote");
   await chooseAction("Voice check");
+  t.ok(seen(/Hears how the greeting sounds · reads First Message/), "and it's the line under the buttons once picked");
   relay.nextChat = { events: ev.answer("She sounds clipped and impatient.") };
   click(exactBtn("Voice check"));
   await tick(250);
@@ -1716,6 +1755,51 @@ async function testAgentRaces() {
   await folderMenu("Allow the AI here again");
 }
 
+async function testAgentModel() {
+  console.log("\nthe agent chat can use a model of its own");
+  click(byText("button", /^✦ AI/));
+  await tick();
+  const field = () => all("input").find((i) => /^the same model/.test(i.placeholder || ""));
+  t.ok(!!field() && seen(/Model for the agent chat/) && seen(/Blank: the chat uses the model above/), "the ✦ AI panel has a field for it, blank to begin with");
+  type(field(), "kimi-k2");
+  blur(field());
+  await tick(80);
+  t.eq((await readStore("kv", "aiSettings")).agentModel, "kimi-k2", "leaving the field saves it");
+  t.eq(relay.config.model, "qwen2.5:14b", "the card prompts' model is left as it was");
+  click(byText("button", /^Close$/));
+  await tick();
+
+  if (!exactBtn("+ New")) { click(exactBtn("✦ Agent")); await tick(300); }
+  click(exactBtn("+ New"));
+  await tick(200);
+  const box = () => all("textarea").find((x) => /Message the agent|agent is working/.test(x.placeholder || ""));
+  const titles = relay.titleCalls.length;
+  relay.nextTitle = { events: ev.answer("Which model") };
+  relay.chatQueue.push({ events: ev.answer("Kimi here.") });
+  type(box(), "Which model are you?");
+  await tick();
+  click(exactBtn("Send"));
+  await tick(600);
+  t.eq(lastChat().model, "kimi-k2", "the chat's requests name its model");
+  t.ok(relay.titleCalls.length > titles && !("model" in relay.titleCalls[relay.titleCalls.length - 1]), "its title is a small job, left to the card prompts' model");
+
+  click(exactBtn("✦ Agent")); await tick(100);
+  click(byText("button", /^✦ AI/));
+  await tick();
+  type(field(), "");
+  blur(field());
+  await tick(80);
+  click(byText("button", /^Close$/));
+  await tick();
+  if (!exactBtn("+ New")) { click(exactBtn("✦ Agent")); await tick(300); }
+  relay.chatQueue.push({ events: ev.answer("Back to the usual.") });
+  type(box(), "And now?");
+  await tick();
+  click(exactBtn("Send"));
+  await tick(500);
+  t.ok(!("model" in lastChat()), "blank again: the request names no model, so the saved one answers");
+}
+
 /* ── run ───────────────────────────────────────────────────────────────── */
 
 async function main() {
@@ -1739,7 +1823,7 @@ async function main() {
   t.ok(hard.length === 0, "no console errors during boot", hard.slice(0, 2).join(" | "));
 
   const steps = [testPanel, testSaveAndTest, testPrompts, testOpenCard, testSummarise, testThinkingOnly,
-    testCancel, testCritique, testTagsAndConcurrentEdit, testTighten, testReadOnly, testDialogs, testBulkTags, testCustomPrompts, testAgent, testAgentChanges, testTagTarget, testBatch5, testShortIds, testLorebook, testFlags, testBulk, testCardFiles, testTransport, testAgentRaces];
+    testCancel, testCritique, testMarkdown, testTagsAndConcurrentEdit, testTighten, testReadOnly, testDialogs, testBulkTags, testCustomPrompts, testAgent, testAgentChanges, testTagTarget, testBatch5, testShortIds, testLorebook, testFlags, testBulk, testCardFiles, testTransport, testAgentRaces, testAgentModel];
   for (const s of steps) {
     try { await s(); }
     catch (e) { t.ok(false, s.name + " threw", (e && e.stack || String(e)).split("\n").slice(0, 3).join(" | ")); }
