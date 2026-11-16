@@ -5285,6 +5285,7 @@ const DEFAULT_AI_SETTINGS = {
   customPrompts: [],       // your own prompts: see sanitizeCustomPrompts
   prompts: defaultAiPrompts(),
   keepWhole: {},           // prompt key → fields it never cuts: { summarise: ["first_mes"], "c:p1": [...] }
+  promptFields: {},        // built-in prompt key → the fields it reads, once you've chosen them; unset = the usual set
   contextChars: AI_LIMITS.contextChars.def,
   includeExamples: false,
   batchCap: AI_LIMITS.batchCap.def,
@@ -5438,6 +5439,14 @@ function sanitizeAiSettings(raw) {
     if (list.length) kw[k] = list;
   }
   s.keepWhole = kw;
+  // The fields a built-in prompt reads, where you've chosen them (an empty list is kept: it reads nothing).
+  const pf = {};
+  const pfIn = s.promptFields && typeof s.promptFields === "object" ? s.promptFields : {};
+  for (const a of AI_ACTIONS) {
+    if (a.perField || !Array.isArray(pfIn[a.key])) continue;
+    pf[a.key] = AI_KEEP_KEYS.filter((k) => pfIn[a.key].indexOf(k) >= 0);
+  }
+  s.promptFields = pf;
   return s;
 }
 
@@ -5806,14 +5815,19 @@ function aiBuildRequest(kind, cfg, rec, body, edit, knownTags, opts) {
     cardBlock = fc.text;
     vars.name = fc.name; vars.field = fc.label.toLowerCase();
   } else {
-    const keys = action.custom ? (action.allFields ? CARD_FIELDS.map((f) => f.key) : action.fields) : null;
+    // A built-in prompt reads the usual set (keys null) unless you've chosen its fields.
+    const chosen = !action.custom && aiBuiltinChosen(s, kind) ? aiBuiltinReads(s, kind) : null;
+    if (chosen && !chosen.length) return { error: "This prompt reads no fields. Tick some under Reads for it in the ✦ AI panel." };
+    const keys = action.custom ? (action.allFields ? CARD_FIELDS.map((f) => f.key) : action.fields)
+      : chosen ? chosen.filter((k) => k !== AI_GREETINGS_FIELD.key) : null;
+    const withGreetings = action.custom ? !!action.greetings : !!(chosen && chosen.indexOf(AI_GREETINGS_FIELD.key) >= 0);
     // Leave room for everything sent besides the card, measured as it will be
     // sent (Critique's flag list and Suggest tags' vocabulary are long), and a
     // little for the name, tag and heading lines. At least the old 800 tokens.
     const fixed = aiSystemPrompt(s).length + renderPromptTemplate(tpl, vars).text.length + facts.length + format.length;
     const reserve = Math.max(800, Math.ceil(fixed / AI_CHARS_PER_TOKEN) + 150);
     const fit = Object.assign({}, s, { contextChars: Math.min(s.contextChars, aiRoomChars(s, reserve)) });
-    const ctx = buildCardContext(rec, body, edit, fit, keys, { greetings: !!action.greetings, keepWhole: aiKeepWholeFor(s, kind) });
+    const ctx = buildCardContext(rec, body, edit, fit, keys, { greetings: withGreetings, keepWhole: aiKeepWholeFor(s, kind) });
     if (ctx.overKept) {
       const k = ctx.overKept;
       const both = k.labels.length > 1;
@@ -5850,6 +5864,7 @@ function aiSentSummary(action, ai, budget) {
   const fields = action.custom
     ? CARD_FIELDS.filter((f) => action.allFields || (action.fields || []).indexOf(f.key) >= 0).map((f) => f.label.toLowerCase())
       .concat(action.greetings ? ["alternate greetings"] : []).join(", ")
+    : aiBuiltinChosen(ai, action.key) ? (aiBuiltinReads(ai, action.key).map((k) => aiKeepLabel(k).toLowerCase()).join(", ") || "no fields")
     : "description, personality, scenario, first message" + (ai.includeExamples ? ", example dialogue" : "");
   const kept = aiKeepWholeFor(ai, action.key).map((k) => aiKeepLabel(k).toLowerCase());
   return "Sent: name, card tags, " + fields + ", within " + fmtNum(budget || ai.contextChars) + " characters" +
@@ -5864,7 +5879,21 @@ function aiPromptFields(action, ai) {
       .map((f) => ({ key: f.key, label: f.label }))
       .concat(action.greetings ? [{ key: AI_GREETINGS_FIELD.key, label: AI_GREETINGS_FIELD.label }] : []);
   }
-  return AI_CONTEXT_FIELDS.filter((f) => !f.optional || (ai && ai.includeExamples)).map((f) => ({ key: f.key, label: f.label }));
+  return aiBuiltinReads(ai, action.key).map((k) => ({ key: k, label: aiKeepLabel(k) }));
+}
+
+/** Whether you've chosen the fields a built-in prompt reads (Reads, in the ✦ AI panel). */
+function aiBuiltinChosen(ai, key) {
+  return !!(ai && ai.promptFields && Array.isArray(ai.promptFields[key]));
+}
+
+/**
+ * The fields a built-in prompt reads: the ones you chose, or else the usual
+ * set (the example dialogue only with Include example dialogue on).
+ */
+function aiBuiltinReads(ai, key) {
+  if (aiBuiltinChosen(ai, key)) return AI_KEEP_KEYS.filter((k) => ai.promptFields[key].indexOf(k) >= 0);
+  return AI_CONTEXT_FIELDS.filter((f) => !f.optional || (ai && ai.includeExamples)).map((f) => f.key);
 }
 
 /** The fields a prompt never cuts, among those it reads. */
@@ -8788,6 +8817,7 @@ const AGENT_TOOL_IMPL = {
       suggestTagsGoTo: s.tagTarget === "card" ? "the card's own tags" : "vault-only tags",
       bulkRunCap: s.batchCap, persona: s.persona, rulesForEveryPrompt: s.promptRules, prompts: s.prompts,
       neverCutWhenOverBudget: s.keepWhole,
+      fieldsChosenForBuiltInPrompts: s.promptFields,
       // Only the user's own prompts whose answers you're allowed to read.
       yourOwnPrompts: aiCustomActions(s).filter((c) => c.agentVisible)
         .map((c) => Object.assign({ name: c.label }, c.description ? { description: c.description } : {},
@@ -16221,7 +16251,8 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
           <Toggle color="cyan" checked={!!ai.includeExamples} onChange={(v) => onSave({ includeExamples: v })}
             label="Include example dialogue" />
           <div style={{ fontSize: 10, color: "var(--text-muted)", lineHeight: 1.6, margin: "6px 0 0 42px" }}>
-            Often the longest field and rarely changes the answer. Lorebooks are never sent, only counted.
+            Often the longest field and rarely changes the answer. Lorebooks are never sent, only counted. For a prompt whose
+            fields you've chosen (Reads, under Prompts), its own choice counts instead.
           </div>
         </div>
       </div>
@@ -16378,6 +16409,36 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
         }}>
           <div style={Object.assign({}, tinyLabel, { marginBottom: 4 })}>Always appended (the answer is read in this format)</div>
           {action.output === "flags" ? AI_CRITIQUE_FACTS + "\n\n" : ""}{aiOutputFormat(action.output)}
+        </div>
+      ) : null}
+      {!cur && !action.perField ? (
+        <div className="ai-reads" style={{ marginTop: 9 }}>
+          <label style={tinyLabel}>Reads</label>
+          <div style={{ fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 5 }}>
+            What this prompt sends of each card. It starts with the usual fields; tick anything else it should see, such as the
+            alternate greetings, or the system prompt for Critique to look for jailbreaks. The lorebook is never sent, only counted.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3px 14px" }}>
+            {AI_KEEP_KEYS.map((k) => {
+              const reads = aiBuiltinReads(ai, action.key);
+              const on = reads.indexOf(k) >= 0;
+              return (
+                <label key={k} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11, cursor: "pointer" }}>
+                  <input type="checkbox" checked={on} onChange={(e) => onSave({ promptFields: Object.assign({}, ai.promptFields,
+                    { [action.key]: e.target.checked ? reads.concat([k]) : reads.filter((x) => x !== k) }) })} />
+                  {aiKeepLabel(k)}
+                </label>
+              );
+            })}
+          </div>
+          {aiBuiltinChosen(ai, action.key) ? (
+            <div style={{ marginTop: 5 }}>
+              <SmallBtn color="muted" onClick={() => { const next = Object.assign({}, ai.promptFields); delete next[action.key]; onSave({ promptFields: next }); }}
+                title="Read the usual fields again, with Include example dialogue deciding the example dialogue">
+                Back to the usual fields
+              </SmallBtn>
+            </div>
+          ) : null}
         </div>
       ) : null}
       {aiPromptFields(action, ai).length ? (

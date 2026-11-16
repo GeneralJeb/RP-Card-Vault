@@ -1812,6 +1812,16 @@ async function testNeverCut() {
   await tick(80);
   t.eq((await readStore("kv", "aiSettings")).keepWhole, { summarise: ["description"] }, "ticking one saves it for that prompt");
 
+  const readsRow = () => document.querySelector(".ai-reads");
+  const readsBox = (label) => Array.from(readsRow().querySelectorAll("label")).find((l) => l.textContent.trim() === label);
+  t.ok(!!readsRow() && readsBox("Description").querySelector("input").checked && !readsBox("Alternate greetings").querySelector("input").checked,
+    "a built-in prompt has Reads, ticked with the usual fields");
+  click(readsBox("Alternate greetings").querySelector("input"));
+  await tick(80);
+  t.eq((await readStore("kv", "aiSettings")).promptFields, { summarise: ["description", "personality", "scenario", "first_mes", "alternate_greetings"] },
+    "adding the greetings saves the prompt's own choice");
+  t.ok(!!keepBox("Alternate greetings") && !!exactBtn("Back to the usual fields"), "Never cut now offers them, and the usual fields are a click away");
+
   const promptRow = exactBtn("+ New prompt").parentElement;
   click(Array.from(promptRow.querySelectorAll("button")).find((b) => /Voice check/.test(b.textContent)));
   await tick();
@@ -1825,6 +1835,12 @@ async function testNeverCut() {
   await tick();
 
   await openAiTab();
+  await chooseAction("Summarise");
+  relay.nextChat = { events: ev.answer("A summary that saw the greetings.") };
+  click(runBtn());
+  await tick(250);
+  t.ok(/## Alternate greetings\n### Greeting 1\n\*The workshop is empty\.\*/.test(lastChat().messages[1].content), "Summarise sends them once it reads them");
+
   await chooseAction("Voice check");
   relay.nextChat = { events: ev.answer("The greetings are fine.") };
   click(exactBtn("Voice check") || exactBtn("↻ Run again") || exactBtn("↻ Regenerate"));

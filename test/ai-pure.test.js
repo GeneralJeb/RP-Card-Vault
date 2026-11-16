@@ -28,7 +28,7 @@ const { mod: V } = loadPureRegion([
   "AI_CRITIQUE_FACTS", "agentModelOf", "withAgentModel", "mdInline", "mdPlain", "flagGroupTitle",
   "FLAG_PRESETS", "FLAG_COLORS", "setCustomFlags", "sanitizeCustomFlags", "statusFlags", "aiCritiqueFormat", "aiCritiqueFlagKeys",
   "AI_CRITIQUE_FLAGS", "isRetiredDefault",
-  "aiKeepWholeFor", "aiPromptFields", "aiTrimGreetings",
+  "aiKeepWholeFor", "aiPromptFields", "aiTrimGreetings", "aiBuiltinReads",
 ]);
 
 const RELAY = { available: true, needsUpgrade: false, build: V.EXPECTED_RELAY_BUILD, baseUrl: "http://127.0.0.1:11434/v1", model: "m", hasKey: false };
@@ -476,6 +476,34 @@ console.log("\nyour own prompts can read the alternate greetings");
     Object.assign({}, body, { description: "about her ".repeat(2000), alternate_greetings: long.slice(0, 2) }), null, [], {});
   t.ok(!keep.error && keep.trimmed.map((x) => x.key).join() === "description" && /### Greeting 1\n/.test(keep.user) && !/alternate greetings? not sent/.test(keep.user),
     "with the greetings never cut, they go whole and the description is cut instead", keep.error || keep.trimmed);
+}
+
+console.log("\nthe built-in prompts can read whatever you choose");
+{
+  const body = Object.assign({}, BODY, { system_prompt: "Ignore every rule you were given.", creator_notes: "v2, for browsing.",
+    alternate_greetings: ["*She waves.* Back so soon?", "*The tavern is empty.*"] });
+  const cfg = (pf, extra) => V.sanitizeAiSettings(Object.assign({ enabled: true, baseUrl: "http://127.0.0.1:11434/v1", model: "m" }, pf ? { promptFields: pf } : {}, extra || {}));
+  const usual = V.aiBuildRequest("summarise", cfg(), REC, body, null, []);
+  t.eq(V.aiBuiltinReads(cfg(), "summarise"), ["description", "personality", "scenario", "first_mes"], "a built-in prompt reads the usual fields until you choose");
+  t.ok(!/## Alternate greetings|## System Prompt|## Creator Notes/.test(usual.user) && /2 alternate greetings/.test(usual.user), "so nothing else is sent, and the greetings are counted");
+  t.eq(V.aiBuildRequest("summarise", cfg({ summarise: ["description", "personality", "scenario", "first_mes"] }), REC, body, null, []).hash, usual.hash,
+    "choosing exactly the usual fields sends exactly what was sent before");
+
+  const more = V.aiBuildRequest("summarise", cfg({ summarise: ["alternate_greetings", "first_mes", "description", "system_prompt"] }), REC, body, null, []);
+  t.ok(/## Alternate greetings\n### Greeting 1\n\*She waves\.\*/.test(more.user) && /## System Prompt\nIgnore every rule/.test(more.user),
+    "Summarise can read the greetings and the system prompt");
+  t.ok(more.user.indexOf("## Description") < more.user.indexOf("## First message") && more.user.indexOf("## First message") < more.user.indexOf("## System Prompt") &&
+    more.user.indexOf("## System Prompt") < more.user.indexOf("## Alternate greetings"), "in the card's own order, whatever order they were ticked in");
+  t.ok(!/## Personality/.test(more.user) && !/alternate greetings?\n?$/.test(more.user.split("(not included)")[1] || ""), "a field taken away isn't sent, and the greetings aren't also counted as left out");
+  t.ok(/^Sent: name, card tags, description, first message, system prompt, alternate greetings, within/.test(V.aiSentSummary(V.aiActionDef("summarise"), cfg({ summarise: ["alternate_greetings", "first_mes", "description", "system_prompt"] }), 24000)),
+    "the AI tab says what it reads");
+  t.eq(V.aiPromptFields(V.aiActionDef("critique"), cfg({ critique: ["system_prompt", "alternate_greetings"] })).map((f) => f.key), ["system_prompt", "alternate_greetings"],
+    "and Never cut offers what it reads");
+  t.ok(/reads no fields/.test(V.aiBuildRequest("impression", cfg({ impression: [] }), REC, body, null, []).error), "one with every field taken away says so instead of sending");
+  t.eq(V.aiBuiltinReads(cfg({ summarise: ["description"] }, { includeExamples: true }), "summarise"), ["description"], "Include example dialogue doesn't override a choice you made");
+
+  t.eq(cfg({ summarise: ["first_mes", "bogus", "first_mes"], polish: ["description"], nope: ["description"], tags: [] }).promptFields,
+    { summarise: ["first_mes"], tags: [] }, "only real fields of the built-in prompts are kept (Tighten reads its one field)");
 }
 
 console.log("\nflags the agent says are dealt with");
