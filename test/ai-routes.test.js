@@ -292,6 +292,14 @@ async function main() {
     const sent = seen.bodies[seen.bodies.length - 1];
     t.eq([sent.model, sent.stream, sent.temperature, sent.max_tokens], ["mock-a", true, 0.2, 32768], "the saved model, streaming, and clamped settings are sent upstream");
 
+    await chat({ model: "mock-b" });
+    t.eq(seen.bodies[seen.bodies.length - 1].model, "mock-b", "a request that names another model (the agent chat's own) gets it");
+    t.eq(seen.auth[seen.auth.length - 1], "Bearer " + KEY, "with the saved key, at the saved address");
+    await chat({ model: "  " });
+    t.eq(seen.bodies[seen.bodies.length - 1].model, "mock-a", "a blank one means the saved model");
+    await chat({ model: "bad\nname" });
+    t.eq(seen.bodies[seen.bodies.length - 1].model, "mock-a", "and so does one that isn't a name");
+
     mode = "json";
     ev = events(await chat());
     t.eq([ev[0].t, ev[0].v, ev[1].t], ["text", "whole answer", "done"], "a server that ignores stream:true still works");
