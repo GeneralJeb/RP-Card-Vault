@@ -782,7 +782,7 @@ async function testCustomPrompts() {
   t.ok(!!document.querySelector(".ai-custom-fields"), "unticking All fields shows the fields to choose from");
   click(all(".ai-custom-fields input")[3]);   // First message
   await tick();
-  click(checks()[2]);          // the chat agent can read its answers
+  click(checks()[3]);          // the chat agent can read its answers (after Alternate greetings)
   await tick();
   const saved = (await readStore("kv", "aiSettings")).customPrompts[0];
   t.ok(saved && saved.label === "Voice check" && saved.bulk && !saved.allFields && saved.fields.join() === "first_mes" && saved.agentVisible,
@@ -1800,6 +1800,39 @@ async function testAgentModel() {
   t.ok(!("model" in lastChat()), "blank again: the request names no model, so the saved one answers");
 }
 
+async function testNeverCut() {
+  console.log("\nfields a prompt never cuts, and the alternate greetings");
+  click(byText("button", /^✦ AI/));
+  await tick();
+  const keepRow = () => document.querySelector(".ai-keep-whole");
+  const keepBox = (label) => Array.from(keepRow().querySelectorAll("label")).find((l) => l.textContent.trim() === label);
+  t.ok(!!keepRow() && /Never cut/.test(keepRow().textContent) && !!keepBox("Description") && !!keepBox("First message"),
+    "the panel's prompt editor has Never cut, offering the fields the prompt reads");
+  click(keepBox("Description").querySelector("input"));
+  await tick(80);
+  t.eq((await readStore("kv", "aiSettings")).keepWhole, { summarise: ["description"] }, "ticking one saves it for that prompt");
+
+  const promptRow = exactBtn("+ New prompt").parentElement;
+  click(Array.from(promptRow.querySelectorAll("button")).find((b) => /Voice check/.test(b.textContent)));
+  await tick();
+  const greet = document.querySelector(".ai-custom-greetings input");
+  t.ok(!!greet && !greet.checked && seen(/All fields doesn't include them/), "a prompt of your own can read the alternate greetings, and says All fields doesn't");
+  click(greet);
+  await tick(80);
+  t.eq((await readStore("kv", "aiSettings")).customPrompts[0].greetings, true, "ticking it saves it");
+  t.ok(!!keepBox("Alternate greetings"), "and Never cut offers them too");
+  click(byText("button", /^Close$/));
+  await tick();
+
+  await openAiTab();
+  await chooseAction("Voice check");
+  relay.nextChat = { events: ev.answer("The greetings are fine.") };
+  click(exactBtn("Voice check") || exactBtn("↻ Run again") || exactBtn("↻ Regenerate"));
+  await tick(250);
+  const usr = lastChat().messages[1].content;
+  t.ok(/## Alternate greetings\n### Greeting 1\n\*The workshop is empty\.\*/.test(usr), "the prompt sends them, each numbered");
+}
+
 /* ── run ───────────────────────────────────────────────────────────────── */
 
 async function main() {
@@ -1826,7 +1859,7 @@ async function main() {
     "a card indexed before the vault kept wording signatures gets one at start, from the text it holds");
 
   const steps = [testPanel, testSaveAndTest, testPrompts, testOpenCard, testSummarise, testThinkingOnly,
-    testCancel, testCritique, testMarkdown, testTagsAndConcurrentEdit, testTighten, testReadOnly, testDialogs, testBulkTags, testCustomPrompts, testAgent, testAgentChanges, testTagTarget, testBatch5, testShortIds, testLorebook, testFlags, testBulk, testCardFiles, testTransport, testAgentRaces, testAgentModel];
+    testCancel, testCritique, testMarkdown, testTagsAndConcurrentEdit, testTighten, testReadOnly, testDialogs, testBulkTags, testCustomPrompts, testAgent, testAgentChanges, testTagTarget, testBatch5, testShortIds, testLorebook, testFlags, testBulk, testCardFiles, testTransport, testAgentRaces, testAgentModel, testNeverCut];
   for (const s of steps) {
     try { await s(); }
     catch (e) { t.ok(false, s.name + " threw", (e && e.stack || String(e)).split("\n").slice(0, 3).join(" | ")); }

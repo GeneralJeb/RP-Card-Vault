@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.3";
+const APP_VERSION = "1.8.4";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -5215,6 +5215,7 @@ function sanitizeCustomPrompts(list) {
       bulk: !!x.bulk,
       allFields: x.allFields !== false,
       fields: (Array.isArray(x.fields) ? x.fields : []).filter((k, i, a) => CARD_FIELDS.some((f) => f.key === k) && a.indexOf(k) === i),
+      greetings: !!x.greetings,     // also reads the alternate greetings (All fields doesn't include them)
       agentVisible: !!x.agentVisible,
     });
     if (out.length >= AI_CUSTOM_MAX) break;
@@ -5227,7 +5228,9 @@ function aiCustomActions(cfg) {
   const list = cfg && Array.isArray(cfg.customPrompts) ? cfg.customPrompts : [];
   return list.map((c) => {
     const fieldNames = (c.fields || []).map((k) => (CARD_FIELDS.filter((f) => f.key === k)[0] || { label: k }).label);
-    const reads = c.allFields === false ? (fieldNames.join(", ") || "no fields yet") : "";
+    if (c.greetings && c.allFields === false) fieldNames.push(AI_GREETINGS_FIELD.label);
+    const reads = c.allFields === false ? (fieldNames.join(", ") || "no fields yet")
+      : c.greetings ? "every field and the alternate greetings" : "";
     const desc = String(c.hint || "").trim();
     return {
       key: "c:" + c.id, id: c.id, custom: true, output: "text",
@@ -5238,7 +5241,7 @@ function aiCustomActions(cfg) {
         : "Your own prompt" + (reads ? ", reading " + reads : "") + (c.bulk ? ". It can run on a selection of cards." : "."),
       description: desc,
       template: String(c.template || ""), bulk: !!c.bulk, allFields: c.allFields !== false,
-      fields: c.fields || [], agentVisible: !!c.agentVisible,
+      fields: c.fields || [], greetings: !!c.greetings, agentVisible: !!c.agentVisible,
     };
   });
 }
@@ -5281,6 +5284,7 @@ const DEFAULT_AI_SETTINGS = {
   promptRules: AI_PROMPT_RULES_DEFAULT,   // Rules for every prompt; "" means none (a missing key gets the default)
   customPrompts: [],       // your own prompts: see sanitizeCustomPrompts
   prompts: defaultAiPrompts(),
+  keepWhole: {},           // prompt key → fields it never cuts: { summarise: ["first_mes"], "c:p1": [...] }
   contextChars: AI_LIMITS.contextChars.def,
   includeExamples: false,
   batchCap: AI_LIMITS.batchCap.def,
@@ -5425,6 +5429,15 @@ function sanitizeAiSettings(raw) {
     prompts[a.key] = v.trim() ? v : a.template;
   }
   s.prompts = prompts;
+  // Never-cut lists: only for prompts that exist and fields there are.
+  const kw = {};
+  const kwIn = s.keepWhole && typeof s.keepWhole === "object" ? s.keepWhole : {};
+  const promptKeys = AI_ACTIONS.filter((a) => !a.perField).map((a) => a.key).concat(s.customPrompts.map((c) => "c:" + c.id));
+  for (const k of promptKeys) {
+    const list = (Array.isArray(kwIn[k]) ? kwIn[k] : []).filter((f, i, a) => AI_KEEP_KEYS.indexOf(f) >= 0 && a.indexOf(f) === i);
+    if (list.length) kw[k] = list;
+  }
+  s.keepWhole = kw;
   return s;
 }
 
@@ -5562,6 +5575,40 @@ const AI_CONTEXT_FIELDS = [
   { key: "mes_example", label: "Example dialogue", share: 0.24, optional: true },
 ];
 
+/* The alternate greetings, as a prompt of your own can read them: one entry,
+   each greeting marked. When they don't all fit, whole greetings are left
+   off the end rather than one being cut mid-sentence. */
+const AI_GREETINGS_FIELD = { key: "alternate_greetings", label: "Alternate greetings", share: 0.24 };
+
+/* The fields a prompt can be set never to cut: the card's text fields and the greetings. */
+const AI_KEEP_KEYS = CARD_FIELDS.map((f) => f.key).concat([AI_GREETINGS_FIELD.key]);
+
+function aiGreetingParts(list) {
+  return (list || []).map((g, i) => "### Greeting " + (i + 1) + "\n" + String(g == null ? "" : g).trim());
+}
+
+/** The greetings cut to about `cap` characters, whole greetings first: { text, sent } (characters of greeting text sent). */
+function aiTrimGreetings(list, cap) {
+  const parts = aiGreetingParts(list);
+  const whole = parts.join("\n\n");
+  if (whole.length <= cap) return { text: whole, sent: whole.length, cut: 0 };
+  let text = "", n = 0;
+  for (const p of parts) {
+    const next = text ? text + "\n\n" + p : p;
+    if (next.length > cap) break;
+    text = next;
+    n++;
+  }
+  let sent = text.length;
+  if (!n) {
+    const t = aiTrimField(parts[0], Math.max(1, cap));
+    text = t.text; n = 1; sent = parts[0].length - t.cut;
+  }
+  const left = parts.length - n;
+  if (left) text += "\n[… " + left + " more alternate greeting" + (left === 1 ? "" : "s") + " not sent …]";
+  return { text, sent, cut: whole.length - sent };
+}
+
 /** Stop card text from closing (or reopening) the fence around it. */
 function aiFenceText(s) {
   return String(s == null ? "" : s).replace(/<(\/?)(card)\b/gi, "&lt;$1$2");
@@ -5602,10 +5649,16 @@ function aiTrimField(text, cap) {
 
 /**
  * Flatten a card into the fenced block the model reads, through the edit
- * overlay so it sees what the user sees. Lorebooks and alternate greetings
- * are counted, not sent; example dialogue is opt-in.
+ * overlay so it sees what the user sees. Lorebooks are counted, not sent;
+ * example dialogue is opt-in, and so are the alternate greetings (a prompt
+ * of your own, `opts.greetings`).
+ *
+ * `opts.keepWhole` lists fields never to cut: they go whole, and the rest
+ * share what's left of the budget. When the whole ones alone are over it,
+ * the result carries `overKept` ({ labels, chars, budget }) and is not sent.
  */
-function buildCardContext(rec, body, edit, cfg, fieldKeys) {
+function buildCardContext(rec, body, edit, cfg, fieldKeys, opts) {
+  const o = opts || {};
   const s = sanitizeAiSettings(cfg);
   const name = String(effectiveField(body, edit, "name") || (rec && rec.name) || "(unnamed)");
   const cardTags = effectiveTags(rec || {}, edit);
@@ -5617,23 +5670,35 @@ function buildCardContext(rec, body, edit, cfg, fieldKeys) {
   const fields = defs
     .map((f) => ({ def: f, raw: String(effectiveField(body, edit, f.key) || "").trim() }))
     .filter((f) => f.raw);
-  const give = aiAllocate(fields.map((f) => f.raw.length), fields.map((f) => f.def.share), s.contextChars);
+  const greetList = (edit && Array.isArray(edit.greetings)) ? edit.greetings : ((body && body.alternate_greetings) || []);
+  const greetSent = !!o.greetings && greetList.some((g) => String(g || "").trim());
+  if (greetSent) fields.push({ def: AI_GREETINGS_FIELD, raw: aiGreetingParts(greetList).join("\n\n"), list: greetList });
+
+  // Fields never to cut get all they need; the others share what's left.
+  const keep = o.keepWhole || [];
+  const isKept = fields.map((f) => keep.indexOf(f.def.key) >= 0);
+  const keptChars = fields.reduce((a, f, i) => a + (isKept[i] ? f.raw.length : 0), 0);
+  if (keptChars > s.contextChars) {
+    return { overKept: { labels: fields.filter((f, i) => isKept[i]).map((f) => f.def.label), chars: keptChars, budget: s.contextChars } };
+  }
+  const rest = fields.map((f, i) => i).filter((i) => !isKept[i]);
+  const shared = aiAllocate(rest.map((i) => fields[i].raw.length), rest.map((i) => fields[i].def.share), s.contextChars - keptChars);
+  const give = fields.map((f, i) => (isKept[i] ? f.raw.length : shared[rest.indexOf(i)]));
 
   const lines = ["<card>", "Name: " + aiFenceText(name)];
   if (cardTags.length) lines.push("Tags: " + aiFenceText(cardTags.join(", ")));
   const trimmed = [];
   fields.forEach((f, i) => {
-    const t = aiTrimField(f.raw, Math.max(1, give[i]));
+    const t = f.list ? aiTrimGreetings(f.list, Math.max(1, give[i])) : aiTrimField(f.raw, Math.max(1, give[i]));
     if (t.cut) trimmed.push({ key: f.def.key, label: f.def.label, sent: f.raw.length - t.cut, total: f.raw.length });
     lines.push("", "## " + f.def.label, aiFenceText(t.text));
   });
   const loreBook = effectiveLorebook(body, edit);
   const loreCount = loreBook && Array.isArray(loreBook.entries) ? loreBook.entries.length : 0;
-  const greetList = (edit && Array.isArray(edit.greetings)) ? edit.greetings : ((body && body.alternate_greetings) || []);
   const greetCount = greetList.length;
   const counts = [];
   if (loreCount) counts.push(loreCount + " lorebook entr" + (loreCount === 1 ? "y" : "ies"));
-  if (greetCount) counts.push(greetCount + " alternate greeting" + (greetCount === 1 ? "" : "s"));
+  if (greetCount && !greetSent) counts.push(greetCount + " alternate greeting" + (greetCount === 1 ? "" : "s"));
   if (counts.length) lines.push("", "## Also on this card (not included)", counts.join("; "));
   lines.push("</card>");
   return { text: lines.join("\n"), trimmed, loreCount, greetCount, name, cardTags, budget: s.contextChars };
@@ -5708,7 +5773,7 @@ function aiBuildRequest(kind, cfg, rec, body, edit, knownTags, opts) {
   const action = aiActionDef(kind, s);
   if (!action) throw new Error("Unknown AI action: " + kind);
   if (action.custom && !action.template.trim()) return { error: "This prompt has no instructions yet. Write them in the ✦ AI panel, under Prompts." };
-  if (action.custom && !action.allFields && !action.fields.length) return { error: "This prompt reads no fields. Tick All fields, or pick some, in the ✦ AI panel." };
+  if (action.custom && !action.allFields && !action.fields.length && !action.greetings) return { error: "This prompt reads no fields. Tick All fields, or pick some, in the ✦ AI panel." };
   const field = action.perField ? String((opts && opts.field) || "") : "";
 
   const tagsAll = effectiveTags(rec || {}, edit).concat(vaultTagsOf(edit));
@@ -5748,7 +5813,16 @@ function aiBuildRequest(kind, cfg, rec, body, edit, knownTags, opts) {
     const fixed = aiSystemPrompt(s).length + renderPromptTemplate(tpl, vars).text.length + facts.length + format.length;
     const reserve = Math.max(800, Math.ceil(fixed / AI_CHARS_PER_TOKEN) + 150);
     const fit = Object.assign({}, s, { contextChars: Math.min(s.contextChars, aiRoomChars(s, reserve)) });
-    const ctx = buildCardContext(rec, body, edit, fit, keys);
+    const ctx = buildCardContext(rec, body, edit, fit, keys, { greetings: !!action.greetings, keepWhole: aiKeepWholeFor(s, kind) });
+    if (ctx.overKept) {
+      const k = ctx.overKept;
+      const both = k.labels.length > 1;
+      return { error: aiJoinNames(k.labels) + (both ? " are" : " is") + " set never to be cut for this prompt, and " +
+        (both ? "together they come" : "it comes") + " to " + fmtNum(k.chars) + " characters on this card, over the " + fmtNum(k.budget) +
+        " this prompt has for it (" + (fit.contextChars < s.contextChars ? "what the model's context leaves, with Model context set" : "the context budget") +
+        " in the ✦ AI panel). Nothing was sent. Raise " + (fit.contextChars < s.contextChars ? "the model's context" : "the budget") +
+        ", or untick " + (both ? "one of them" : "it") + " under Never cut for this prompt." };
+    }
     cardBlock = ctx.text; trimmed = ctx.trimmed; budget = ctx.budget;
     vars.name = ctx.name; vars.loreCount = ctx.loreCount; vars.greetingCount = ctx.greetCount;
   }
@@ -5774,9 +5848,43 @@ function aiBuildRequest(kind, cfg, rec, body, edit, knownTags, opts) {
 function aiSentSummary(action, ai, budget) {
   if (action.perField) return "Sent: the name and this one field, in full.";
   const fields = action.custom
-    ? CARD_FIELDS.filter((f) => action.allFields || (action.fields || []).indexOf(f.key) >= 0).map((f) => f.label.toLowerCase()).join(", ")
+    ? CARD_FIELDS.filter((f) => action.allFields || (action.fields || []).indexOf(f.key) >= 0).map((f) => f.label.toLowerCase())
+      .concat(action.greetings ? ["alternate greetings"] : []).join(", ")
     : "description, personality, scenario, first message" + (ai.includeExamples ? ", example dialogue" : "");
-  return "Sent: name, card tags, " + fields + ", within " + fmtNum(budget || ai.contextChars) + " characters.";
+  const kept = aiKeepWholeFor(ai, action.key).map((k) => aiKeepLabel(k).toLowerCase());
+  return "Sent: name, card tags, " + fields + ", within " + fmtNum(budget || ai.contextChars) + " characters" +
+    (kept.length ? "; never cut: " + kept.join(", ") : "") + ".";
+}
+
+/** The fields a prompt reads, as { key, label }: what Never cut can offer for it. */
+function aiPromptFields(action, ai) {
+  if (!action || action.perField) return [];
+  if (action.custom) {
+    return CARD_FIELDS.filter((f) => action.allFields || (action.fields || []).indexOf(f.key) >= 0)
+      .map((f) => ({ key: f.key, label: f.label }))
+      .concat(action.greetings ? [{ key: AI_GREETINGS_FIELD.key, label: AI_GREETINGS_FIELD.label }] : []);
+  }
+  return AI_CONTEXT_FIELDS.filter((f) => !f.optional || (ai && ai.includeExamples)).map((f) => ({ key: f.key, label: f.label }));
+}
+
+/** The fields a prompt never cuts, among those it reads. */
+function aiKeepWholeFor(ai, key) {
+  const list = (ai && ai.keepWhole && Array.isArray(ai.keepWhole[key])) ? ai.keepWhole[key] : [];
+  const action = aiActionDef(key, ai);
+  const reads = aiPromptFields(action, ai).map((f) => f.key);
+  return list.filter((k) => reads.indexOf(k) >= 0);
+}
+
+function aiKeepLabel(key) {
+  if (key === AI_GREETINGS_FIELD.key) return AI_GREETINGS_FIELD.label;
+  const c = AI_CONTEXT_FIELDS.filter((f) => f.key === key)[0] || CARD_FIELDS.filter((f) => f.key === key)[0];
+  return c ? c.label : key;
+}
+
+/** "A", "A and B", "A, B and C". */
+function aiJoinNames(list) {
+  const xs = (list || []).slice();
+  return xs.length <= 1 ? (xs[0] || "") : xs.slice(0, -1).join(", ") + " and " + xs[xs.length - 1];
 }
 
 /* ── the answer cache ────────────────────────────────────────────────── */
@@ -8679,10 +8787,12 @@ const AGENT_TOOL_IMPL = {
       writeMode: (AI_WRITE_MODES.filter((m) => m.key === s.writeMode)[0] || {}).label || s.writeMode,
       suggestTagsGoTo: s.tagTarget === "card" ? "the card's own tags" : "vault-only tags",
       bulkRunCap: s.batchCap, persona: s.persona, rulesForEveryPrompt: s.promptRules, prompts: s.prompts,
+      neverCutWhenOverBudget: s.keepWhole,
       // Only the user's own prompts whose answers you're allowed to read.
       yourOwnPrompts: aiCustomActions(s).filter((c) => c.agentVisible)
         .map((c) => Object.assign({ name: c.label }, c.description ? { description: c.description } : {},
-          { instructions: c.template, fields: c.allFields ? "all" : c.fields, manyCardsAtOnce: c.bulk })),
+          { instructions: c.template, fields: c.allFields ? "all" : c.fields }, c.greetings ? { alternateGreetings: true } : {},
+          { manyCardsAtOnce: c.bulk })),
     };
     return { ok: true, content: JSON.stringify(shown, null, 2) };
   },
@@ -13718,7 +13828,7 @@ function InspectorAiTab({ rec, body, edit, ai, relay, tagIndex, onRun, onClearNo
           {req.trimmed.map((t) => t.label + " " + fmtNum(t.sent) + " of " + fmtNum(t.total)).join("; ")}.
           The model is told where each cut is. {req.budget < ai.contextChars
             ? "This model's context sets that limit (Model context in the ✦ AI panel)."
-            : "Raise the budget in the ✦ AI panel if it matters."}
+            : "Raise the budget in the ✦ AI panel if it matters."} To keep a field whole, tick it under Never cut for this prompt (✦ AI panel, Prompts).
         </div>
       ) : null}
 
@@ -16228,7 +16338,7 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
           <label className="ai-custom-check" style={{ display: "flex", gap: 7, alignItems: "flex-start", fontSize: 11.5, marginBottom: 6, cursor: "pointer" }}>
             <input type="checkbox" checked={cur.allFields} onChange={(e) => saveCustom({ allFields: e.target.checked })} />
             <span>All fields<span style={{ display: "block", fontSize: 10, color: "var(--text-muted)" }}>
-              Untick to choose which fields this prompt reads.</span></span>
+              Every text field on the card. Untick to choose which ones this prompt reads. The alternate greetings are a choice of their own, below.</span></span>
           </label>
           {!cur.allFields ? (
             <div className="ai-custom-fields" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3px 12px", margin: "0 0 8px 22px" }}>
@@ -16241,6 +16351,12 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
               ))}
             </div>
           ) : null}
+          <label className="ai-custom-check ai-custom-greetings" style={{ display: "flex", gap: 7, alignItems: "flex-start", fontSize: 11.5, marginBottom: 6, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!cur.greetings} onChange={(e) => saveCustom({ greetings: e.target.checked })} />
+            <span>Alternate greetings<span style={{ display: "block", fontSize: 10, color: "var(--text-muted)" }}>
+              Every alternate greeting, each marked with its number. All fields doesn't include them, since they can be long.
+              When they don't all fit, whole greetings are left off the end.</span></span>
+          </label>
           <label className="ai-custom-check" style={{ display: "flex", gap: 7, alignItems: "flex-start", fontSize: 11.5, marginBottom: 2, cursor: "pointer" }}>
             <input type="checkbox" checked={cur.agentVisible} onChange={(e) => saveCustom({ agentVisible: e.target.checked })} />
             <span>The chat agent can read its answers<span style={{ display: "block", fontSize: 10, color: "var(--text-muted)" }}>
@@ -16262,6 +16378,28 @@ function AiSettingsModal({ ai, onSave, relay, onSaveEndpoint, onSavePrivacy, onT
         }}>
           <div style={Object.assign({}, tinyLabel, { marginBottom: 4 })}>Always appended (the answer is read in this format)</div>
           {action.output === "flags" ? AI_CRITIQUE_FACTS + "\n\n" : ""}{aiOutputFormat(action.output)}
+        </div>
+      ) : null}
+      {aiPromptFields(action, ai).length ? (
+        <div className="ai-keep-whole" style={{ marginTop: 9 }}>
+          <label style={tinyLabel}>Never cut</label>
+          <div style={{ fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 5 }}>
+            When a card is over the context budget, the fields ticked here go whole and the others are cut to fit around them.
+            If the ticked ones alone don't fit, nothing is sent and the card's ✦ AI tab says so.
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "3px 14px" }}>
+            {aiPromptFields(action, ai).map((f) => {
+              const kept = aiKeepWholeFor(ai, action.key);
+              const on = kept.indexOf(f.key) >= 0;
+              return (
+                <label key={f.key} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11, cursor: "pointer" }}>
+                  <input type="checkbox" checked={on} onChange={(e) => onSave({ keepWhole: Object.assign({}, ai.keepWhole,
+                    { [action.key]: e.target.checked ? kept.concat([f.key]) : kept.filter((k) => k !== f.key) }) })} />
+                  {f.label}
+                </label>
+              );
+            })}
+          </div>
         </div>
       ) : null}
       <div style={{ display: "flex", alignItems: "center", gap: 9, marginTop: 6, flexWrap: "wrap" }}>

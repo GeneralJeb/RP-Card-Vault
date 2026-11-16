@@ -28,6 +28,7 @@ const { mod: V } = loadPureRegion([
   "AI_CRITIQUE_FACTS", "agentModelOf", "withAgentModel", "mdInline", "mdPlain", "flagGroupTitle",
   "FLAG_PRESETS", "FLAG_COLORS", "setCustomFlags", "sanitizeCustomFlags", "statusFlags", "aiCritiqueFormat", "aiCritiqueFlagKeys",
   "AI_CRITIQUE_FLAGS", "isRetiredDefault",
+  "aiKeepWholeFor", "aiPromptFields", "aiTrimGreetings",
 ]);
 
 const RELAY = { available: true, needsUpgrade: false, build: V.EXPECTED_RELAY_BUILD, baseUrl: "http://127.0.0.1:11434/v1", model: "m", hasKey: false };
@@ -414,6 +415,67 @@ console.log("\nyour own prompts");
   t.eq(V.sanitizeAiSettings({ customPrompts: [Object.assign({}, cp[0], { hint: "Rates " })] }).customPrompts[0].hint, "Rates ", "a space typed at the end survives");
   const described = { enabled: true, customPrompts: [Object.assign({}, cp[0], { hint: "Rates how the greeting sounds" })] };
   t.eq(V.aiBuildRequest("c:ab", described, REC, BODY, null, [], {}).hash, req.hash, "it isn't sent to the model, so answers stay current when you write one");
+}
+
+console.log("\nfields a prompt never cuts");
+{
+  const para = (w, n) => Array.from({ length: n }, (_, i) => w + " sentence " + i + " goes on for a while here.").join(" ");
+  const body = { name: "Mira", description: para("Description", 500), personality: para("Personality", 150), scenario: para("Scenario", 150), first_mes: para("Greeting", 400) };
+  const cfg = (extra) => V.sanitizeAiSettings(Object.assign({ enabled: true, baseUrl: "http://127.0.0.1:11434/v1", model: "m", contextChars: 30000 }, extra || {}));
+  const section = (user, label) => { const i = user.indexOf("## " + label + "\n"); const j = user.indexOf("\n## ", i + 3); return user.slice(i, j < 0 ? undefined : j); };
+
+  const plain = V.aiBuildRequest("summarise", cfg(), REC, body, null, []);
+  t.ok(plain.trimmed.some((x) => x.key === "description"), "over the budget, every field is cut to its share, the description too");
+  const kept = V.aiBuildRequest("summarise", cfg({ keepWhole: { summarise: ["description"] } }), REC, body, null, []);
+  t.ok(section(kept.user, "Description").indexOf(body.description) > 0 && !/not sent/.test(section(kept.user, "Description")),
+    "with Description ticked under Never cut it goes whole");
+  t.ok(!kept.trimmed.some((x) => x.key === "description") && kept.trimmed.some((x) => x.key === "first_mes"), "and the others are cut to fit around it");
+  const sent = kept.user.length - plain.user.length;
+  t.ok(Math.abs(sent) < 2000, "the card still comes to about the budget", sent);
+  t.ok(/never cut: description/.test(V.aiSentSummary(V.aiActionDef("summarise", cfg()), cfg({ keepWhole: { summarise: ["description"] } }), 30000)), "the AI tab says which fields are never cut");
+
+  const over = V.aiBuildRequest("summarise", cfg({ keepWhole: { summarise: ["description", "first_mes"] }, contextChars: 20000 }), REC, body, null, []);
+  t.ok(over.error && /^Description and First message are set never to be cut for this prompt, and together they come to [\d,]+ characters on this card, over the 20,000/.test(over.error) &&
+    /Nothing was sent/.test(over.error) && /the context budget/.test(over.error), "when the fields never to cut don't fit by themselves, nothing is sent, and it says why", over.error);
+  const small = V.aiBuildRequest("summarise", cfg({ keepWhole: { summarise: ["description"] }, contextTokens: 4096, maxTokens: 1024 }), REC, body, null, []);
+  t.ok(small.error && /it comes to/.test(small.error) && /model's context/.test(small.error), "and when it's the model's context that's short, it says that");
+
+  const s = cfg({ keepWhole: { summarise: ["description", "bogus", "description"], polish: ["description"], "c:gone": ["description"], impression: [] } });
+  t.eq(s.keepWhole, { summarise: ["description"] }, "only real fields of prompts that exist are kept; Tighten always sends its field whole");
+  t.eq(V.aiKeepWholeFor(cfg({ keepWhole: { summarise: ["mes_example"] } }), "summarise"), [], "a field the prompt doesn't read isn't counted");
+  t.eq(V.aiPromptFields(V.aiActionDef("summarise", cfg({ includeExamples: true })), cfg({ includeExamples: true })).map((f) => f.key),
+    ["description", "personality", "scenario", "first_mes", "mes_example"], "Never cut offers the fields each prompt reads");
+}
+
+console.log("\nyour own prompts can read the alternate greetings");
+{
+  const greet = ["*She waves.* Back so soon?", "*The tavern is empty.* Closing time, {{user}}."];
+  const cp = (p) => ({ enabled: true, customPrompts: [Object.assign({ id: "g", label: "Greetings", template: "Rate the greetings.", allFields: false, fields: [] }, p)] });
+  const body = Object.assign({}, BODY, { alternate_greetings: greet });
+  t.ok(/reads no fields/.test(V.aiBuildRequest("c:g", cp({}), REC, body, null, [], {}).error), "a prompt that reads nothing is still refused");
+  const r = V.aiBuildRequest("c:g", cp({ greetings: true }), REC, body, null, [], {});
+  t.ok(!r.error && /## Alternate greetings\n### Greeting 1\n\*She waves\.\* Back so soon\?\n\n### Greeting 2\n/.test(r.user), "one that reads only the greetings sends them, each numbered", r.error || "");
+  t.ok(!/not included\)\n.*alternate greeting/.test(r.user), "and doesn't list them as left out");
+  const all = V.aiBuildRequest("c:g", cp({ allFields: true }), REC, body, null, [], {});
+  t.ok(!/## Alternate greetings/.test(all.user) && /2 alternate greetings/.test(all.user), "All fields alone still leaves them out, and counts them");
+  const edited = V.aiBuildRequest("c:g", cp({ greetings: true }), REC, body, { fingerprint: "fp", greetings: ["An edited greeting, only in the vault."] }, [], {});
+  t.ok(/An edited greeting, only in the vault\./.test(edited.user) && !/Back so soon/.test(edited.user), "the vault's edits to the greetings are what's sent");
+  t.eq(V.aiActionDef("c:g", cp({ greetings: true, fields: ["first_mes"] })).hint, "Your own prompt, reading First Message, Alternate greetings.", "the prompt's description says it reads them");
+  t.eq(V.aiActionDef("c:g", cp({ greetings: true, allFields: true })).hint, "Your own prompt, reading every field and the alternate greetings.", "with All fields too");
+  t.ok(/alternate greetings/.test(V.aiSentSummary(V.aiActionDef("c:g", cp({ greetings: true })), cp({ greetings: true }), 24000)), "and so does the AI tab");
+  t.eq(V.sanitizeAiSettings(cp({})).customPrompts[0].greetings, false, "prompts made before don't read them");
+
+  const long = Array.from({ length: 6 }, (_, i) => "Greeting " + i + " " + "word ".repeat(300));
+  const cut = V.aiTrimGreetings(long, 4000);
+  t.ok(/### Greeting 2\n/.test(cut.text) && !/### Greeting 3\n/.test(cut.text) && /\[… 4 more alternate greetings not sent …\]$/.test(cut.text),
+    "too many to fit: whole greetings are left off the end, and the model is told how many");
+  t.ok(!/more characters/.test(cut.text), "rather than one being cut mid-sentence");
+  const one = V.aiTrimGreetings(["word ".repeat(2000)], 1000);
+  t.ok(/more characters of this field not sent/.test(one.text) && one.sent < 1100, "a single greeting longer than the room is cut like any field");
+  const keep = V.aiBuildRequest("c:g", Object.assign(cp({ greetings: true, fields: ["description"] }), { contextChars: 6000, keepWhole: { "c:g": ["alternate_greetings"] } }), REC,
+    Object.assign({}, body, { description: "about her ".repeat(2000), alternate_greetings: long.slice(0, 2) }), null, [], {});
+  t.ok(!keep.error && keep.trimmed.map((x) => x.key).join() === "description" && /### Greeting 1\n/.test(keep.user) && !/alternate greetings? not sent/.test(keep.user),
+    "with the greetings never cut, they go whole and the description is cut instead", keep.error || keep.trimmed);
 }
 
 console.log("\nflags the agent says are dealt with");
