@@ -1291,7 +1291,7 @@ async function stage2() {
       t.ok(r.ok, n + " works");
       t.eq(JSON.stringify(Object.assign({}, k.vault.edits.fpb, { aiProposal: undefined })), before, n + " touched nothing but Proposed changes");
     }
-    const allowed = ["records", "body", "edit", "notes", "aiSettings", "relayModel", "knownTags", "scanBodies", "propose", "applyVaultTags", "applyLorebook", "applyTags",
+    const allowed = ["records", "body", "edit", "notes", "aiSettings", "relayModel", "agentModel", "knownTags", "scanBodies", "propose", "applyVaultTags", "applyLorebook", "applyTags",
       "roots", "createCard", "copyCard", "moveCard"];
     t.eq([...used].filter((p) => allowed.indexOf(p) < 0), [], "the tools only use the vault's read methods and propose");
     const src = require("fs").readFileSync(require("path").join(__dirname, "..", "RP_Card_Vault.html"), "utf8");

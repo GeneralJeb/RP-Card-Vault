@@ -74,8 +74,8 @@ const { execFileSync, spawn } = require("child_process");
  * copy from twenty minutes ago — with no way to tell from the browser. Asking
  * "which serve.js is actually answering?" should not require guesswork.
  */
-const RELAY_BUILD = 10;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*)
-const VAULT_VERSION = "1.8.1";      // the release; the page and package.json carry the same
+const RELAY_BUILD = 11;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*); 11: a chat request may name its model
+const VAULT_VERSION = "1.8.2";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;
@@ -396,7 +396,9 @@ async function destSend(id, name, buf) {
      GET  ai/config   saved address and model; whether a key is held
      POST ai/config   { baseUrl?, model?, apiKey? }   apiKey "" forgets it
      POST ai/test     checks the saved connection; takes no parameters
-     POST ai/chat     { messages, maxTokens?, temperature?, timeoutMs? }
+     POST ai/chat     { messages, maxTokens?, temperature?, timeoutMs?, model? }
+                      model: another model at the same address (the agent chat
+                      can have its own); missing or blank means the saved one
                       replies with NDJSON, one event per line:
                         {t:"text",v}  {t:"think",v}  {t:"done",...}  {t:"error",message}
 
@@ -437,6 +439,17 @@ function isOpenRouter(base) {
 }
 
 const AI_UA = "RP-Card-Vault/2 (local relay)";
+
+/**
+ * A model name from a chat request: the agent chat can use a model of its
+ * own at the saved address. Only the name changes; the address and key are
+ * always the saved ones. "" (use the saved model) for anything else.
+ */
+function cleanModelName(v) {
+  if (typeof v !== "string") return "";
+  const m = v.trim();
+  return m.length <= 200 && !/[\u0000-\u001f\u007f]/.test(m) ? m : "";
+}
 
 function numIn(v, spec) {
   const n = Number(v);
@@ -871,7 +884,7 @@ async function aiChat(req, res, body) {
   const tools = cleanTools(body.tools);
   const timeoutMs = numIn(body.timeoutMs, AI_LIMITS.timeoutMs);
   const payload = {
-    model: ai.model,
+    model: cleanModelName(body.model) || ai.model,
     messages,
     temperature: numIn(body.temperature, AI_LIMITS.temperature),
     max_tokens: Math.round(numIn(body.maxTokens, AI_LIMITS.maxTokens)),
@@ -1681,7 +1694,7 @@ if (require.main !== module) {
     readChoice, sseParser, addToolPiece, toolCallIds, vaultGuard, numIn, AI_LIMITS, AI_UA, isLoopbackUrl, isOpenRouter,
     cleanMessages, cleanTools, saysToolsUnsupported, saysImagesUnsupported, WS_STARTER, cookiesOf, mergeCookies,
     RELAY_BUILD, VAULT_VERSION, NODE_MIN, nodeTooOld, STATIC_FILES, errorText,
-    browserCommands, macDefaultBrowser, isChromiumDesktopEntry, wsExt,
+    browserCommands, macDefaultBrowser, isChromiumDesktopEntry, wsExt, cleanModelName,
   };
   return;
 }
