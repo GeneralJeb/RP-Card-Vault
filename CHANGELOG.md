@@ -8,6 +8,15 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.5
+
+- **New: put another file in a card's place.** Bringing a card back from your front end after editing it there meant deleting the card and adding the new file, and it came back as a new card with a new id. A card's **History** tab now has **Replace with another file**: choose a card file, or drop one on it, and you see what would change, side by side, before anything is written. **Replace the card's file** then writes it over the card's own file:
+  - The card keeps its file name, its folder and its id, so its notes, tags, flags and the agent's pin stay with it.
+  - The file as it was goes into the card's backups first, so **Restore** brings it back.
+  - What was written is read back and checked byte for byte. If it doesn't match, the file is put back as it was.
+  - A file of the same kind goes in as it is, picture and all. A JSON card brings its text into a PNG card, which keeps its own picture. A PNG or CHARX for a card of the other kind is converted into the card's kind.
+  - Changes waiting for Save to card stay waiting, on top of the new text. Nothing is written into a Reference folder.
+
 ## 1.8.4
 
 - **New: choose what a prompt never cuts.** When a card is over the context budget, each field a prompt reads was cut to a fixed share of it. A prompt about the first message could get half of it, and you were told what was cut but couldn't change it. Each prompt now has **Never cut** in the ✦ AI panel, under Prompts. The fields you tick there go whole, and the others are cut to fit around them. This covers the built-in prompts and your own, except Tighten, which always sends its field whole. If the ticked fields alone are over the budget, nothing is sent, and the card's ✦ AI tab says how big they are and what to change. Nothing changes until you tick something, so saved answers stay current.

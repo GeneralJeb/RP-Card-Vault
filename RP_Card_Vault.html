@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.4";
+const APP_VERSION = "1.8.5";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -4599,44 +4599,99 @@ async function readCardBackup(rec, root, name) {
   return { bytes, parsed: await parseCardBytes(bytes, rec.file) };
 }
 
+/** Why a card's file can't be written over, or "" when it can. */
+function cardFileWriteError(rec, root) {
+  if (!root) return "Folder for this card is no longer registered";
+  if (isImportRoot(root)) return "Imported folders are read-only";
+  return referenceFolderError(root, rec.dir) || "";
+}
+
+/** The card's file as it is now. */
+async function readCardFileNow(rec, root) {
+  const dirs = rec.dir ? rec.dir.split("/") : [];
+  const fh = await (await getDirByPath(root.handle, dirs, false)).getFileHandle(rec.file, { create: false });
+  return new Uint8Array(await (await fh.getFile()).arrayBuffer());
+}
+
 /**
- * Put a backup back as the card's file. The file as it is now is backed up
- * first (so going back can itself be undone), the backup must read as a card,
- * and what was written is read back and compared, byte for byte; if it isn't
- * what the backup holds, the file is put back as it was.
+ * Write `bytes` as the card's file, in its place, under its own name. The
+ * file as it is now is backed up first (so this can itself be undone), and
+ * what was written is read back and compared, byte for byte; if it isn't
+ * what was meant, the file is put back as it was. { same, backupPath, sig }.
  */
-async function restoreCardBackup(rec, root, name, opts) {
+async function replaceCardFileBytes(rec, root, bytes, opts) {
   opts = opts || {};
-  if (!root) throw new Error("Folder for this card is no longer registered");
-  if (isImportRoot(root)) throw new Error("Imported folders are read-only");
-  const ref = referenceFolderError(root, rec.dir);
-  if (ref) throw new Error(ref);
+  const why = cardFileWriteError(rec, root);
+  if (why) throw new Error(why);
   if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
-  const backup = await readCardBackup(rec, root, name);
-  if (!backup.parsed || !backup.parsed.ok) throw new Error("That backup can't be read as a card" + (backup.parsed && backup.parsed.err ? " (" + backup.parsed.err + ")" : "") + ", so it wasn't put back");
   const dirs = rec.dir ? rec.dir.split("/") : [];
   const fh = await (await getDirByPath(root.handle, dirs, false)).getFileHandle(rec.file, { create: false });
   const current = new Uint8Array(await (await fh.getFile()).arrayBuffer());
-  if (sameBytes(current, backup.bytes)) return { same: true, data: backup.parsed.data, backupPath: "" };
+  if (sameBytes(current, bytes)) return { same: true, backupPath: "" };
   let backupPath = "";
   if (opts.backup !== false) {
     const bName = baseName(rec.file) + " " + stampNow() + (rec.ext ? "." + rec.ext : "");
     const res = await copyIntoRoot(root, [BACKUP_FOLDER_NAME].concat(dirs), bName, new Blob([current]), "");
     backupPath = [root.name, BACKUP_FOLDER_NAME].concat(dirs, [res.name]).join("/");
   }
-  const write = async (bytes) => { const w = await fh.createWritable(); await w.write(new Blob([bytes])); await w.close(); };
-  try { await write(backup.bytes); }
+  const write = async (b) => { const w = await fh.createWritable(); await w.write(new Blob([b])); await w.close(); };
+  try { await write(bytes); }
   catch (e) { try { await write(current); } catch (e2) { /* the copy just made is the way back */ } throw new Error("Couldn't write the file: " + e.message); }
   const back = new Uint8Array(await (await fh.getFile()).arrayBuffer());
-  if (!sameBytes(back, backup.bytes)) {
+  if (!sameBytes(back, bytes)) {
     let ok = true;
     try { await write(current); } catch (e) { ok = false; }
-    throw new Error("The file read back isn't what the backup holds. " + (ok ? "It has been put back as it was." : backupPath ? "Recover it from " + backupPath + "." : "It could not be put back."));
+    throw new Error("The file read back isn't what was written. " + (ok ? "It has been put back as it was." : backupPath ? "Recover it from " + backupPath + "." : "It could not be put back."));
   }
-  await logOp("restoreBackup", { card: rec.name, path: root.name + "/" + rec.rel, from: name, backup: backupPath || "(none)" });
+  await logOp(opts.op || "replaceCard", { card: rec.name, path: root.name + "/" + rec.rel, from: opts.from || "", backup: backupPath || "(none)" });
   let sig = "";
   try { sig = await byteSignature(await fh.getFile()); } catch (e) { sig = ""; }
-  return { same: false, data: backup.parsed.data, backupPath, sig };
+  return { same: false, backupPath, sig };
+}
+
+/**
+ * Put a backup back as the card's file (replaceCardFileBytes, which backs up
+ * the file as it is now first). The backup must read as a card.
+ */
+async function restoreCardBackup(rec, root, name, opts) {
+  opts = opts || {};
+  const why = cardFileWriteError(rec, root);
+  if (why) throw new Error(why);
+  if (!(await verifyPermission(root.handle, true))) throw new Error("Write permission denied for " + root.name);
+  const backup = await readCardBackup(rec, root, name);
+  if (!backup.parsed || !backup.parsed.ok) throw new Error("That backup can't be read as a card" + (backup.parsed && backup.parsed.err ? " (" + backup.parsed.err + ")" : "") + ", so it wasn't put back");
+  const res = await replaceCardFileBytes(rec, root, backup.bytes, { backup: opts.backup, op: "restoreBackup", from: name });
+  return Object.assign(res, { data: backup.parsed.data });
+}
+
+/**
+ * What putting another card file (`inBytes`, named `inName`) in place of a
+ * card's file writes: { bytes, parsed, how, left }. The card keeps its file's
+ * name and format, so its place, short id and notes stay. A file of the same
+ * format goes in as it is, picture and all ("as-is"). A JSON card brings its
+ * text into the current file, which keeps its picture ("text"). A PNG or
+ * CHARX of the other format is converted, bringing its picture where the
+ * format holds one ("converted"; `left` counts the files it can't).
+ */
+async function cardReplacementBytes(currentBytes, currentName, inBytes, inName) {
+  let parsedIn = null;
+  try { parsedIn = await parseCardBytes(inBytes, inName); } catch (e) { parsedIn = { ok: false, err: e.message }; }
+  if (!parsedIn || !parsedIn.ok) throw new Error(inName + " can't be read as a card" + (parsedIn && parsedIn.err ? " (" + parsedIn.err + ")" : "") + ", so nothing was changed.");
+  const to = cardFormatOf(currentName), from = cardFormatOf(inName);
+  if (from === to && (to !== "png" || isPng(inBytes))) return { bytes: inBytes, parsed: parsedIn, how: "as-is", left: 0 };
+  const v3 = buildV3Payload(parsedIn.data, null, rawCharacterBook(parsedIn.raw), parsedIn.raw);
+  let out;
+  if (from === "json") {
+    if (to === "png" && !isPng(currentBytes)) throw new Error("This card's file isn't a PNG the vault can write into, so a JSON card can't be put in it. Nothing was changed.");
+    out = await writeCardFile(currentBytes, currentName, v3);
+    out.how = "text";
+  } else {
+    out = await writeCardFile(inBytes, inName, v3, to);
+    out.how = "converted";
+  }
+  const parsed = await parseCardBytes(out.bytes, currentName);
+  if (!parsed || !parsed.ok) throw new Error("The card from " + inName + " couldn't be written as a " + CARD_FORMATS[to].label + " file, so nothing was changed.");
+  return { bytes: out.bytes, parsed, how: out.how, left: out.left || 0 };
 }
 
 /* ── automatic backups of vault data ──────────────────────────────────────
@@ -13032,6 +13087,10 @@ function CardHistory({ rec, body, history, locked }) {
   const [err, setErr] = useState("");
   const [open, setOpen] = useState(null);        // { name, changes } | { name, error }
   const [busy, setBusy] = useState("");
+  const [prep, setPrep] = useState(null);        // another file, ready to go in the card's place
+  const [replErr, setReplErr] = useState("");
+  const [dropOver, setDropOver] = useState(false);
+  const pickRef = useRef(null);
   const changed = rec.changedOutside;
   const changedAt = changed ? changed.at : 0;
 
@@ -13041,6 +13100,24 @@ function CardHistory({ rec, body, history, locked }) {
     if (changedAt) history.prev().then((b) => { if (live) setWas(b || null); }, () => { if (live) setWas(null); });
     return () => { live = false; };
   }, [rec.id, changedAt]);
+
+  useEffect(() => { setPrep(null); setReplErr(""); }, [rec.id]);
+
+  /** A file chosen or dropped: read it, and show what putting it in the card's place would change. */
+  const choose = async (file) => {
+    if (!file || locked) return;
+    setReplErr(""); setPrep(null); setBusy("replace");
+    try { setPrep(await history.prepare(file)); }
+    catch (e) { setReplErr((e && e.message) || String(e)); }
+    setBusy("");
+  };
+  const doReplace = async () => {
+    setBusy("replace");
+    const ok = await history.replace(prep);
+    setBusy("");
+    if (ok) setPrep(null);
+  };
+  const isFileDrag = (e) => Array.from((e.dataTransfer && e.dataTransfer.types) || []).indexOf("Files") >= 0;
 
   useEffect(() => {
     let live = true;
@@ -13084,13 +13161,64 @@ function CardHistory({ rec, body, history, locked }) {
         </div>
       ) : null}
 
-      <label style={tinyLabel}>Backups from Save to card</label>
+      <label style={tinyLabel}>Replace with another file</label>
+      <div className="card-replace"
+        onDragOver={(e) => { if (isFileDrag(e) && !locked) { e.preventDefault(); e.stopPropagation(); setDropOver(true); } }}
+        onDragLeave={() => setDropOver(false)}
+        onDrop={(e) => { if (isFileDrag(e) && !locked) { e.preventDefault(); e.stopPropagation(); setDropOver(false); choose(e.dataTransfer.files[0]); } }}
+        style={{ padding: 10, marginBottom: 16, borderRadius: "var(--radius-sm)",
+          border: "1px dashed " + (dropOver ? "var(--accent-cyan)" : "var(--border-subtle)"), background: dropOver ? acRgba("cyan", 0.06) : "transparent" }}>
+        {!prep ? (
+          <Fragment>
+            <div style={Object.assign({}, note, { marginBottom: 8 })}>
+              Put a newer copy of this card in its place, such as one you edited in your front end. The card keeps its file name,
+              its folder and its id, so its notes, tags and the agent's pin stay with it. You see what changes before anything is written.
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <SmallBtn color="cyan" disabled={!!locked || busy === "replace"} onClick={() => pickRef.current && pickRef.current.click()}
+                title={locked ? "This card's file can't be changed here (an imported or Reference folder)" : "Pick the card file to put in this one's place"}>
+                {busy === "replace" ? "Reading…" : "Choose a file…"}
+              </SmallBtn>
+              {locked ? null : <span style={note}>or drop one here</span>}
+              <input ref={pickRef} type="file" accept=".png,.apng,.json,.charx" style={{ display: "none" }}
+                onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; choose(f); }} />
+            </div>
+          </Fragment>
+        ) : (
+          <Fragment>
+            <div style={{ fontSize: 11.5, lineHeight: 1.6, color: "var(--text-secondary)", marginBottom: 8 }}>
+              <strong>{prep.fileName}</strong>{" "}
+              {prep.how === "as-is" ? "goes in as it is, picture and all."
+                : prep.how === "text" ? "is a JSON card: its text goes into this card's file, which keeps its picture."
+                : "is written as this card's " + CARD_FORMATS[cardFormatOf(rec.file)].label + " file" +
+                  (prep.left ? ", leaving out " + prep.left + " file" + (prep.left === 1 ? "" : "s") + " a " + CARD_FORMATS[cardFormatOf(rec.file)].label + " can't hold" : ", with its picture where the format holds one") + "."}
+            </div>
+            {(() => {
+              const changes = cardChanges(body, prep.parsed.data);
+              return changes.length ? diffs(changes, ["Now", "From " + prep.fileName])
+                : <div style={Object.assign({}, note, { marginBottom: 8 })}>Its card reads the same as this one does now. The file itself may still differ (its picture, say).</div>;
+            })()}
+            <div style={Object.assign({}, note, { marginBottom: 8 })}>
+              {history.keepsBackup ? "The file as it is now is copied to " + BACKUP_FOLDER_NAME + "/ first, so this can be undone from the list below."
+                : "Backups are off in Settings, so the file as it is now will be gone."}
+              {history.pending() ? " This card has " + history.pending() + " change(s) waiting for Save to card. They stay waiting, on top of the new text." : ""}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <SmallBtn color="warm" disabled={busy === "replace"} onClick={doReplace}>{busy === "replace" ? "Replacing…" : "Replace the card's file"}</SmallBtn>
+              <SmallBtn color="muted" disabled={busy === "replace"} onClick={() => setPrep(null)}>Cancel</SmallBtn>
+            </div>
+          </Fragment>
+        )}
+        {replErr ? <div style={Object.assign({}, note, { color: "var(--accent-red)", marginTop: 6 })}>{replErr}</div> : null}
+      </div>
+
+      <label style={tinyLabel}>Backups of this card's file</label>
       {backups === null ? <div style={note}>Looking in {BACKUP_FOLDER_NAME}…</div> : null}
       {err ? <div style={Object.assign({}, note, { color: "var(--accent-red)" })}>{err}</div> : null}
       {backups && !backups.length && !err ? (
         <div style={note}>
-          None yet. Each Save to card keeps a copy of the file as it was in {BACKUP_FOLDER_NAME}, in this card's folder
-          (unless backups are turned off in Settings), and they are listed here.
+          None yet. Each Save to card, and each replace above, keeps a copy of the file as it was in {BACKUP_FOLDER_NAME}, in this
+          card's folder (unless backups are turned off in Settings), and they are listed here.
         </div>
       ) : null}
       {(backups || []).map((b) => (
@@ -17776,6 +17904,33 @@ function App() {
     }
   }, [roots, settings.backupBeforeSave, showToast]);
 
+  /** Another card file, made ready to go in place of this card's: what would be written, and the card in it. */
+  const prepareReplace = useCallback(async (rec, file) => {
+    const root = roots.find((r) => r.id === rec.rootId);
+    const why = cardFileWriteError(rec, root);
+    if (why) throw new Error(why);
+    if (!(await verifyPermission(root.handle, false))) throw new Error("Permission denied for " + root.name + ". Rescan it to grant access again.");
+    const current = await readCardFileNow(rec, root);
+    const inBytes = new Uint8Array(await file.arrayBuffer());
+    return Object.assign(await cardReplacementBytes(current, rec.file, inBytes, file.name), { fileName: file.name });
+  }, [roots]);
+
+  /** Write a prepared file in place of the card's: backed up first, read back and checked. True once done. */
+  const replaceCard = useCallback(async (rec, prep) => {
+    const root = roots.find((r) => r.id === rec.rootId);
+    try {
+      const res = await replaceCardFileBytes(rec, root, prep.bytes, { backup: settings.backupBeforeSave !== false, op: "replaceCard", from: prep.fileName });
+      if (res.same) { showToast("That file is the same as the card's file now: nothing to replace", "warm"); return false; }
+      ownWritesRef.current.add(rec.id);
+      showToast("Replaced " + rec.file + " with " + prep.fileName + (res.backupPath ? " · the file as it was is in " + BACKUP_FOLDER_NAME + "/" : ""), "green");
+      runScanRef.current(rec.rootId, false, { quiet: true });
+      return true;
+    } catch (e) {
+      showToast("Couldn't replace the card's file: " + e.message, "red");
+      return false;
+    }
+  }, [roots, settings.backupBeforeSave, showToast]);
+
   /** Stop marking a card as changed outside the vault, and forget its earlier text. */
   const dismissChanged = useCallback(async (rec) => {
     const strip = (c) => { const x = Object.assign({}, c); delete x.changedOutside; return x; };
@@ -17794,8 +17949,12 @@ function App() {
       read: async (name) => { const b = await readCardBackup(rec, root, name); return b.parsed && b.parsed.ok ? b.parsed.data : null; },
       restore: (name) => restoreBackup(rec, name),
       dismiss: () => dismissChanged(rec),
+      prepare: (file) => prepareReplace(rec, file),
+      replace: (prep) => replaceCard(rec, prep),
+      keepsBackup: settings.backupBeforeSave !== false,
+      pending: () => pendingEditCount(editsRef.current.get(rec.fp)),
     };
-  }, [roots, restoreBackup, dismissChanged]);
+  }, [roots, restoreBackup, dismissChanged, prepareReplace, replaceCard, settings.backupBeforeSave]);
 
   const saveToCard = useCallback(async (rec) => {
     const edit = editsMap.get(rec.fp);

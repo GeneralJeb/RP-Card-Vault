@@ -1085,6 +1085,42 @@ async function main() {
       await page.getByRole("button", { name: /Saved/ }).first().waitFor();
     });
 
+    await step("another file is put in a card's place, and the card stays the same card", async () => {
+      await tile("Ada Clockmaker").click();
+      const before = Buffer.from(await readFile(page, "Cards", "Ada Clockmaker.png"));
+      const was = await V.parseCardBytes(before, "Ada Clockmaker.png");
+      const backups = async () => Object.keys(await listFiles(page, "Cards")).filter((f) => /^_vault backups\/Ada Clockmaker /.test(f)).length;
+      const backupsBefore = await backups();
+      const newer = cardPng({ name: "Ada Clockmaker", description: "Edited in the front end.", first_mes: was.data.first_mes }, [10, 120, 200]);
+      const choose = (buffer, name) => page.locator(".card-replace input[type=file]").setInputFiles({ name, mimeType: "image/png", buffer });
+
+      await page.getByText("History", { exact: true }).click();
+      await choose(newer, "Ada Clockmaker (from the front end).png");
+      await page.getByRole("button", { name: "Replace the card's file" }).waitFor();
+      const panel = await page.locator(".card-replace").innerText();
+      t.ok(/goes in as it is, picture and all/.test(panel) && /Edited in the front end\./.test(panel) && /repairs time itself/.test(panel),
+        "choosing a file shows what would change", panel.slice(0, 300));
+      t.ok(Buffer.from(await readFile(page, "Cards", "Ada Clockmaker.png")).equals(before), "and nothing is written until you say so");
+
+      await page.getByRole("button", { name: "Replace the card's file" }).click();
+      await toast(/^Replaced Ada Clockmaker\.png with Ada Clockmaker \(from the front end\)\.png/);
+      t.ok(Buffer.from(await readFile(page, "Cards", "Ada Clockmaker.png")).equals(newer), "the new file is the card's file now, under the card's own name");
+      const files = Object.keys(await listFiles(page, "Cards"));
+      t.ok(!files.some((f) => /from the front end/.test(f)) && (await backups()) === backupsBefore + 1, "nothing is added beside it, and the file as it was joins the card's backups", files);
+      await page.waitForTimeout(1500);
+      t.eq(await page.locator(".cardTile").filter({ hasText: "Ada Clockmaker" }).count(), 1, "it's still the one card, not a second one beside it");
+      await page.getByText("Fields", { exact: true }).click();
+      t.eq(await page.locator("xpath=//label[normalize-space()='Description']/following::textarea[1]").inputValue(), "Edited in the front end.", "and the card shows its new text");
+
+      // Put the card back as it was, the same way, for the steps after this one.
+      await page.getByText("History", { exact: true }).click();
+      await choose(before, "Ada Clockmaker.png");
+      await page.getByRole("button", { name: "Replace the card's file" }).click();
+      await toast(/^Replaced Ada Clockmaker\.png with Ada Clockmaker\.png/);
+      await page.waitForTimeout(1500);
+      t.ok(Buffer.from(await readFile(page, "Cards", "Ada Clockmaker.png")).equals(before), "replacing it again with the old file puts it back exactly");
+    });
+
     await step("Back up now writes another vault-data backup", async () => {
       await page.getByRole("button", { name: "⚙" }).first().click();
       await page.getByRole("button", { name: "Back up now" }).click();
