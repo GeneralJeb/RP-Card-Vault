@@ -1,15 +1,18 @@
 # Maintenance log
 
-This branch holds the notes of a daily maintenance run on RP Card Vault and nothing else. It is never merged into `dev` or `main`, so the code itself stays free of it.
+This branch holds the notes of a daily maintenance run on RP Card Vault, and of a feature panel that meets every five days, and nothing else. It is never merged into `dev` or `main`, so the code itself stays free of it.
 
 ## What a run does, in order
 
 1. **Its own open pull requests.** A fix or feature pull request from an earlier run that now has a merge conflict or a failing check is put right first.
-2. **GitHub issues.** Open issues are reproduced on `dev`. A real bug gets a fix in a pull request into `dev`; a feature request waits for the next debate; nothing is ever posted on the issue.
+2. **GitHub issues.** Open issues are reproduced on `dev`. A real bug gets a fix in a pull request into `dev`; a feature request waits for the next panel; nothing is ever posted on the issue.
 3. **Today's section.** One section of the code from [sections.md](sections.md), in turn, read in full and checked for real bugs. When the last section is done, the next run starts again at the first.
 4. **The log.** What was read and found goes at the top of [log.md](log.md), and [state.json](state.json) moves on.
-5. **Approved proposals.** A ticked box on a "Feature proposals" issue is the owner's go-ahead, and a later run builds it, at most one each run.
-6. **Every fifth run, a debate.** The personas in [personas.md](personas.md) propose and argue over new features. The result is written to `debates/` and opened as one "Feature proposals — round N" issue with a box per proposal. Nothing on it is built unless the owner ticks it.
+5. **Approved proposals.** A ticked box on one of the panel's proposal issues is the owner's go-ahead, and a later run builds it, at most one each run.
+
+## The feature panel
+
+A separate scheduled task, every five days. A panel of personas proposes and argues over new features, and the result is opened as one "Feature proposals — round N" issue with a box per proposal. Nothing on it is built unless the owner ticks it. The panel keeps its personas, and its record of each debate, in its own private session rather than here. On this branch it only records its issue's number in `state.json`.
 
 ## The rules that don't bend
 
@@ -23,10 +26,9 @@ This branch holds the notes of a daily maintenance run on RP Card Vault and noth
 ## state.json
 
 - `nextSection`: the number in sections.md that the next run checks.
-- `runsSinceDebate`: counts up to 5, then a debate is held and it goes back to 0.
-- `debateRound`: the number of the last debate.
-- `proposalIssues`: the proposal issues the run has opened, as `{ round, number }`. Only these are read for the owner's ticks, and these are the issues the bug check skips.
+- `debateRound`: the number of the last feature panel.
+- `proposalIssues`: the proposal issues the panel has opened, as `{ round, number }`. Only these are read for the owner's ticks, and these are the issues the bug check skips.
 - `lastRun`: the date of the last run.
 - `queued`: real bugs found but not fixed yet (a run fixes at most two). The next run re-checks and fixes these before its section.
-- `requests`: feature requests from issues, for the next debate.
+- `requests`: feature requests from issues, for the next panel.
 - `built`: approved proposals that have been built, with their pull request.
