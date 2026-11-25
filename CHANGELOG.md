@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.6
+
+- **A .charx card keeps its picture when a JSON card is put in its place.** **Replace with another file** said that a JSON card's text goes into the card's file, which keeps its picture. For a .charx card it didn't: the card's picture is a file inside the .charx that its card text names, and the JSON card's text, from a front end's export say, named nothing there. The picture was still in the file, but the vault no longer found it, so the card showed none. Now the .charx's own list of its pictures and files stays, and anything the JSON card names on the web is added after it.
+
 ## 1.8.5
 
 - **New: put another file in a card's place.** Bringing a card back from your front end after editing it there meant deleting the card and adding the new file, and it came back as a new card with a new id. A card's **History** tab now has **Replace with another file**: choose a card file, or drop one on it, and you see what would change, side by side, before anything is written. **Replace the card's file** then writes it over the card's own file:
