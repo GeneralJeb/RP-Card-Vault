@@ -567,6 +567,28 @@ async function main() {
     r = await V.cardReplacementBytes(current, "ada.png", jsonOf(card({ description: "From a JSON." })), "ada.json");
     t.ok(r.how === "text" && r.parsed.data.description === "From a JSON." && hex(V.pngWithoutCard(r.bytes)) === hex(V.pngWithoutCard(current)),
       "a JSON card brings its text into the PNG, which keeps its own picture");
+    {
+      // A .charx's picture is a file its card names in its asset list. A JSON
+      // card from a front end names none, or names its own (ccdefault:, a web
+      // address), so the file's own list has to stay, or the picture is lost.
+      global.JSZip = global.JSZip || require("../lib/jszip.min.js");
+      const icon = "embeded://assets/icon/images/main.png";
+      const z = new JSZip();
+      z.file("assets/icon/images/main.png", pic([0, 160, 0]));
+      z.file("card.json", JSON.stringify(Object.assign(card(), { data: Object.assign(card().data, { assets: [{ type: "icon", uri: icon, name: "main", ext: "png" }] }) })));
+      const charx = await z.generateAsync({ type: "uint8array" });
+      const picturesOf = async (b) => (await V.cardPictures(b, "ada.charx")).pictures.map((p) => p.key).join();
+      t.eq(await picturesOf(charx), icon, "(the .charx starts with its picture)");
+      r = await V.cardReplacementBytes(charx, "ada.charx", jsonOf(card({ description: "From a JSON." })), "ada.json");
+      t.ok(r.how === "text" && r.parsed.data.description === "From a JSON." && (await picturesOf(r.bytes)) === icon,
+        "a JSON card with no asset list brings its text into a .charx, which keeps its own picture");
+      const web = { type: "emotion", uri: "https://example.com/happy.png", name: "happy", ext: "png" };
+      const listed = Object.assign(card({ description: "Listed." }), {});
+      listed.data.assets = [{ type: "icon", uri: "ccdefault:", name: "main", ext: "png" }, web];
+      r = await V.cardReplacementBytes(charx, "ada.charx", jsonOf(listed), "ada.json");
+      t.ok((await picturesOf(r.bytes)) === icon && JSON.stringify(r.parsed.raw.data.assets.map((a) => a.uri)) === JSON.stringify([icon, web.uri]),
+        "a JSON card's own list keeps the .charx's picture too, and adds what it names on the web");
+    }
     r = await V.cardReplacementBytes(jsonOf(card()), "ada.json", newer, "ada.png");
     t.ok(r.how === "converted" && r.left === 1 && JSON.parse(new TextDecoder().decode(r.bytes)).data.description === "A clockmaker who lost her hand.",
       "a PNG for a JSON card is written as JSON, saying its picture couldn't come along");
