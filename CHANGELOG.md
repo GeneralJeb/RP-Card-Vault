@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.7
+
+- **A cut-off card file says why it can't be read.** When a PNG card's file ended partway through, an unfinished download for example, and no card text had come before the cut, the card panel gave `__NEED_FULL__` as the reason: a marker meant for the vault itself. It now says the file is cut off partway through and no card data was found before the cut, so you know to download it again.
+
 ## 1.8.6
 
 - **A .charx card keeps its picture when a JSON card is put in its place.** **Replace with another file** said that a JSON card's text goes into the card's file, which keeps its picture. For a .charx card it didn't: the card's picture is a file inside the .charx that its card text names, and the JSON card's text, from a front end's export say, named nothing there. The picture was still in the file, but the vault no longer found it, so the card showed none. Now the .charx's own list of its pictures and files stays, and anything the JSON card names on the web is added after it.
