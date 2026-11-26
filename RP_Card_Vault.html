@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.6";
+const APP_VERSION = "1.8.7";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1818,7 +1818,12 @@ async function parseCardBytes(bytes, filename) {
   ].filter((c) => c.val);
 
   if (!candidates.length) {
-    return { ok: false, err: info.truncated ? "__NEED_FULL__" : "No embedded card data (no chara/ccv3 chunk)", noData: true };
+    // Shown as the reason a card can't be read. A scan that read only the start
+    // of a file reads the rest before it keeps this, so `truncated` here means
+    // the file itself ends partway through.
+    return { ok: false, err: info.truncated
+      ? "The file is cut off partway through (an unfinished download, say), and no card data was found before the cut"
+      : "No embedded card data (no chara/ccv3 chunk)", noData: true };
   }
 
   let best = null;

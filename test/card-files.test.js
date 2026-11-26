@@ -1277,6 +1277,25 @@ async function main() {
       "and keeps the group-only greetings and nickname");
   }
 
+  console.log("\na cut-off card file says so, in words");
+  {
+    // A download that stopped short: the picture's data runs past the end of
+    // the file, with no card text before the cut. The card panel shows the
+    // record's err as the reason, so it has to be words, not an internal marker.
+    const png = V.solidPng(40, 40, [5, 5, 5]);
+    const cut = png.subarray(0, png.length - 30);
+    const small = (await V.processCardFile({ id: "r1" }, { rel: "Cut.png", dir: "", file: "Cut.png", ext: "png" }, new File([cut], "Cut.png", { lastModified: 1 }))).rec;
+    t.ok(!small.ok && /cut off/.test(small.err) && !/__/.test(small.err), "a small cut-off PNG is unreadable, and its reason says it's cut off", small.err);
+    const big = new Uint8Array(V.SCAN_HEAD_BYTES + 100000);
+    big.set(png.subarray(0, 33));
+    new DataView(big.buffer).setUint32(33, big.length);   // an IDAT longer than the file
+    big.set([73, 68, 65, 84], 37);
+    const large = (await V.processCardFile({ id: "r1" }, { rel: "Cut2.png", dir: "", file: "Cut2.png", ext: "png" }, new File([big], "Cut2.png", { lastModified: 1 }))).rec;
+    t.ok(!large.ok && /cut off/.test(large.err) && !/__/.test(large.err), "so does one bigger than the scan's first read", large.err);
+    const whole = (await V.processCardFile({ id: "r1" }, { rel: "Pic.png", dir: "", file: "Pic.png", ext: "png" }, new File([png], "Pic.png", { lastModified: 1 }))).rec;
+    t.ok(/No embedded card data/.test(whole.err), "a whole picture with no card still says it has no card data");
+  }
+
   console.log("\nbackups made by Save to card are never indexed");
   {
     // A folder tree of fake handles, the shape listCardFiles walks.
