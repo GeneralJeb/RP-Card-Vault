@@ -2,6 +2,24 @@
 
 Newest first. Each run adds one entry: the date, the section checked, GitHub issues seen, what was found (confirmed bugs with their pull requests; suspicions that couldn't be reproduced, and why; or nothing), what was queued, and any proposals round opened.
 
+## 2026-11-26 — section 2, Scanning and the index
+
+**Read:** `2. INDEXEDDB LAYER`, all of it (`dbOpen`, `dbPutMany`, `dbDelCardRecords`, `dbHas`, `probeReads`), and `7. FILE SYSTEM ACCESS + SCAN ENGINE`, all of it (`listCardFiles`, `processCardFile`, `pngIsAnimated`, `reusableRecord`, `scanRoot`, `scanImportRoot`). Also `assignShortIds`, and the code in `App` that applies a scan's results: short ids, changed-outside marks, fingerprints followed. On `dev` at 1.8.6 (#93 merged).
+
+**Issues:** none open. **Own pull requests:** none open at the start.
+
+**Findings:**
+- **Confirmed: a cut-off PNG gave `__NEED_FULL__` as its reason.** A PNG that ends partway through a chunk, with no card text before the cut, showed that internal marker in the card panel. Reproduced with `processCardFile` on a small and on a large cut-off file. Fixed in [#94](https://github.com/GeneralJeb/RP-Card-Vault/pull/94) (1.8.7).
+- **Suspected, not reproduced: deleted subfolders may stay in the folder tree.** After a scan, `App` keeps the folder's old `dirs` when the scan returns none (`res.dirs && res.dirs.length ? res.dirs : root.dirs`). So if every subfolder of a card folder is removed outside the vault, the tree would still show them. That keeping is right for an import folder that wasn't attached again, which returns no `dirs`. The code is in the component, so it needs the browser test to show it, and I didn't build that today. Nothing changed. Worth reproducing in a later run.
+- **Looked at, fine:**
+  - A folder that can't be read keeps its cards rather than dropping them.
+  - A file that is listed but can't be opened keeps its old record.
+  - A stopped scan keeps the cards it hadn't reached.
+  - Unopened records are never reused.
+  - A failed read of the database is caught by `probeReads` before anything is loaded.
+
+**Queued:** nothing.
+
 ## 2026-11-25 — section 1, Card files
 
 **Read:** `4. PNG CHUNK READER / WRITER` and `5. CARD NORMALIZATION`, all of them (`readPngChunks`, `extractPngText`, `writeCardIntoPng`, `rewritePngText`, `normalizeCard`, `normalizeLorebook`, `parseCardBytes`, the .charx helpers). Also `cardPackedFiles`, `cardPictures`, `writeCardFile`, `buildV3Payload`, `buildV2Payload` and `mergeLorebookForSave`, and their callers `materializeEdit`, `saveCardToFile` and `cardReplacementBytes`. Tests: `test/card-files.test.js`. On `dev` at 1.8.5.
