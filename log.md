@@ -29,6 +29,8 @@ On `dev` at 1.8.7 (#94 merged).
 
 **Queued:** the Dupes exact-copies mislabel (above).
 
+**Afterwards:** #96's macOS job failed once, in the browser step "ingest doesn't hold on to a folder that's no longer linked": a 15 s wait timed out, and no screenshot was kept. That step passed on Windows Chrome, Brave and Ubuntu in the same run. The owner merged #96, and the same code then passed every job on `dev`, macOS included (run 45922569344). So it doesn't reproduce: a one-off slowness on that runner, not the change. If the step fails on macOS again, look into it then.
+
 ## 2026-11-26 — section 2, Scanning and the index
 
 **Read:** `2. INDEXEDDB LAYER`, all of it (`dbOpen`, `dbPutMany`, `dbDelCardRecords`, `dbHas`, `probeReads`), and `7. FILE SYSTEM ACCESS + SCAN ENGINE`, all of it (`listCardFiles`, `processCardFile`, `pngIsAnimated`, `reusableRecord`, `scanRoot`, `scanImportRoot`). Also `assignShortIds`, and the code in `App` that applies a scan's results: short ids, changed-outside marks, fingerprints followed. On `dev` at 1.8.6 (#93 merged).
