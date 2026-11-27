@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.8
+
+- **Ingest no longer skips a big card's new version as a copy of the filed one.** To tell whether an incoming card is already filed, Ingest compares a signature of each file. For a file over 320 KB, that signature covers only its start and its end. So a large card edited to the same size, a typo fixed in its personality say, had the same signature as the filed one: Ingest called it an **Exact duplicate**, "Byte-identical copy already filed", and with **Skip exact duplicates** on (as it is at first) left it out. Now, before a file that big is called an exact duplicate, it is compared with the filed one byte for byte. One that differs is planned like any other card, and filed. Smaller files were never affected, because their signature covers every byte.
+
 ## 1.8.7
 
 - **A cut-off card file says why it can't be read.** When a PNG card's file ended partway through, an unfinished download for example, and no card text had come before the cut, the card panel gave `__NEED_FULL__` as the reason: a marker meant for the vault itself. It now says the file is cut off partway through and no card data was found before the cut, so you know to download it again.
