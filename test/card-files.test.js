@@ -14,7 +14,7 @@ const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "tagsPatch", "editAfterSave", "cardDateMs", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
-  "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
+  "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "planIngestChecked", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
   "writeCardFile", "cardFormatOf", "pngWithoutCard", "reusableRecord",
@@ -567,6 +567,28 @@ async function main() {
     r = await V.cardReplacementBytes(current, "ada.png", jsonOf(card({ description: "From a JSON." })), "ada.json");
     t.ok(r.how === "text" && r.parsed.data.description === "From a JSON." && hex(V.pngWithoutCard(r.bytes)) === hex(V.pngWithoutCard(current)),
       "a JSON card brings its text into the PNG, which keeps its own picture");
+    {
+      // A .charx's picture is a file its card names in its asset list. A JSON
+      // card from a front end names none, or names its own (ccdefault:, a web
+      // address), so the file's own list has to stay, or the picture is lost.
+      global.JSZip = global.JSZip || require("../lib/jszip.min.js");
+      const icon = "embeded://assets/icon/images/main.png";
+      const z = new JSZip();
+      z.file("assets/icon/images/main.png", pic([0, 160, 0]));
+      z.file("card.json", JSON.stringify(Object.assign(card(), { data: Object.assign(card().data, { assets: [{ type: "icon", uri: icon, name: "main", ext: "png" }] }) })));
+      const charx = await z.generateAsync({ type: "uint8array" });
+      const picturesOf = async (b) => (await V.cardPictures(b, "ada.charx")).pictures.map((p) => p.key).join();
+      t.eq(await picturesOf(charx), icon, "(the .charx starts with its picture)");
+      r = await V.cardReplacementBytes(charx, "ada.charx", jsonOf(card({ description: "From a JSON." })), "ada.json");
+      t.ok(r.how === "text" && r.parsed.data.description === "From a JSON." && (await picturesOf(r.bytes)) === icon,
+        "a JSON card with no asset list brings its text into a .charx, which keeps its own picture");
+      const web = { type: "emotion", uri: "https://example.com/happy.png", name: "happy", ext: "png" };
+      const listed = Object.assign(card({ description: "Listed." }), {});
+      listed.data.assets = [{ type: "icon", uri: "ccdefault:", name: "main", ext: "png" }, web];
+      r = await V.cardReplacementBytes(charx, "ada.charx", jsonOf(listed), "ada.json");
+      t.ok((await picturesOf(r.bytes)) === icon && JSON.stringify(r.parsed.raw.data.assets.map((a) => a.uri)) === JSON.stringify([icon, web.uri]),
+        "a JSON card's own list keeps the .charx's picture too, and adds what it names on the web");
+    }
     r = await V.cardReplacementBytes(jsonOf(card()), "ada.json", newer, "ada.png");
     t.ok(r.how === "converted" && r.left === 1 && JSON.parse(new TextDecoder().decode(r.bytes)).data.description === "A clockmaker who lost her hand.",
       "a PNG for a JSON card is written as JSON, saying its picture couldn't come along");
@@ -1005,6 +1027,40 @@ async function main() {
     t.ok(v.status === "version" && v.matches[0] === a && /Another version/.test(v.note), "and an edit of a filed card is a version of it");
   }
 
+  console.log("\nfiling from the inbox: a big card edited to the same size isn't taken for the filed one");
+  {
+    // byteSignature reads a big file's start and end only. A large JSON card
+    // edited in a front end, a typo fixed in its middle, keeps its size and
+    // its signature, and Ingest called it a byte-identical copy and skipped it.
+    const big = (personality) => {
+      const v3 = V.newCardPayload({ name: "Mira", description: "A lighthouse keeper.", first_mes: "Hello." });
+      v3.data.creation_date = v3.data.modification_date = 1700000000;
+      v3.data.personality = "x ".repeat(150000) + personality + " y".repeat(100);
+      v3.data.character_book = { entries: Array.from({ length: 40 }, (_, i) => ({ keys: ["k" + i], content: "lore ".repeat(400) + i })) };
+      return new TextEncoder().encode(JSON.stringify(v3, null, 2));
+    };
+    const bytesOf = new Map();
+    const rec = async (bytes, rootId, rel) => {
+      const r = (await V.processCardFile({ id: rootId }, { rel, dir: "", file: rel, ext: "json" }, new File([bytes], rel, { lastModified: 1 }))).rec;
+      bytesOf.set(r.id, bytes);
+      return r;
+    };
+    const filedBytes = big("Stubborn, teh kind who never leaves.");
+    const filed = await rec(filedBytes, "lib", "Mira.json");
+    const edited = await rec(big("Stubborn, the kind who never leaves."), "inbox", "Mira.json");
+    const copy = await rec(filedBytes, "inbox", "Mira copy.json");
+    t.ok(edited.sig === filed.sig && edited.size > 320 * 1024, "(the two share a byte signature, being over 320 KB and the same size)");
+    const plan = await V.planIngestChecked([edited, copy], [filed], { ingestSkipDupes: true, ingestSubfolder: "flat" }, {}, null, async (r) => bytesOf.get(r.id));
+    const of = (r) => plan.find((p) => p.rec === r);
+    t.ok(of(edited).status !== "exact" && of(edited).action === "copy", "the edited card isn't called byte-identical, and is filed", of(edited).status + " / " + of(edited).note);
+    t.ok(of(copy).status === "exact" && of(copy).action === "skip", "a real copy of the filed card still is, and is skipped");
+    const unread = await V.planIngestChecked([copy], [filed], { ingestSkipDupes: true }, {}, null, async () => { throw new Error("gone"); });
+    t.ok(unread[0].status !== "exact" && unread[0].action === "copy", "a match that can't be read to check isn't taken as proven");
+    const small = await V.planIngestChecked([Object.assign({}, filed, { id: "i:x", rootId: "i", size: 1000 })], [filed], { ingestSkipDupes: true }, {}, null,
+      async () => { throw new Error("small files aren't read: their signature covers every byte"); });
+    t.eq(small[0].status, "exact", "a file small enough for its signature to cover it whole isn't read again");
+  }
+
   console.log("\na .charx can't unpack past the limit, whatever its header says");
   {
     global.JSZip = require("../lib/jszip.min.js");
@@ -1253,6 +1309,25 @@ async function main() {
     t.eq(out.rec.spec, "v3", "the scan finds the v3 data");
     t.eq([out.body.__val.group_only_greetings, out.body.__val.nickname], [["Hello, all of you."], "Biggs"],
       "and keeps the group-only greetings and nickname");
+  }
+
+  console.log("\na cut-off card file says so, in words");
+  {
+    // A download that stopped short: the picture's data runs past the end of
+    // the file, with no card text before the cut. The card panel shows the
+    // record's err as the reason, so it has to be words, not an internal marker.
+    const png = V.solidPng(40, 40, [5, 5, 5]);
+    const cut = png.subarray(0, png.length - 30);
+    const small = (await V.processCardFile({ id: "r1" }, { rel: "Cut.png", dir: "", file: "Cut.png", ext: "png" }, new File([cut], "Cut.png", { lastModified: 1 }))).rec;
+    t.ok(!small.ok && /cut off/.test(small.err) && !/__/.test(small.err), "a small cut-off PNG is unreadable, and its reason says it's cut off", small.err);
+    const big = new Uint8Array(V.SCAN_HEAD_BYTES + 100000);
+    big.set(png.subarray(0, 33));
+    new DataView(big.buffer).setUint32(33, big.length);   // an IDAT longer than the file
+    big.set([73, 68, 65, 84], 37);
+    const large = (await V.processCardFile({ id: "r1" }, { rel: "Cut2.png", dir: "", file: "Cut2.png", ext: "png" }, new File([big], "Cut2.png", { lastModified: 1 }))).rec;
+    t.ok(!large.ok && /cut off/.test(large.err) && !/__/.test(large.err), "so does one bigger than the scan's first read", large.err);
+    const whole = (await V.processCardFile({ id: "r1" }, { rel: "Pic.png", dir: "", file: "Pic.png", ext: "png" }, new File([png], "Pic.png", { lastModified: 1 }))).rec;
+    t.ok(/No embedded card data/.test(whole.err), "a whole picture with no card still says it has no card data");
   }
 
   console.log("\nbackups made by Save to card are never indexed");

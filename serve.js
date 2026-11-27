@@ -75,7 +75,7 @@ const { execFileSync, spawn } = require("child_process");
  * "which serve.js is actually answering?" should not require guesswork.
  */
 const RELAY_BUILD = 11;            // 7: tool calls and the /__vault/ws/* workspace; 8: photos in chat messages; 9: Local models only, OpenRouter no-training; 10: destinations (/__vault/dest/*); 11: a chat request may name its model
-const VAULT_VERSION = "1.8.5";      // the release; the page and package.json carry the same
+const VAULT_VERSION = "1.8.8";      // the release; the page and package.json carry the same
 const STARTED_AT = Date.now();   // so "is this the one I just started?" is answerable
 
 const ROOT = __dirname;

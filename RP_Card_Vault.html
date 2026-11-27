@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.5";
+const APP_VERSION = "1.8.8";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -1818,7 +1818,12 @@ async function parseCardBytes(bytes, filename) {
   ].filter((c) => c.val);
 
   if (!candidates.length) {
-    return { ok: false, err: info.truncated ? "__NEED_FULL__" : "No embedded card data (no chara/ccv3 chunk)", noData: true };
+    // Shown as the reason a card can't be read. A scan that read only the start
+    // of a file reads the rest before it keeps this, so `truncated` here means
+    // the file itself ends partway through.
+    return { ok: false, err: info.truncated
+      ? "The file is cut off partway through (an unfinished download, say), and no card data was found before the cut"
+      : "No embedded card data (no chara/ccv3 chunk)", noData: true };
   }
 
   let best = null;
@@ -3473,11 +3478,14 @@ function targetFolderFor(rec, mode, tagMeta) {
  * Compare inbox records against the records already living in the
  * destination roots, and decide what to do with each.
  */
-function planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded) {
+function planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded, notSame) {
   // A copy sitting in the trash or in _vault backups must not make an incoming
   // card look like it's already filed — otherwise you could never re-add
   // something you'd thrown away.
   if (isExcluded) destRecs = destRecs.filter((r) => !isExcluded(r));
+  // `notSame`: pairs ("inboxId\0otherId") whose shared byte signature was
+  // checked and found not to be the same bytes (see planIngestChecked).
+  const differs = (a, b) => !!(notSame && notSame.has(a.id + "\u0000" + b.id));
   const bySig = new Map(), byFp = new Map(), byName = new Map();
   for (const r of destRecs) {
     if (r.sig) { if (!bySig.has(r.sig)) bySig.set(r.sig, []); bySig.get(r.sig).push(r); }
@@ -3489,12 +3497,12 @@ function planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded) {
   const batchSig = new Map();
   const plan = [];
   for (const r of inboxRecs) {
-    let status = "new", matches = [], note = "";
+    let status = "new", matches = [], note = "", same;
     if (!r.ok) {
       status = "broken";
       note = r.err;
-    } else if (bySig.has(r.sig)) {
-      status = "exact"; matches = bySig.get(r.sig);
+    } else if ((same = (bySig.get(r.sig) || []).filter((o) => !differs(r, o))).length) {
+      status = "exact"; matches = same;
       note = "Byte-identical copy already filed";
     } else if (byFp.has(r.fp)) {
       status = "content"; matches = byFp.get(r.fp);
@@ -3503,7 +3511,7 @@ function planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded) {
       status = "version";
       const theirs = matches.map((m) => m.version).filter(Boolean).join(", ");
       note = "Another version of a card already filed" + (theirs ? " (filed: v" + theirs + ")" : "");
-    } else if (batchSig.has(r.sig)) {
+    } else if (batchSig.has(r.sig) && !differs(r, batchSig.get(r.sig))) {
       status = "batchDupe"; matches = [batchSig.get(r.sig)];
       note = "Duplicated within this batch";
     }
@@ -3520,6 +3528,33 @@ function planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded) {
   const order = { new: 0, version: 1, content: 2, exact: 3, batchDupe: 4, broken: 5 };
   plan.sort((a, b) => (order[a.status] - order[b.status]) || a.rec.name.localeCompare(b.rec.name));
   return plan;
+}
+
+/* byteSignature reads every byte of a file up to this size; past it, only the
+   start and end, so two different files of one size can share a signature. */
+const SIG_WHOLE_MAX = 256 * 1024 + 64 * 1024;
+
+/**
+ * planIngest, with every byte-identical match on a file too big for its
+ * signature to cover it whole checked byte for byte first. Those are the
+ * matches a skip relies on; a large card edited to the same size (a typo
+ * fixed in a front end) would otherwise be skipped as a copy of the filed one.
+ * readBytes(rec) gives a card file's bytes; a match that can't be read to
+ * check is not taken as proven.
+ */
+async function planIngestChecked(inboxRecs, destRecs, settings, tagMeta, isExcluded, readBytes) {
+  const plan = planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded);
+  const notSame = new Set();
+  const read = async (r) => { try { return await readBytes(r); } catch (e) { return null; } };
+  for (const p of plan) {
+    if ((p.status !== "exact" && p.status !== "batchDupe") || !(p.rec.size > SIG_WHOLE_MAX)) continue;
+    const mine = await read(p.rec);
+    for (const o of p.matches) {
+      const theirs = mine ? await read(o) : null;
+      if (!theirs || !sameBytes(mine, theirs)) notSame.add(p.rec.id + "\u0000" + o.id);
+    }
+  }
+  return notSame.size ? planIngest(inboxRecs, destRecs, settings, tagMeta, isExcluded, notSame) : plan;
 }
 
 const INGEST_STATUS_META = {
@@ -4683,6 +4718,18 @@ async function cardReplacementBytes(currentBytes, currentName, inBytes, inName) 
   let out;
   if (from === "json") {
     if (to === "png" && !isPng(currentBytes)) throw new Error("This card's file isn't a PNG the vault can write into, so a JSON card can't be put in it. Nothing was changed.");
+    // A .charx's picture and files are named in its card's asset list, and a
+    // JSON card's list can't point into this file: the file's own list stays,
+    // with any web or data: assets the JSON card names added after it.
+    if (to === "charx") {
+      const own = await rawCardFromBytes(currentBytes, currentName);
+      const kept = own && own.data && Array.isArray(own.data.assets) ? own.data.assets : [];
+      const extra = (Array.isArray(v3.data.assets) ? v3.data.assets : []).filter((a) => {
+        const u = assetUri(a);
+        return u && !/^(ccdefault:|embed+ed:\/\/|__asset:)/i.test(u) && !kept.some((k) => assetUri(k) === u);
+      });
+      if (kept.length || extra.length) v3.data.assets = kept.concat(extra);
+    }
     out = await writeCardFile(currentBytes, currentName, v3);
     out.how = "text";
   } else {
@@ -15130,9 +15177,10 @@ function IngestModal({ roots, records, settings, tagMeta, folderRoles, dupeExclu
     return records.filter((r) => rootIds.has(r.rootId) && !srcIds.has(r.id));
   }, [records, destKeys, sourceRecs]);
 
-  const build = () => {
+  const build = async () => {
     setResult(null);
-    setPlan(planIngest(sourceRecs, destRecs, { ingestSkipDupes: skipDupes, ingestSubfolder: subfolder }, tagMeta, dupeExcluder));
+    setPlan(await planIngestChecked(sourceRecs, destRecs, { ingestSkipDupes: skipDupes, ingestSubfolder: subfolder }, tagMeta, dupeExcluder,
+      async (r) => (await readOriginalBytes(r, roots)).bytes));
   };
 
   const setAction = (i, action) => {
