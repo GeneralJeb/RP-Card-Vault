@@ -14,7 +14,7 @@ const { mod: V } = loadPureRegion([
   "parseCardBytes", "normalizeCard", "normalizeLorebook", "denormalizeLorebook",
   "mergeLorebookForSave", "rawCharacterBook", "lorebookDigest", "buildV3Payload", "buildV2Payload", "writeCardIntoPng", "saveCardToFile",
   "makeChunk", "safeFileName", "effectiveLorebook", "cleanLorebook", "cleanLoreEntry", "lorebookPatch", "greetingsPatch", "tagsPatch", "editAfterSave", "cardDateMs", "splitKeyList", "isEdited", "pendingEditCount", "solidPng", "newCardPayload", "placeholderColor", "isPng", "listCardFiles", "backupsToPrune",
-  "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
+  "moveCardTo", "copyIntoRoot", "byteSignature", "sameBytes", "verifiedExactCopies", "makeDupeExcluder", "detectDupes", "planIngest", "planIngestChecked", "unzipEntryLimited", "processCardFile", "scanRoot", "scanImportRoot", "IMPORT_PENDING", "SCAN_HEAD_BYTES", "importRootIdMap", "remapRootSettings", "remapDirKeyed", "absorbRegistration",
   "deleteCardFile", "referenceFolderError", "cardFileLock", "setFolderRolesNow", "agentFolderList",
   "pngIsAnimated", "withAnimated", "readPngChunks", "animateModeOf", "cardPictures", "pictureMime",
   "writeCardFile", "cardFormatOf", "pngWithoutCard", "reusableRecord",
@@ -1025,6 +1025,40 @@ async function main() {
     t.eq(inbox(b).status, "new", "filing from the inbox: a namesake is a new card");
     const v = inbox(aEdit);
     t.ok(v.status === "version" && v.matches[0] === a && /Another version/.test(v.note), "and an edit of a filed card is a version of it");
+  }
+
+  console.log("\nfiling from the inbox: a big card edited to the same size isn't taken for the filed one");
+  {
+    // byteSignature reads a big file's start and end only. A large JSON card
+    // edited in a front end, a typo fixed in its middle, keeps its size and
+    // its signature, and Ingest called it a byte-identical copy and skipped it.
+    const big = (personality) => {
+      const v3 = V.newCardPayload({ name: "Mira", description: "A lighthouse keeper.", first_mes: "Hello." });
+      v3.data.creation_date = v3.data.modification_date = 1700000000;
+      v3.data.personality = "x ".repeat(150000) + personality + " y".repeat(100);
+      v3.data.character_book = { entries: Array.from({ length: 40 }, (_, i) => ({ keys: ["k" + i], content: "lore ".repeat(400) + i })) };
+      return new TextEncoder().encode(JSON.stringify(v3, null, 2));
+    };
+    const bytesOf = new Map();
+    const rec = async (bytes, rootId, rel) => {
+      const r = (await V.processCardFile({ id: rootId }, { rel, dir: "", file: rel, ext: "json" }, new File([bytes], rel, { lastModified: 1 }))).rec;
+      bytesOf.set(r.id, bytes);
+      return r;
+    };
+    const filedBytes = big("Stubborn, teh kind who never leaves.");
+    const filed = await rec(filedBytes, "lib", "Mira.json");
+    const edited = await rec(big("Stubborn, the kind who never leaves."), "inbox", "Mira.json");
+    const copy = await rec(filedBytes, "inbox", "Mira copy.json");
+    t.ok(edited.sig === filed.sig && edited.size > 320 * 1024, "(the two share a byte signature, being over 320 KB and the same size)");
+    const plan = await V.planIngestChecked([edited, copy], [filed], { ingestSkipDupes: true, ingestSubfolder: "flat" }, {}, null, async (r) => bytesOf.get(r.id));
+    const of = (r) => plan.find((p) => p.rec === r);
+    t.ok(of(edited).status !== "exact" && of(edited).action === "copy", "the edited card isn't called byte-identical, and is filed", of(edited).status + " / " + of(edited).note);
+    t.ok(of(copy).status === "exact" && of(copy).action === "skip", "a real copy of the filed card still is, and is skipped");
+    const unread = await V.planIngestChecked([copy], [filed], { ingestSkipDupes: true }, {}, null, async () => { throw new Error("gone"); });
+    t.ok(unread[0].status !== "exact" && unread[0].action === "copy", "a match that can't be read to check isn't taken as proven");
+    const small = await V.planIngestChecked([Object.assign({}, filed, { id: "i:x", rootId: "i", size: 1000 })], [filed], { ingestSkipDupes: true }, {}, null,
+      async () => { throw new Error("small files aren't read: their signature covers every byte"); });
+    t.eq(small[0].status, "exact", "a file small enough for its signature to cover it whole isn't read again");
   }
 
   console.log("\na .charx can't unpack past the limit, whatever its header says");
