@@ -1,5 +1,5 @@
 {
-  "nextSection": 3,
+  "nextSection": 4,
   "sectionCount": 14,
   "debateRound": 1,
   "proposalIssues": [
@@ -8,8 +8,16 @@
       "number": 95
     }
   ],
-  "lastRun": "2026-11-26",
-  "queued": [],
+  "lastRun": "2026-11-27",
+  "queued": [
+    {
+      "found": "2026-11-27",
+      "section": 3,
+      "title": "Dupes lists a big card and its same-size edit as Exact copies",
+      "what": "detectDupes groups by byteSignature alone, which samples files over 320 KB, so two different same-size versions of a large card (an edited JSON card, say) are listed under Exact copies, whose hint says they're literally the same file. Thinning is safe: verifiedExactCopies leaves the different one alone. But the view says something untrue.",
+      "reproduce": "Make two JSON cards over 320 KB that differ only in a same-length edit about 300 KB in (see #96's test). Run processCardFile on each, then detectDupes([a, b]): one exact group, and wastedBytes counts the second file."
+    }
+  ],
   "requests": [],
   "built": []
 }

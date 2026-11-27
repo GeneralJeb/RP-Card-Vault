@@ -2,6 +2,33 @@
 
 Newest first. Each run adds one entry: the date, the section checked, GitHub issues seen, what was found (confirmed bugs with their pull requests; suspicions that couldn't be reproduced, and why; or nothing), what was queued, and any proposals round opened.
 
+## 2026-11-27 — section 3, Duplicates, versions and filing from the inbox
+
+**Read:**
+- `8. DUPLICATE DETECTION + INGEST PLANNING`, all of it: `creatorKnown`, `sameCardVersions`, `versionSets`, `versionGroupKey`, `makeDupeExcluder`, `detectDupes`, `verifiedExactCopies`, `planIngest`, `copyIntoRoot`.
+- "Cards that read alike": `textShingles`, `minHashSignature`, `similarGroups`.
+- `8c. TEXT DIFF`: `diffTokens`, `diffText`.
+- `IngestModal`'s plan and run.
+- Tests: `test/card-files.test.js`.
+
+On `dev` at 1.8.7 (#94 merged).
+
+**Issues:** #95 only: the feature panel's round 1, recorded in `proposalIssues` by the panel's session. It has no ticks yet, so step 5 had nothing to build. **Own pull requests:** none open at the start.
+
+**Findings:**
+- **Confirmed: Ingest skipped a big card's same-size edit as a byte-identical copy.** `byteSignature` reads only the first 256 KB and last 64 KB of a file over 320 KB. I made a 385 KB JSON card with a same-length typo fixed about 300 KB in. It shared the filed card's signature, and `planIngest` called it "Byte-identical copy already filed" and skipped it, as skip is the default. Fixed in [#96](https://github.com/GeneralJeb/RP-Card-Vault/pull/96) (1.8.8): such matches are now compared byte for byte before the plan is shown.
+  - SillyTavern-written PNGs weren't hit: the last text chunk's checksum sits in the sampled tail and changes with any edit.
+- **Confirmed, queued:** the Dupes view lists the same pair under Exact copies. Thinning is protected by `verifiedExactCopies`, so nothing can be lost, but the view says something untrue. It's in state.json `queued`, with how to reproduce it.
+- **Looked at, fine:**
+  - Dismissed groups drop out of the duplicate badge.
+  - The trash and the vault's backups are left out of both Dupes and Ingest.
+  - Version groups follow the 1.8.3 rule.
+  - `versionSets` stops comparing wording past 600 cards of one name.
+  - `copyIntoRoot` never overwrites a differing file.
+  - `diffTokens` caps its table at 25M cells.
+
+**Queued:** the Dupes exact-copies mislabel (above).
+
 ## 2026-11-26 — section 2, Scanning and the index
 
 **Read:** `2. INDEXEDDB LAYER`, all of it (`dbOpen`, `dbPutMany`, `dbDelCardRecords`, `dbHas`, `probeReads`), and `7. FILE SYSTEM ACCESS + SCAN ENGINE`, all of it (`listCardFiles`, `processCardFile`, `pngIsAnimated`, `reusableRecord`, `scanRoot`, `scanImportRoot`). Also `assignShortIds`, and the code in `App` that applies a scan's results: short ids, changed-outside marks, fingerprints followed. On `dev` at 1.8.6 (#93 merged).
