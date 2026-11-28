@@ -219,6 +219,15 @@ global.URL = window.URL;
 window.confirm = () => true;
 window.alert = () => {};
 global.matchMedia = window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} });
+// A photo for the agent chat is read for its size before it's cleaned (an
+// unreadable one isn't attached). jsdom can't decode pictures: this reads a
+// PNG's size from its header, as a browser would, and refuses anything else.
+global.createImageBitmap = window.createImageBitmap = async (blob) => {
+  const b = new Uint8Array(await blob.arrayBuffer());
+  if (b.length < 24 || b[1] !== 0x50 || b[2] !== 0x4e || b[3] !== 0x47) throw new Error("not a picture jsdom can read");
+  const dv = new DataView(b.buffer, b.byteOffset);
+  return { width: dv.getUint32(16), height: dv.getUint32(20), close() {} };
+};
 
 // jsdom lays nothing out, so every element measures zero. The card grid is
 // virtualized off clientWidth/clientHeight and renders nothing at all until it

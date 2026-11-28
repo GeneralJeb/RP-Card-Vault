@@ -23,6 +23,7 @@ const { mod: V } = loadPureRegion([
   "sortCards", "agentPersonaLabel", "AGENT_WAITING_PHRASES", "AGENT_THINKING_PHRASES", "AGENT_LOADERS",
   "AGENT_HANDOFF_DEFAULT", "agentHandoffPrompt", "agentContextUsage", "agentTranscript", "agentCondenseRequest",
   "agentHandoffPath", "agentOpenRoots", "agentRegexRisk", "makePrivateTest", "agentUserContent", "agentFileBlock", "AGENT_IMAGE_CHARS",
+  "cleanAgentPhoto", "pngWithoutHiddenData", "AGENT_PHOTO_KEEP_BYTES", "solidPng", "writeCardIntoPng", "newCardPayload", "buildV2Payload", "makeChunk", "makeTextChunk", "parseCardBytes", "readPngChunks",
   "agentToolDocs", "agentDocUnedited", "ensureAgentToolDocs", "aiHash", "wsTreeRows", "wsAncestors", "agentPinnedNote", "agentFieldPrints", "unflagIsStale", "mergeProposal", "proposalAcceptPatch",
   "agentChangeSize", "agentChangedChars", "AGENT_MINOR", "agentForgetReads", "agentPinnedLine", "agentRegenPlan", "agentForkSession", "agentTurnStart", "agentSameProposal", "assignShortIds", "agentIsPinned", "agentPinnedRecord", "agentSeenFor", "agentCardLine", "normalizeLorebook", "cleanLorebook", "agentBulkTagChanges", "proposalOf", "proposalCount", "AGENT_TOOL_NOTES",
   "agentMacroLoss", "agentParseDice", "agentRandomIndexes", "makeTrashTest", "agentMatchCards", "agentCardIssues", "AGENT_RULES_SMALL", "AGENT_SMALL_TOOLS", "agentFixedChars", "agentBudgetChars", "makePrivateTest",
@@ -1930,6 +1931,51 @@ async function privateTests() {
       [["a", "{\"x\":1"], ["b", "{}"]], "broken arguments still end at the first </tool>, and the next block is its own call");
     t.eq(V.dropModelResults("<tool name=\"a\">{}</tool>\n<tool_result>made up</tool_result>"), "<tool name=\"a\">{}</tool>",
       "a made-up result after a block is still cut");
+  }
+  console.log("\nphotos sent to the agent chat carry no hidden data");
+  {
+    // A card PNG is a photo like any other, and holds its whole card as text.
+    const v3 = V.newCardPayload({ name: "Hidden Hana", description: "A secret kept in a private folder.", first_mes: "Hi." });
+    const pic = V.solidPng(64, 48, [10, 120, 200]);
+    const exif = V.makeChunk("eXIf", new TextEncoder().encode("MM\u0000*GPS 51.5N"));
+    const card = V.writeCardIntoPng(pic, v3, V.buildV2Payload(v3));
+    const withExif = new Uint8Array(Buffer.concat([card.subarray(0, card.length - 12), exif, card.subarray(card.length - 12)]));
+    t.ok((await V.parseCardBytes(withExif, "hana.png")).ok, "(the test photo is a readable card, with EXIF)");
+    const types = (b) => V.readPngChunks(b, { stopAtIDAT: false }).chunks.map((c) => c.type);
+    const size = async () => ({ w: 64, h: 48 });
+    const noRedraw = async () => { throw new Error("a small PNG isn't redrawn"); };
+    const out = await V.cleanAgentPhoto(withExif, size, noRedraw);
+    const text = Buffer.from(out.bytes).toString("latin1");
+    t.ok(out.mime === "image/png" && out.w === 64 && out.h === 48, "a small PNG stays a PNG, its own size");
+    t.ok(!(await V.parseCardBytes(out.bytes, "hana.png")).ok && !/Hidden Hana|secret|chara|ccv3|GPS/.test(text) && !types(out.bytes).some((x) => /tEXt|iTXt|zTXt|eXIf/.test(x)),
+      "and carries none of the card's text or its EXIF");
+    t.eq(types(out.bytes), types(pic), "the picture's own chunks are all still there, in order");
+
+    let drawn = null;
+    const redraw = async (b, w, h) => { drawn = { w, h }; return { bytes: V.solidPng(w, h, [1, 2, 3]), mime: "image/png" }; };
+    const big = await V.cleanAgentPhoto(withExif, async () => ({ w: 3200, h: 1600 }), redraw);
+    t.ok(drawn && drawn.w === 1600 && drawn.h === 800 && big.w === 1600 && !/Hidden Hana/.test(Buffer.from(big.bytes).toString("latin1")),
+      "a big photo is drawn afresh at most 1600 px on its long side");
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0, 16, 69, 120, 105, 102, 0, 0, 71, 80, 83, 0, 0xff, 0xd9]);
+    drawn = null;
+    await V.cleanAgentPhoto(jpeg, async () => ({ w: 10, h: 10 }), redraw);
+    t.ok(drawn && drawn.w === 10, "a JPEG (EXIF and all) is always drawn afresh, never sent as it is");
+    const huge = new Uint8Array(Buffer.concat([withExif.subarray(0, 33), V.makeChunk("IDAT", new Uint8Array(V.AGENT_PHOTO_KEEP_BYTES)), withExif.subarray(33)]));
+    drawn = null;
+    await V.cleanAgentPhoto(huge, size, redraw);
+    t.ok(drawn !== null, "so is a PNG too big to send as it is");
+
+    const refused = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message; } };
+    t.ok(/wasn't attached/.test(await refused(() => V.cleanAgentPhoto(jpeg, size, async () => { throw new Error("no canvas"); }))),
+      "a photo that can't be redrawn is refused, not sent as it is");
+    t.ok(/wasn't attached/.test(await refused(() => V.cleanAgentPhoto(jpeg, size, async () => ({ bytes: jpeg.subarray(0, 4), mime: "image/webp" })))),
+      "so is one whose redrawing isn't a picture");
+    t.ok(/wasn't attached/.test(await refused(() => V.cleanAgentPhoto(withExif, async () => { throw new Error("no createImageBitmap"); }, redraw))),
+      "and one the browser can't read as a picture at all");
+    const cut = withExif.subarray(0, withExif.length - 20);
+    drawn = null;
+    const fromCut = await V.cleanAgentPhoto(cut, size, redraw);
+    t.ok(drawn !== null && !/Hidden Hana/.test(Buffer.from(fromCut.bytes).toString("latin1")), "a cut-off PNG is drawn afresh rather than trimmed");
   }
 }
 
