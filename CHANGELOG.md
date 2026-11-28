@@ -8,6 +8,15 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.9.0
+
+- **Photos sent to the agent chat no longer carry hidden data.** A photo you attached to the agent chat was sent as it was when it was a PNG, JPEG or WebP small enough not to need shrinking, and also whenever shrinking it failed. A character card is a PNG of just that kind, with its whole card inside as text. So dropping a card into the chat sent all of it to the model, even a card from a folder you keep private from the AI, and **What was sent** showed only "[photo]". A phone photo's EXIF (where it was taken, the camera) went along too. Now every photo is cleaned before it's attached:
+  - A PNG that needs no shrinking keeps its picture exactly, with every text chunk (card text included) and its EXIF taken out.
+  - Anything else, a JPEG, a WebP or a big PNG, is drawn afresh, which carries none of the original's hidden data. It's made smaller when it's over 1600 px on its long side, as before.
+  - A photo that can't be cleaned isn't attached, and the notice says why. It's never sent as it was.
+
+  Pointing at a photo above the message box says "hidden data removed".
+
 ## 1.8.8
 
 - **Ingest no longer skips a big card's new version as a copy of the filed one.** To tell whether an incoming card is already filed, Ingest compares a signature of each file. For a file over 320 KB, that signature covers only its start and its end. So a large card edited to the same size, a typo fixed in its personality say, had the same signature as the filed one: Ingest called it an **Exact duplicate**, "Byte-identical copy already filed", and with **Skip exact duplicates** on (as it is at first) left it out. Now, before a file that big is called an exact duplicate, it is compared with the filed one byte for byte. One that differs is planned like any other card, and filed. Smaller files were never affected, because their signature covers every byte.

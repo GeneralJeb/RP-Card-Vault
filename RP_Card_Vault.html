@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.8";
+const APP_VERSION = "1.9.0";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -7321,6 +7321,53 @@ const AGENT_IMAGE_CHARS = 3000;
 const AGENT_MAX_IMAGES = 6;
 const AGENT_MAX_FILE_CHARS = 200000;
 
+/* Photos for the agent chat. A picture can carry text the model shouldn't
+   see: a card PNG holds its whole card (so a card from a private folder, or
+   fields a prompt doesn't read, would reach the model as "[photo]"), and any
+   photo can hold EXIF (where it was taken, the camera, notes). So every photo
+   is cleaned before it's attached, and one that can't be cleaned isn't. */
+const AGENT_PHOTO_MAX_SIDE = 1600;            // longer than this, a photo is drawn smaller
+const AGENT_PHOTO_KEEP_BYTES = 1100000;       // a PNG up to this size, needing no shrinking, keeps its own picture
+const PNG_HIDDEN_CHUNKS = new Set(["tEXt", "iTXt", "zTXt", "eXIf"]);
+
+/** A PNG with every text chunk and its EXIF taken out; the picture itself is untouched. Throws for a PNG that's cut off. */
+function pngWithoutHiddenData(bytes) {
+  if (!isPng(bytes)) throw new Error("not a PNG");
+  const res = readPngChunks(bytes, { stopAtIDAT: false });
+  if (res.truncated || !res.sawIEND) throw new Error("the PNG is cut off");
+  const pieces = [bytes.subarray(0, 8)];
+  for (const c of res.chunks) if (!PNG_HIDDEN_CHUNKS.has(c.type)) pieces.push(bytes.subarray(c.start, c.start + 12 + c.len));
+  const out = new Uint8Array(pieces.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of pieces) { out.set(p, at); at += p.length; }
+  return out;
+}
+
+/**
+ * A photo for the agent chat, cleaned of hidden data: { bytes, mime, w, h }.
+ * A PNG that needs no shrinking keeps its picture with its text and EXIF taken
+ * out; anything else is drawn afresh (which carries none of the original's
+ * hidden data), smaller when it's over AGENT_PHOTO_MAX_SIDE. measure(bytes)
+ * gives the picture's { w, h }; redraw(bytes, w, h) gives { bytes, mime } of
+ * a fresh drawing. Throws, so nothing is sent, when it can't be cleaned.
+ */
+async function cleanAgentPhoto(bytes, measure, redraw) {
+  let dims;
+  try { dims = await measure(bytes); } catch (e) { dims = null; }
+  if (!dims || !(dims.w > 0) || !(dims.h > 0)) throw new Error("couldn't be read as a picture here, so it wasn't attached (its hidden data couldn't be removed)");
+  const scale = Math.min(1, AGENT_PHOTO_MAX_SIDE / Math.max(dims.w, dims.h));
+  const w = Math.max(1, Math.round(dims.w * scale)), h = Math.max(1, Math.round(dims.h * scale));
+  if (scale === 1 && isPng(bytes)) {
+    let kept = null;
+    try { kept = pngWithoutHiddenData(bytes); } catch (e) { kept = null; }
+    if (kept && kept.length <= AGENT_PHOTO_KEEP_BYTES) return { bytes: kept, mime: "image/png", w, h };
+  }
+  let out = null;
+  try { out = await redraw(bytes, w, h); } catch (e) { out = null; }
+  if (!out || !out.bytes || !out.bytes.length || !pictureMime(out.bytes)) throw new Error("couldn't be redrawn here, so it wasn't attached (its hidden data couldn't be removed)");
+  return { bytes: out.bytes, mime: pictureMime(out.bytes), w, h };
+}
+
 /** Roughly how much of the model's context one chat message takes, in characters. */
 function agentMessageSize(m) {
   return String(m.text || "").length + String(m.result || "").length + String(m.args || "").length +
@@ -12603,22 +12650,28 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
     fr.readAsText(blob);
   });
 
-  /** A photo, shrunk to at most 1600px on its long side when the browser can, so requests stay light. */
+  /**
+   * A photo cleaned of hidden data (a card PNG's text, EXIF; see
+   * cleanAgentPhoto), and shrunk to at most 1600px on its long side so
+   * requests stay light. Throws when it can't be cleaned: it isn't attached.
+   */
   const shrinkPhoto = async (file) => {
-    const raw = await readDataUrl(file);
-    if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return { name: file.name, url: raw };
-    try {
-      const bmp = await createImageBitmap(file);
-      const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-      const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
-      if (scale === 1 && raw.length < 1500000 && /^data:image\/(png|jpe?g|webp);/.test(raw)) return { name: file.name, url: raw, w, h };
+    const measure = async (b) => {
+      const bmp = await createImageBitmap(new Blob([b]));
+      const d = { w: bmp.width, h: bmp.height };
+      if (bmp.close) bmp.close();
+      return d;
+    };
+    const redraw = async (b, w, h) => {
+      const bmp = await createImageBitmap(new Blob([b]));
       const c = new OffscreenCanvas(w, h);
       c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+      if (bmp.close) bmp.close();
       const blob = await c.convertToBlob({ type: "image/webp", quality: 0.85 });
-      return { name: file.name, url: await readDataUrl(blob), w, h };
-    } catch (e) {
-      return { name: file.name, url: raw };
-    }
+      return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type };
+    };
+    const out = await cleanAgentPhoto(new Uint8Array(await file.arrayBuffer()), measure, redraw);
+    return { name: file.name, url: await readDataUrl(new Blob([out.bytes], { type: out.mime })), w: out.w, h: out.h, cleaned: true };
   };
 
   const TEXT_EXT = /\.(txt|md|markdown|json|csv|tsv|ya?ml|xml|html?|log|ini|toml|js|ts|py|css)$/i;
@@ -13052,7 +13105,7 @@ function AgentPanel({ ai, relay, agent, onSaveAgent, records, editsMap, tagIndex
         {attach.images.length || attach.files.length ? (
           <div className="agent-attachments" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
             {attach.images.map((x, k) => (
-              <div key={"i" + k} title={x.name} style={{ position: "relative", width: 44, height: 44, borderRadius: 4, overflow: "hidden", border: "1px solid var(--border-subtle)" }}>
+              <div key={"i" + k} title={x.name + (x.cleaned ? " · hidden data removed (any card text and EXIF)" : "")} style={{ position: "relative", width: 44, height: 44, borderRadius: 4, overflow: "hidden", border: "1px solid var(--border-subtle)" }}>
                 <img src={x.url} alt={x.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                 <span onClick={() => setAttach((a) => ({ images: a.images.filter((_, j) => j !== k), files: a.files }))}
                   title="Remove" style={{ position: "absolute", top: 0, right: 0, padding: "0 4px", cursor: "pointer", fontSize: 11,
