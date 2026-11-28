@@ -220,7 +220,7 @@ const { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Frag
 const APP_NAME    = "RP Card Vault";
 // The release. serve.js (VAULT_VERSION), package.json and the newest heading
 // in CHANGELOG.md say the same; test/release.test.js checks.
-const APP_VERSION = "1.8.8";
+const APP_VERSION = "1.8.9";
 
 const DB_NAME = "rpCardVault";
 const DB_VER  = 3;               // 2 added aiNotes; 3 added agentSessions
@@ -4294,11 +4294,22 @@ function renameBase(pattern, rec) {
     name: r.name || baseName(r.file || ""), creator: r.creator || "", version: r.version || "", spec: r.spec && r.spec !== "none" ? r.spec : "",
     tag: (r.tags || [])[0] || "", date: r.mtime ? fmtDateShort(r.mtime) : "",
   };
-  let out = String(pattern || "").replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(vals, k.toLowerCase()) ? String(vals[k.toLowerCase()]) : m));
+  // Each value stands in as a marker while the pattern is tidied, so the tidying
+  // touches only what the pattern itself adds, never a card's own words (a
+  // name such as "Alien v Predator" keeps its "v").
+  const filled = [];
+  let out = String(pattern || "").replace(/\{(\w+)\}/g, (m, k) => {
+    if (!Object.prototype.hasOwnProperty.call(vals, k.toLowerCase())) return m;
+    const v = String(vals[k.toLowerCase()]);
+    if (!v) return "";
+    filled.push(v);
+    return "" + (filled.length - 1) + "";
+  });
   // A card with no creator mustn't come out as " - Ada" or "Ada ()".
   out = out.replace(/\(\s*\)|\[\s*\]/g, "").replace(/\bv(?=\s|$)/g, "").replace(/\s+/g, " ")
     .replace(/(\s[-–_,]\s)(?:[-–_,]\s)+/g, "$1").replace(/^[\s\-–_.,]+|[\s\-–_.,]+$/g, "");
-  return safeFileName(out);
+  out = out.replace(/(\d+)/g, (m, i) => filled[Number(i)]);
+  return safeFileName(out.replace(/^[\s\-–_.,]+|[\s\-–_.,]+$/g, ""));
 }
 
 /**

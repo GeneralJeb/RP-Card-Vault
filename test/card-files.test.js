@@ -404,6 +404,11 @@ async function main() {
       "a card with no creator or version doesn't come out as \" - Lune\", \"Lune ()\" or \"Lune v\"");
     t.eq([V.renameBase("{name}", rec("x.png", "What? A/B: \"C\"", "")), V.renameBase("{name}", rec("x.png", "CON", "")), V.renameBase("{nonsense}", bare), V.renameBase("", bare)],
       ["What_ A_B_ _C_", "_CON", "{nonsense}", "card"], "characters a file name can't have are replaced, a device name is avoided, and an unknown {word} stays as typed");
+    // The tidying of an empty {version} or {creator} is for what the pattern
+    // adds around them, never for the card's own words.
+    t.eq([V.renameBase("{name}", rec("x.png", "Alien v Predator", "")), V.renameBase("{name} v{version}", rec("x.png", "Kramer v Kramer", "")),
+      V.renameBase("{name} ({creator})", rec("x.png", "Ada (the elder)", "")), V.renameBase("{name} - {creator}", rec("x.png", "Lune - Moon - Tide", ""))],
+      ["Alien v Predator", "Kramer v Kramer", "Ada (the elder)", "Lune - Moon - Tide"], "a card's own name comes through whole: its \"v\", brackets and dashes too");
 
     const lib = [ada, rec("Bram.png", "Bram Lighthouse", "tidewriter"), rec("bram2.png", "Bram Lighthouse", "tidewriter"), rec("Cora.json", "Cora", ""), rec("someone - Dora.png", "Dora", "someone"),
       rec("broken.png", "broken", "", { ok: false }), rec("locked.png", "Eve", "x", { rootId: "ref", id: "ref:locked.png" }), rec("tidewriter - bram lighthouse.png", "Other", "z", { id: "r:other" })];

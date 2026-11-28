@@ -8,6 +8,10 @@ and chats live in the browser and in your card folders, not in these files).
 The ones that matter are `RP_Card_Vault.html`, `serve.js` and the `lib` folder.
 If you skipped several releases, read every section down to the one you had.
 
+## 1.8.9
+
+- **Renaming from a pattern keeps a card's name whole.** **Rename card files** tidies what a pattern adds when a value is missing: no " v" for a card without a version, no "()" for one without a creator. That tidying also ran over the card's own name, so a card called *Alien v Predator* or *Kramer v Kramer* lost its "v" and was named *Alien Predator* or *Kramer Kramer*. Now only what the pattern adds is tidied, and the card's name, creator and other values come through as they are.
+
 ## 1.8.8
 
 - **Ingest no longer skips a big card's new version as a copy of the filed one.** To tell whether an incoming card is already filed, Ingest compares a signature of each file. For a file over 320 KB, that signature covers only its start and its end. So a large card edited to the same size, a typo fixed in its personality say, had the same signature as the filed one: Ingest called it an **Exact duplicate**, "Byte-identical copy already filed", and with **Skip exact duplicates** on (as it is at first) left it out. Now, before a file that big is called an exact duplicate, it is compared with the filed one byte for byte. One that differs is planned like any other card, and filed. Smaller files were never affected, because their signature covers every byte.
