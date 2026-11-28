@@ -1,5 +1,5 @@
 {
-  "nextSection": 4,
+  "nextSection": 5,
   "sectionCount": 14,
   "debateRound": 1,
   "proposalIssues": [
@@ -8,16 +8,24 @@
       "number": 95
     }
   ],
-  "lastRun": "2026-11-27",
+  "lastRun": "2026-11-28",
   "queued": [
     {
       "found": "2026-11-27",
       "section": 3,
       "title": "Dupes lists a big card and its same-size edit as Exact copies",
       "what": "detectDupes groups by byteSignature alone, which samples files over 320 KB, so two different same-size versions of a large card (an edited JSON card, say) are listed under Exact copies, whose hint says they're literally the same file. Thinning is safe: verifiedExactCopies leaves the different one alone. But the view says something untrue.",
-      "reproduce": "Make two JSON cards over 320 KB that differ only in a same-length edit about 300 KB in (see #96's test). Run processCardFile on each, then detectDupes([a, b]): one exact group, and wastedBytes counts the second file."
+      "reproduce": "Make two JSON cards over 320 KB that differ only in a same-length edit about 300 KB in (see #96's test). Run processCardFile on each, then detectDupes([a, b]): one exact group, and wastedBytes counts the second file.",
+      "rechecked": "2026-11-28: still holds on dev 1.8.8. Not fixed yet. A real fix means the app reading every big exact group's files after each rescan, a bigger change than its effect warrants. Thinning already compares bytes and says which copies weren't the same."
     }
   ],
   "requests": [],
-  "built": []
+  "built": [
+    {
+      "round": 1,
+      "item": 1,
+      "title": "Strip card text and other hidden data from photos sent to the agent chat",
+      "pr": 99
+    }
+  ]
 }

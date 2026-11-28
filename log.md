@@ -2,6 +2,33 @@
 
 Newest first. Each run adds one entry: the date, the section checked, GitHub issues seen, what was found (confirmed bugs with their pull requests; suspicions that couldn't be reproduced, and why; or nothing), what was queued, and any proposals round opened.
 
+## 2026-11-28 — section 4, Folders, moves, trash and renames
+
+**Read:**
+- `8b. FOLDER TREE + MOVE`: `referenceFolderError`, `cardFileLock`, `effectiveFolderRole`, `moveCardTo`, `copyIntoRoot`, `deleteCardFile`, `defaultKeeper`, the trash and private-folder tests.
+- `safeFileName`, `renameBase`, `planRename`, `renameCardFile`.
+- `resolveDupeGroups` in `App`.
+- Tests: `test/card-files.test.js`.
+
+On `dev` at 1.8.8 (#96 merged).
+
+**Issues:** #95 only (the panel's round 1). Proposals 1 and 3 are ticked. **Own pull requests:** none open at the start.
+
+**Queued bug re-checked:** the Dupes "Exact copies" mislabel still holds. It stays queued: a fix means reading big files after every rescan, and thinning already checks bytes and says which copies weren't the same.
+
+**Findings:**
+- **Confirmed: renaming from a pattern changed a card's own name.** `renameBase` tidied the whole filled-in result, so with `{name}`, "Alien v Predator" was renamed "Alien Predator" and "Kramer v Kramer" became "Kramer Kramer". Fixed in [#98](https://github.com/GeneralJeb/RP-Card-Vault/pull/98) (1.8.9): only what the pattern adds is tidied.
+- **Looked at, fine:**
+  - Moves and renames copy, compare byte for byte, then remove the original.
+  - A move into the same folder under another spelling is a no-op.
+  - Reference folders are refused everywhere, their backups included.
+  - Rename keeps names unique per folder, whatever their case.
+  - `safeFileName` avoids Windows device names and trailing dots.
+
+**Feature built:** round 1, proposal 1, "Strip card text and other hidden data from photos sent to the agent chat": [#99](https://github.com/GeneralJeb/RP-Card-Vault/pull/99) (1.9.0). Proposal 3 (bulk-run cost) is ticked and comes next run.
+
+**Queued:** the Dupes mislabel (unchanged).
+
 ## 2026-11-27 — section 3, Duplicates, versions and filing from the inbox
 
 **Read:**
